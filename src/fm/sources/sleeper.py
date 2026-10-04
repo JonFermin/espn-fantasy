@@ -306,11 +306,14 @@ def parse_trending(payload: bytes) -> list[TrendingPlayer]:
 
 
 def parse_stat_lines(payload: bytes, *, drop_placeholders: bool) -> list[SleeperStatLine]:
-    """Stat lines from a projections or stats payload. A non-list payload or one with no valid entry is a schema error
-    (that is how the legacy endpoint broke); individual bad entries are skipped and counted."""
+    """Stat lines from a projections or stats payload. A non-list payload, or a non-empty list with no stat line in it
+    (every entry invalid or, with ``drop_placeholders``, ADP-only), is a schema error: that is how the legacy endpoint
+    broke, and a 200 made of placeholders must never become the cached good copy. An empty list is an empty week.
+    Individual bad entries are skipped and counted."""
     items = _as_list_of_dicts(parse_json(payload), "sleeper stat lines")
     lines: list[SleeperStatLine] = []
     skipped = 0
+    placeholders = 0
     for item in items:
         try:
             line = SleeperStatLine.model_validate(item)
@@ -318,10 +321,14 @@ def parse_stat_lines(payload: bytes, *, drop_placeholders: bool) -> list[Sleeper
             skipped += 1
             continue
         if drop_placeholders and line.is_placeholder:
+            placeholders += 1
             continue
         lines.append(line)
-    if items and not lines and skipped == len(items):
-        raise SourceSchemaError(f"sleeper stat lines: none of {len(items)} entries validated")
+    if items and not lines:
+        raise SourceSchemaError(
+            f"sleeper stat lines: none of {len(items)} entries validated as a stat line "
+            f"({skipped} invalid, {placeholders} ADP-only placeholders)"
+        )
     if skipped:
         logger.warning("sleeper stat lines: skipped %d of %d entries that did not validate", skipped, len(items))
     return lines

@@ -18,6 +18,7 @@ import respx
 
 from fm.sources.base import RateLimiter, SourceSchemaError, SourceUnavailable
 from fm.sources.sleeper import (
+    ADP_PREFIXES,
     SleeperPlayer,
     SleeperSnapCount,
     SleeperSource,
@@ -195,10 +196,15 @@ def test_projections_are_stat_lines_without_placeholders(source: SleeperSource, 
 def test_placeholder_detection() -> None:
     adp_only = SleeperStatLine(player_id="1", season=2026, week=4, category="proj", stats={"adp_dd_ppr": 1000.0})
     assert adp_only.is_placeholder is True
-    assert parse_stat_lines(json.dumps([adp_only.model_dump(by_alias=True)]).encode(), drop_placeholders=True) == []
-    assert (
-        len(parse_stat_lines(json.dumps([adp_only.model_dump(by_alias=True)]).encode(), drop_placeholders=False)) == 1
-    )
+    only_placeholders = json.dumps([adp_only.model_dump(by_alias=True)]).encode()
+    # Dropping placeholders from a list that holds nothing else leaves no stat line. That is a broken endpoint, not an
+    # empty week, so it must raise instead of returning [] (which Source.fetch would then cache as the good copy).
+    with pytest.raises(SourceSchemaError, match=r"none of 1 entries validated as a stat line \(0 invalid, 1 ADP-only"):
+        parse_stat_lines(only_placeholders, drop_placeholders=True)
+    assert len(parse_stat_lines(only_placeholders, drop_placeholders=False)) == 1
+    real = SleeperStatLine(player_id="2", season=2026, week=4, category="proj", stats={"rec": 4.0, "rec_yd": 51.5})
+    mixed = json.dumps([adp_only.model_dump(by_alias=True), real.model_dump(by_alias=True)]).encode()
+    assert [line.player_id for line in parse_stat_lines(mixed, drop_placeholders=True)] == ["2"]
 
 
 def test_week_stats_and_same_day_snaps(source: SleeperSource, routes: Routes) -> None:
@@ -254,6 +260,45 @@ def test_projections_serve_the_last_good_copy_when_the_endpoint_breaks(
     assert (stale.stale, stale.degraded, stale.cached, stale.as_of) == (True, False, True, T0)
     assert [line.player_id for line in stale.data] == [line.player_id for line in good.data]
     assert stale.warnings and "did not parse" in stale.warnings[0]
+
+
+def placeholders_only() -> bytes:
+    """The recorded projections payload cut down to its two ADP-only entries: a 200 that carries no projection."""
+    items = json.loads(fixture("projections_2026_4.json"))
+    kept = [item for item in items if all(key.startswith(ADP_PREFIXES) for key in item["stats"])]
+    assert len(kept) == 2
+    return json.dumps(kept).encode()
+
+
+def test_projections_degrade_when_every_entry_is_a_placeholder(
+    source: SleeperSource, routes: Routes, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The legacy break in list form: 200, valid entries, but every one ADP-only. Returning [] here would look like a
+    # quiet week and the junk would be cached as the good copy; it must degrade with the reason in warnings instead.
+    routes.projections.mock(return_value=httpx.Response(200, content=placeholders_only()))
+    with caplog.at_level(logging.WARNING, logger="fm.sources.sleeper"):
+        result = source.projections(2026, 4)
+    assert (result.degraded, result.stale, result.cached, result.data, result.as_of) == (True, False, False, [], T0)
+    assert "2 ADP-only placeholders" in result.warnings[0] and "continuing without it" in caplog.text
+    cache = tmp_path / "cache" / "sleeper" / "projections"
+    assert (cache / "regular_2026_w4.rejected.json").read_bytes() == placeholders_only()
+    assert not (cache / "regular_2026_w4.json").exists()
+
+
+def test_projections_keep_the_last_good_copy_when_every_entry_is_a_placeholder(
+    source: SleeperSource, routes: Routes, clock: FakeClock, tmp_path: Path
+) -> None:
+    good = source.projections(2026, 4)
+    clock.advance(minutes=31)
+    routes.projections.mock(return_value=httpx.Response(200, content=placeholders_only()))
+    stale = source.projections(2026, 4)
+    assert (stale.stale, stale.degraded, stale.cached, stale.as_of) == (True, False, True, T0)
+    assert len(stale.data) == 10 and [line.player_id for line in stale.data] == [line.player_id for line in good.data]
+    assert "2 ADP-only placeholders" in stale.warnings[0]
+    cache = tmp_path / "cache" / "sleeper" / "projections"
+    assert (cache / "regular_2026_w4.json").read_bytes() == fixture("projections_2026_4.json")
+    assert (cache / "regular_2026_w4.rejected.json").read_bytes() == placeholders_only()
+    assert routes.projections.call_count == 2
 
 
 def test_snap_counts_degrade_with_week_stats(source: SleeperSource, routes: Routes) -> None:
