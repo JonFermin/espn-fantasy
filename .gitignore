@@ -20,3 +20,7 @@ audit/
 # Browser captures can contain ESPN session cookies
 *.har
 trace*.zip
+
+# Roadmap run logs (local only)
+auto-roadmap.log
+auto-roadmap-summary.md
