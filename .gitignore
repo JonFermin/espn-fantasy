@@ -16,7 +16,11 @@ build/
 browser-profile/
 audit/
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # Browser captures can contain ESPN session cookies
 *.har

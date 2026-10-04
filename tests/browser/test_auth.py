@@ -1,7 +1,7 @@
 """Cookie harvest from a fake browser context, session expiry detection, the login wait loop, and session renewal.
 
-Cookie values here are obviously fake. No browser starts and nothing touches ESPN: an autouse guard turns any launch
-that slipped past a monkeypatch into a test failure.
+Cookie values here are obviously fake. No browser starts and nothing touches ESPN: the autouse guard in
+``tests/browser/conftest.py`` turns any launch that slipped past a monkeypatch into a test failure.
 """
 
 from __future__ import annotations
@@ -12,12 +12,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from re import Pattern
 from types import SimpleNamespace
-from typing import Any, NoReturn
+from typing import Any
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
 
-from fm.browser import session as browser_session
 from fm.browser.session import LaunchOptions
 from fm.espn import auth
 from fm.espn.auth import (
@@ -41,16 +40,6 @@ NOW = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
 S2 = "AEBfake-espn_s2-value-not-a-real-session"
 RENEWED_S2 = "AEBfake-espn_s2-value-minted-by-a-second-sign-in"
 SWID = "{FAKE0000-0000-4000-8000-000000000001}"
-
-
-@pytest.fixture(autouse=True)
-def _no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missed monkeypatch must fail the test, not start a real browser on the temp profile."""
-
-    def refuse() -> NoReturn:
-        raise AssertionError("real browser launch in a unit test; stub open_browser instead")
-
-    monkeypatch.setattr(browser_session, "sync_playwright", refuse)
 
 
 def cookie(name: str, value: str, *, domain: str = ".espn.com", expires: float = -1, path: str = "/") -> dict[str, Any]:

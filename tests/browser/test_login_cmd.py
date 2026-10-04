@@ -1,8 +1,8 @@
 """``fm login``: the manual sign-in flow, renewal of a saved session, and ``--check``, driven through the CLI.
 
-``open_browser`` is replaced in both modules that import it, so no browser starts and nothing touches ESPN. An autouse
-guard makes a launch that slipped past the stub fail loudly, and the CLI is invoked without exception capture so a
-crash inside the command is a traceback here, not a silent exit code.
+``open_browser`` is replaced in both modules that import it, so no browser starts and nothing touches ESPN. The autouse
+guard in ``tests/browser/conftest.py`` makes a launch that slipped past the stub fail loudly, and the CLI is invoked
+without exception capture so a crash inside the command is a traceback here, not a silent exit code.
 """
 
 from __future__ import annotations
@@ -14,14 +14,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from re import Pattern
-from typing import Any, NoReturn
+from typing import Any
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
 from typer.testing import CliRunner, Result
 
 from fm import paths
-from fm.browser import session as browser_session
 from fm.browser.session import BrowserUnavailableError, LaunchOptions
 from fm.cli import app
 from fm.commands import login as login_cmd
@@ -68,16 +67,6 @@ def signed_in(days: float = 100) -> list[dict[str, Any]]:
 def renewed(days: float = 400) -> list[dict[str, Any]]:
     """The jar after a second sign-in: a different ``espn_s2``, as every real sign-in mints one."""
     return [*ANONYMOUS, cookie("espn_s2", RENEWED_S2, expires=in_days(days))]
-
-
-@pytest.fixture(autouse=True)
-def _no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missed monkeypatch must fail the test, not start a headed Edge on the profile and visit ESPN."""
-
-    def refuse() -> NoReturn:
-        raise AssertionError("real browser launch in a unit test; install the `browser` fixture")
-
-    monkeypatch.setattr(browser_session, "sync_playwright", refuse)
 
 
 class Clock:

@@ -19,7 +19,17 @@ from typing import Any
 
 import pytest
 
-SECRET_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "TELEGRAM_BOT_TOKEN", "ODDS_API_KEY")
+# Every variable fm.config reads from .env (fm.config.SECRET_ENV_VARS) plus the SDK's auth token. Kept as a literal
+# rather than imported so a broken fm.config cannot take the whole harness down.
+SECRET_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ODDS_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "NTFY_TOPIC",
+    "NTFY_REPLY_TOPIC",
+)
 
 
 class NetworkDisabledError(RuntimeError):

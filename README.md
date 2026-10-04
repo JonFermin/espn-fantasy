@@ -7,8 +7,11 @@ A personal assistant GM for ESPN fantasy football (NFL) and basketball (NBA).
 - Claude triages news and explains each decision.
 - Approved moves are carried out through a logged-in browser session and verified afterward.
 
-**Status:** early build. Roadmap Phase 1 is done: a uv-managed Python 3.13 project with the `fm` CLI scaffold
-(auto-discovered command modules, runtime paths, offline test harness). Nothing talks to ESPN yet.
+**Status:** early build. Roadmap Phases 1 and 2 are done: a uv-managed Python 3.13 project with the `fm` CLI scaffold
+(auto-discovered command modules, runtime paths, offline test harness), config loading with `fm config check`, the
+SQLite store and v1 schema, ESPN ID maps and the league-settings parser, a persistent browser profile with `fm login`
+for the manual ESPN sign-in, and cached source adapters for nflverse and Sleeper. Nothing reads or writes ESPN league
+data yet.
 
 - [`docs/DESIGN.md`](docs/DESIGN.md): architecture, data sources, safety rules, phase plan
 - [`ROADMAP.md`](ROADMAP.md): 47 dependency-ordered build tasks
