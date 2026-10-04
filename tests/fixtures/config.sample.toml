@@ -1,0 +1,42 @@
+# espn-fantasy configuration template (DESIGN.md section 14).
+# Copy to ~/.config/espn-fantasy/config.toml and fill in your IDs; `fm config check` validates the result.
+# Secrets never go in this file: API keys, bot tokens and ntfy topics live in .env next to it.
+# Every ID and name below is a placeholder, not a real league.
+
+[[league]]
+key = "nfl"                   # short name used on the command line (fm sync --league nfl)
+sport = "nfl"                 # nfl | nba
+espn_league_id = 1234567      # leagueId=... in the league URL
+season = 2026
+team_id = 4                   # teamId=... on your team page
+
+[league.policy]
+bench_inactive = "auto"       # off | approve | auto (auto only fires at T-15 when unanswered)
+lineup = "approve"            # off | approve | auto
+add_drop = "approve"          # off | approve
+waiver = "approve"            # off | approve
+max_transactions_per_week = 3
+max_faab_pct_per_bid = 0.35   # fraction of the season FAAB budget
+untouchables = ["Sample Player", 4242424]  # player names or ESPN player IDs; resolved at sync
+# Trades are approval-only and have no setting here (CLAUDE.md).
+
+[[league]]
+key = "nba"
+sport = "nba"
+espn_league_id = 7654321
+season = 2027                 # ESPN labels NBA seasons by end year; confirm with seasonId= in the URL
+team_id = 9
+
+[league.policy]
+bench_inactive = "auto"
+lineup = "approve"
+add_drop = "approve"          # streaming adds must be approved before the day's first tip
+max_transactions_per_week = 7 # our cap; ESPN's own acquisition limit is read from settings
+untouchables = []
+
+[llm]
+model = "claude-opus-5-5"
+daily_budget_usd = 2.0
+
+[notify]
+channel = "telegram"          # telegram | ntfy
