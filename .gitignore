@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Secrets and runtime state. These belong in ~/.config/espn-fantasy-manager, never in the repo.
+.env
+.env.*
+browser-profile/
+audit/
+*.db
+*.sqlite
+
+# Browser captures can contain ESPN session cookies
+*.har
+trace*.zip
