@@ -16,3 +16,7 @@ A personal assistant GM for ESPN fantasy football (NFL) and basketball (NBA).
 > **Note:** ESPN has no public write API, and automating it goes against the letter of Disney's Terms of Use (see
 > DESIGN §6.4). This is a single-user tool. It acts only on its owner's team, at low volume, and every trade needs
 > human approval.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

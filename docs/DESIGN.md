@@ -120,7 +120,7 @@ Ordered by value per unit of effort. The phase plan follows this order.
 
 ### 6.2 Session and auth
 
-- Use a dedicated persistent browser profile at `~/.config/espn-fantasy-manager/browser-profile/`. Don't put it under
+- Use a dedicated persistent browser profile at `~/.config/espn-fantasy/browser-profile/`. Don't put it under
   `%APPDATA%`: MSIX virtualization already caused problems for software-factory there.
 - `fm login` opens a headed browser and you sign in once by hand, which covers any one-time code or captcha. The
   session persists in the profile.
@@ -491,14 +491,14 @@ verification, artifacts`. Its status runs `proposed → approved | rejected | ex
 
 ## 14. Storage, config, layout
 
-- `~/.config/espn-fantasy-manager/`: `config.toml`, `.env` (`ANTHROPIC_API_KEY`, `ODDS_API_KEY`, and either
+- `~/.config/espn-fantasy/`: `config.toml`, `.env` (`ANTHROPIC_API_KEY`, `ODDS_API_KEY`, and either
   `TELEGRAM_BOT_TOKEN` or the ntfy topic names), `browser-profile/`, `state.db` (SQLite), and `audit/` (traces,
   screenshots).
-- `~/.cache/espn-fantasy-manager/`: raw source responses and parquet snapshots. Safe to delete.
+- `~/.cache/espn-fantasy/`: raw source responses and parquet snapshots. Safe to delete.
 - In the repo: code plus scrubbed fixtures only. No secrets and no real manager names.
 
 ```toml
-# ~/.config/espn-fantasy-manager/config.toml
+# ~/.config/espn-fantasy/config.toml
 [[league]]
 key = "nfl"
 sport = "nfl"                 # nfl | nba
@@ -538,7 +538,7 @@ channel = "telegram"          # telegram | ntfy
 ```
 
 ```
-espn-fantasy-manager/
+espn-fantasy/
   pyproject.toml  CLAUDE.md  ROADMAP.md  docs/DESIGN.md
   data/           blend_weights.toml, id_overrides*.csv, stadiums.csv
   src/fm/

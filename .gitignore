@@ -9,7 +9,7 @@ dist/
 build/
 *.egg-info/
 
-# Secrets and runtime state. These belong in ~/.config/espn-fantasy-manager, never in the repo.
+# Secrets and runtime state. These belong in ~/.config/espn-fantasy, never in the repo.
 .env
 .env.*
 browser-profile/

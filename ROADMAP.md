@@ -31,7 +31,7 @@
   - `paths.py`: config and cache dirs, overridable via `FM_CONFIG_DIR` / `FM_CACHE_DIR`.
   - ruff, pyright, and pytest config.
   - Declares all v1 dependencies (httpx, pydantic, typer, rich, playwright, polars, numpy, scipy, nflreadpy, nba_api, espn-api, feedparser, pdfplumber, anthropic, fastmcp, respx, hypothesis).
-  - Pins Python 3.13, because `nba_api` supports ≤ 3.13.
+  - Pins Python 3.13, because `nba_api` supports ≤ 3.13; declares `license = "MIT"`.
   AC: build exits 0; `uv run fm --help` exits 0; test and lint commands pass
 
 ## Phase 2

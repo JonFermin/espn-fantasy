@@ -25,9 +25,9 @@ order and status live in `ROADMAP.md`.
 
 ## Paths
 
-- Config, state DB, browser profile, audit artifacts: `~/.config/espn-fantasy-manager/`. Not `%APPDATA%`, because MSIX
+- Config, state DB, browser profile, audit artifacts: `~/.config/espn-fantasy/`. Not `%APPDATA%`, because MSIX
   virtualizes it.
-- Deletable cache: `~/.cache/espn-fantasy-manager/`.
+- Deletable cache: `~/.cache/espn-fantasy/`.
 - Never commit secrets, cookies, browser profiles, or unscrubbed fixtures (real manager names).
 
 ## Testing
