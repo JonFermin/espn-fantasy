@@ -25,34 +25,28 @@
 - Lint: `uv run ruff check . && uv run pyright`
 - Dev: `uv run fm --help`
 
-## Phase 1
-- TODO [P0] [M] #1: Scaffold the uv project — scope: pyproject.toml, uv.lock, src/fm/__init__.py, src/fm/cli.py, src/fm/paths.py, src/fm/commands/__init__.py, tests/conftest.py
-  - `src/fm` package and typer `fm` entry point that auto-discovers command modules in `src/fm/commands/`.
-  - `paths.py`: config and cache dirs, overridable via `FM_CONFIG_DIR` / `FM_CACHE_DIR`.
-  - ruff, pyright, and pytest config.
-  - Declares all v1 dependencies (httpx, pydantic, typer, rich, playwright, polars, numpy, scipy, nflreadpy, nba_api, espn-api, feedparser, pdfplumber, anthropic, fastmcp, respx, hypothesis).
-  - Pins Python 3.13, because `nba_api` supports ≤ 3.13; declares `license = "MIT"`.
-  AC: build exits 0; `uv run fm --help` exits 0; test and lint commands pass
+## Phase 1 — DONE
+Built: uv project (`espn-fantasy`, package `fm`, Python 3.13 pinned, MIT) declaring every v1 dependency, with the typer `fm` root that auto-discovers command modules, `fm version` as the reference command, `fm.paths` for config/cache/state/profile/audit dirs with `FM_CONFIG_DIR`/`FM_CACHE_DIR` overrides, pytest/ruff/pyright config, and a test harness (18 tests). Patterns: one module per command group in `src/fm/commands/` exposing `register(root)` — nobody edits `cli.py`; all mutable paths come from `fm.paths`; `tests/conftest.py` autouse fixtures isolate dirs per test, drop inherited API keys, and block non-loopback sockets (sync and asyncio) so unit tests stay offline. Key files: pyproject.toml, uv.lock, src/fm/cli.py, src/fm/paths.py, src/fm/commands/__init__.py, src/fm/commands/version.py, tests/conftest.py. Skipped: none. (1/1 tasks completed, 0 skipped)
 
 ## Phase 2
-- TODO [P0] [S] #2: Config loading — scope: src/fm/config.py, src/fm/commands/config_cmd.py, tests/test_config.py, tests/fixtures/config.sample.toml — depends: #1
+- TODO [P0] [S] #2: Config loading — scope: src/fm/config.py, src/fm/commands/config_cmd.py, tests/test_config.py, tests/fixtures/config.sample.toml — depends: #1 ✓
   - Reads `config.toml` + `.env` into pydantic models (leagues, per-league policy, llm, notify).
   - `fm config check` validates the config.
   AC: test command passes for tests/test_config.py (valid, invalid, dir override); `uv run fm config check --path tests/fixtures/config.sample.toml` exits 0
-- TODO [P0] [M] #3: SQLite store — scope: src/fm/store/, tests/store/ — depends: #1
+- TODO [P0] [M] #3: SQLite store — scope: src/fm/store/, tests/store/ — depends: #1 ✓
   - Migration runner and the full v1 schema: leagues, settings, teams, players, player_ids, roster snapshots, projections (stat lines per source and period), availability, news items, news signals, market values, proposals, executions, decision evals, llm_usage, raw snapshot index.
   - Typed repositories over those tables.
   AC: test command passes for tests/store/ (fresh migrate, idempotent re-migrate, round-trip per table)
-- TODO [P0] [M] #4: ESPN ID maps and settings parser — scope: src/fm/espn/ids.py, src/fm/espn/settings.py, tests/espn/test_settings.py, tests/fixtures/espn/ — depends: #1
+- TODO [P0] [M] #4: ESPN ID maps and settings parser — scope: src/fm/espn/ids.py, src/fm/espn/settings.py, tests/espn/test_settings.py, tests/fixtures/espn/ — depends: #1 ✓
   - `ids.py`: stat, lineup-slot, position, pro-team, and injury-status maps for `ffl` and `fba`.
   - `settings.py` parses into `LeagueSettings`: scoring items, slot counts, lock type, acquisition/FAAB/waiver timing, trade deadline, playoff weeks, points vs categories.
   AC: test command passes for tests/espn/test_settings.py on NFL PPR, NBA points, and NBA 9-cat fixture settings
-- TODO [P0] [M] #5: Browser session and login — scope: src/fm/browser/session.py, src/fm/espn/auth.py, src/fm/commands/login.py, tests/browser/ — depends: #1
+- TODO [P0] [M] #5: Browser session and login — scope: src/fm/browser/session.py, src/fm/espn/auth.py, src/fm/commands/login.py, tests/browser/ — depends: #1 ✓
   - Persistent Playwright profile in the config dir, using the installed Edge/Chrome channel.
   - `fm login` opens a headed browser for a manual sign-in.
   - Harvests the `espn_s2` / `SWID` cookies and detects session expiry.
   AC: test command passes for tests/browser/ (cookie harvest from a fake context, expiry detection); `uv run fm login --help` exits 0
-- TODO [P0] [M] #6: Source adapter base and NFL sources — scope: src/fm/sources/base.py, src/fm/sources/nflverse.py, src/fm/sources/sleeper.py, tests/sources/test_base.py, tests/sources/test_nflverse.py, tests/sources/test_sleeper.py, tests/fixtures/sources/ — depends: #1
+- TODO [P0] [M] #6: Source adapter base and NFL sources — scope: src/fm/sources/base.py, src/fm/sources/nflverse.py, src/fm/sources/sleeper.py, tests/sources/test_base.py, tests/sources/test_nflverse.py, tests/sources/test_sleeper.py, tests/fixtures/sources/ — depends: #1 ✓
   - `base.py`: TTL cache, `as_of` stamps, rate limiting, raw capture.
   - nflverse via `nflreadpy` (Polars; `nfl_data_py` is archived): weekly stats, snap counts, injuries/practice, depth charts, schedules with lines, `ff_playerids`, `ff_opportunity`, `ff_rankings` (FantasyPros ECR).
   - Sleeper: player DB, trending adds/drops, and projections + same-day snaps from the undocumented `api.sleeper.com` endpoints. Degrades gracefully when those break; the old `api.sleeper.app` projections endpoint broke in Sept 2026.
