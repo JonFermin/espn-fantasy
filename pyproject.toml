@@ -1,0 +1,66 @@
+[project]
+name = "espn-fantasy"
+version = "0.1.0"
+description = "Personal assistant GM for ESPN fantasy football (NFL) and basketball (NBA)."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "anthropic>=1.11.0",
+    "espn-api>=1.0.0",
+    "fastmcp>=3.4.8",
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "nba-api>=1.11.4",
+    "nflreadpy>=0.1.5",
+    "numpy>=2.5.3",
+    "pdfplumber>=0.11.10",
+    "playwright>=1.63.0",
+    "polars>=1.44.2",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.4",
+    "rich>=15.0.0",
+    "scipy>=1.18.1",
+    "typer>=0.27.2",
+    "tzdata>=2026.5",
+]
+
+[project.scripts]
+fm = "fm.cli:app"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.168.3",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "respx>=0.23.1",
+    "ruff>=0.16.10",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "fm"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Test directories have no __init__.py and duplicate test basenames must work across them.
+addopts = "--import-mode=importlib"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
