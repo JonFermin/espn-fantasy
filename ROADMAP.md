@@ -28,61 +28,40 @@
 ## Phase 1 — DONE
 Built: uv project (`espn-fantasy`, package `fm`, Python 3.13 pinned, MIT) declaring every v1 dependency, with the typer `fm` root that auto-discovers command modules, `fm version` as the reference command, `fm.paths` for config/cache/state/profile/audit dirs with `FM_CONFIG_DIR`/`FM_CACHE_DIR` overrides, pytest/ruff/pyright config, and a test harness (18 tests). Patterns: one module per command group in `src/fm/commands/` exposing `register(root)` — nobody edits `cli.py`; all mutable paths come from `fm.paths`; `tests/conftest.py` autouse fixtures isolate dirs per test, drop inherited API keys, and block non-loopback sockets (sync and asyncio) so unit tests stay offline. Key files: pyproject.toml, uv.lock, src/fm/cli.py, src/fm/paths.py, src/fm/commands/__init__.py, src/fm/commands/version.py, tests/conftest.py. Skipped: none. (1/1 tasks completed, 0 skipped)
 
-## Phase 2
-- TODO [P0] [S] #2: Config loading — scope: src/fm/config.py, src/fm/commands/config_cmd.py, tests/test_config.py, tests/fixtures/config.sample.toml — depends: #1 ✓
-  - Reads `config.toml` + `.env` into pydantic models (leagues, per-league policy, llm, notify).
-  - `fm config check` validates the config.
-  AC: test command passes for tests/test_config.py (valid, invalid, dir override); `uv run fm config check --path tests/fixtures/config.sample.toml` exits 0
-- TODO [P0] [M] #3: SQLite store — scope: src/fm/store/, tests/store/ — depends: #1 ✓
-  - Migration runner and the full v1 schema: leagues, settings, teams, players, player_ids, roster snapshots, projections (stat lines per source and period), availability, news items, news signals, market values, proposals, executions, decision evals, llm_usage, raw snapshot index.
-  - Typed repositories over those tables.
-  AC: test command passes for tests/store/ (fresh migrate, idempotent re-migrate, round-trip per table)
-- TODO [P0] [M] #4: ESPN ID maps and settings parser — scope: src/fm/espn/ids.py, src/fm/espn/settings.py, tests/espn/test_settings.py, tests/fixtures/espn/ — depends: #1 ✓
-  - `ids.py`: stat, lineup-slot, position, pro-team, and injury-status maps for `ffl` and `fba`.
-  - `settings.py` parses into `LeagueSettings`: scoring items, slot counts, lock type, acquisition/FAAB/waiver timing, trade deadline, playoff weeks, points vs categories.
-  AC: test command passes for tests/espn/test_settings.py on NFL PPR, NBA points, and NBA 9-cat fixture settings
-- TODO [P0] [M] #5: Browser session and login — scope: src/fm/browser/session.py, src/fm/espn/auth.py, src/fm/commands/login.py, tests/browser/ — depends: #1 ✓
-  - Persistent Playwright profile in the config dir, using the installed Edge/Chrome channel.
-  - `fm login` opens a headed browser for a manual sign-in.
-  - Harvests the `espn_s2` / `SWID` cookies and detects session expiry.
-  AC: test command passes for tests/browser/ (cookie harvest from a fake context, expiry detection); `uv run fm login --help` exits 0
-- TODO [P0] [M] #6: Source adapter base and NFL sources — scope: src/fm/sources/base.py, src/fm/sources/nflverse.py, src/fm/sources/sleeper.py, tests/sources/test_base.py, tests/sources/test_nflverse.py, tests/sources/test_sleeper.py, tests/fixtures/sources/ — depends: #1 ✓
-  - `base.py`: TTL cache, `as_of` stamps, rate limiting, raw capture.
-  - nflverse via `nflreadpy` (Polars; `nfl_data_py` is archived): weekly stats, snap counts, injuries/practice, depth charts, schedules with lines, `ff_playerids`, `ff_opportunity`, `ff_rankings` (FantasyPros ECR).
-  - Sleeper: player DB, trending adds/drops, and projections + same-day snaps from the undocumented `api.sleeper.com` endpoints. Degrades gracefully when those break; the old `api.sleeper.app` projections endpoint broke in Sept 2026.
-  AC: test command passes for tests/sources/ test_base, test_nflverse, test_sleeper using recorded responses (no network)
+## Phase 2 — DONE
+Built: `fm.config` loads `config.toml` + the `.env` beside it into frozen pydantic models (`Config` → `League` with `Policy`, `Llm`, `Notify`, `Secrets`), rejecting unknown keys, `auto` outside `bench_inactive`/`lineup`, any `trade*` policy key, duplicate leagues and non-positive IDs with one located line per problem, plus `fm config check [--path]`; `fm.store` with `Database` (autocommit sqlite3, WAL, foreign keys, `BEGIN IMMEDIATE` transactions nesting as savepoints), numbered `NNNN_name.sql` migrations recorded in `schema_migrations` (`0001_v1_schema.sql`: every v1 table, all STRICT with CHECK constraints and cascading FKs), frozen row models with fixed-width UTC timestamps and self-parsing JSON columns, one typed repository per table, and the `Store.open()` facade that migrates on open; `fm.espn.ids` read-only stat/slot/position/pro-team/injury maps for `ffl` and `fba` with a `Game` enum, and `fm.espn.settings` parsing `mSettings` into `LeagueSettings` (scoring items, points vs categories, slots, lock type, acquisition/FAAB/waiver timing, trade deadline, playoff periods); `fm.browser.session` persistent profile on the installed Edge-then-Chrome channel, `fm.espn.auth` cookie harvest / expiry / renewal (clears espn.com cookies and waits for a new `espn_s2`), and `fm login [--check] [--channel] [--timeout]`; `fm.sources.base` `Source`/`HttpSource` with TTL cache, `as_of` stamps, rate limiting, raw capture under `cache/sources/`, bounded 429/5xx retries and `Fetched[T]` (cached/stale/degraded/warnings), with nflverse (`nflreadpy`, 8 datasets) and Sleeper (documented + undocumented endpoints, graceful degradation) adapters over recorded fixtures. 292 tests. Patterns: secrets never echo (SecretStr, `.env` errors name the path only); every table has a frozen model whose field names equal its columns; ESPN ids and league settings are data, never literals; `SessionStatus` is OK/EXPIRING/EXPIRED and a missing session is `NotLoggedInError`; adapters never raise on a degraded upstream — they serve the last good copy as stale or an empty degraded result, and rejected payloads never overwrite a good copy; `tests/browser/conftest.py` fails any test that would launch a real browser; `tests/conftest.py` drops every `.env` secret. Key files: src/fm/config.py, src/fm/commands/config_cmd.py, src/fm/store/db.py, src/fm/store/models.py, src/fm/store/repos.py, src/fm/store/migrations/0001_v1_schema.sql, src/fm/espn/ids.py, src/fm/espn/settings.py, src/fm/browser/session.py, src/fm/espn/auth.py, src/fm/commands/login.py, src/fm/sources/base.py, src/fm/sources/nflverse.py, src/fm/sources/sleeper.py, tests/browser/conftest.py. Skipped: none. (5/5 tasks completed, 0 skipped)
 
 ## Phase 3
-- TODO [P0] [M] #7: Sport plugin interface, NFL plugin, decision registry — scope: src/fm/sports/base.py, src/fm/sports/nfl.py, src/fm/decide/registry.py, tests/sports/test_nfl.py — depends: #4
+- TODO [P0] [M] #7: Sport plugin interface, NFL plugin, decision registry — scope: src/fm/sports/base.py, src/fm/sports/nfl.py, src/fm/decide/registry.py, tests/sports/test_nfl.py — depends: #4 ✓
   - Sport protocol: stat schema, slot eligibility, scoring periods, per-game lock times from the pro schedule.
   - NFL implementation, covering FLEX and OP.
   - `register(sport, kind, fn)` registry for decision modules.
   AC: test command passes for tests/sports/test_nfl.py (FLEX/OP eligibility, lock time per game from a fixture schedule, registry lookup)
-- TODO [P0] [M] #8: Proposals and policy — scope: src/fm/proposals/, src/fm/commands/proposals.py, tests/proposals/ — depends: #2, #3
+- TODO [P0] [M] #8: Proposals and policy — scope: src/fm/proposals/, src/fm/commands/proposals.py, tests/proposals/ — depends: #2 ✓, #3 ✓
   - Proposal lifecycle (proposed → approved/rejected/expired → executing → verified/failed).
   - Per-kind policy defaults; trade kinds are hard-coded approve-only.
   - Guardrails: untouchables, weekly caps, FAAB % cap, league allowlist, expiry at deadline.
   - Commands: `fm proposals list|approve|reject`, `fm pause|resume`.
   AC: test command passes for tests/proposals/ (trade kinds reject `auto`, expiry, guardrails); `uv run fm proposals list` exits 0 on an empty DB
-- TODO [P0] [M] #9: ESPN read client — scope: src/fm/espn/client.py, src/fm/espn/models.py, tests/espn/test_client.py, tests/fixtures/espn/ — depends: #2, #4, #5
+- TODO [P0] [M] #9: ESPN read client — scope: src/fm/espn/client.py, src/fm/espn/models.py, tests/espn/test_client.py, tests/fixtures/espn/ — depends: #2 ✓, #4 ✓, #5 ✓
   - httpx client on `lm-api-reads.fantasy.espn.com/apis/v3/games/{ffl|fba}/…` for the views in DESIGN §6.1: settings, teams, rosters, matchups, free-agent pool (`X-Fantasy-Filter`), projections, transactions with bids, pending offers (both candidate views), and pro schedules.
   - Timeouts and 429 backoff.
   - Parses responses into typed models and writes raw responses to the cache.
   AC: test command passes for tests/espn/test_client.py with a mocked transport covering every view
-- TODO [P0] [M] #10: NFL player ID crosswalk — scope: src/fm/model/ids.py, data/id_overrides.csv, tests/model/test_ids.py — depends: #3, #6
+- TODO [P0] [M] #10: NFL player ID crosswalk — scope: src/fm/model/ids.py, data/id_overrides.csv, tests/model/test_ids.py — depends: #3 ✓, #6 ✓
   - Maps ESPN ↔ gsis/sleeper IDs via `ff_playerids`, then applies the overrides file.
   - Reports unmapped players; raises when a rostered player is unmapped.
   AC: test command passes for tests/model/test_ids.py (mapping, overrides, unmapped-rostered gate)
-- TODO [P1] [M] #11: NBA source adapters — scope: src/fm/sources/nba_stats.py, src/fm/sources/nba_schedule.py, src/fm/sources/nba_injuries.py, src/fm/sources/darko.py, tests/sources/test_nba_stats.py, tests/sources/test_nba_schedule.py, tests/sources/test_nba_injuries.py, tests/sources/test_darko.py — depends: #6
+- TODO [P1] [M] #11: NBA source adapters — scope: src/fm/sources/nba_stats.py, src/fm/sources/nba_schedule.py, src/fm/sources/nba_injuries.py, src/fm/sources/darko.py, tests/sources/test_nba_stats.py, tests/sources/test_nba_schedule.py, tests/sources/test_nba_injuries.py, tests/sources/test_darko.py — depends: #6 ✓
   - `nba_api` with the full header set and ~0.6 s pacing (home IP only): league game logs, Base/Advanced/Usage splits, on/off.
   - CDN `scheduleLeagueV2.json` → games per day/week and back-to-backs; flags not-yet-scheduled NBA Cup games.
   - ESPN injuries JSON for status; official PDFs for pregame detail (optional).
   - DARKO projections CSV, including projected minutes.
   AC: test command passes for the four NBA source tests using recorded responses
-- TODO [P1] [S] #12: Market value adapter — scope: src/fm/sources/market.py, tests/sources/test_market.py — depends: #6
+- TODO [P1] [S] #12: Market value adapter — scope: src/fm/sources/market.py, tests/sources/test_market.py — depends: #6 ✓
   - FantasyCalc redraft values (keyed by `espnId`) plus ESPN rank and ownership trends, used only for trade-acceptance modeling.
   AC: test command passes for tests/sources/test_market.py with recorded responses
-- TODO [P2] [S] #13: Game environment adapters — scope: src/fm/sources/odds.py, src/fm/sources/weather.py, data/stadiums.csv, tests/sources/test_odds.py, tests/sources/test_weather.py — depends: #6
+- TODO [P2] [S] #13: Game environment adapters — scope: src/fm/sources/odds.py, src/fm/sources/weather.py, data/stadiums.csv, tests/sources/test_odds.py, tests/sources/test_weather.py — depends: #6 ✓
   - ESPN scoreboard first (DraftKings spread/O-U, AccuWeather, indoor flag) → implied team totals.
   - Open-Meteo forecasts at stadium coordinates (`greerreNFL/stadiums`) for outdoor games; The Odds API (free tier) optional for posted team totals.
   AC: test command passes for test_odds and test_weather (implied totals math; domes skip weather)
@@ -92,15 +71,17 @@ Built: uv project (`espn-fantasy`, package `fm`, Python 3.13 pinned, MIT) declar
   - Fetches every read view for each configured league and saves fixtures with manager names scrubbed.
   - Verifies the community-documented write payloads (DESIGN §6.3) for `ffl` and `fba` by driving each UI flow with `page.route` interception, aborting each request before it reaches ESPN.
   - Settles the open unknowns: pending-offer view, lineup-lock-type key, `espn_s2` expiry, 429 behavior.
+  - Replaces the hand-built `tests/fixtures/espn/*_settings_*.json` stand-ins from #4 with scrubbed `mSettings` captures and confirms what `fm.espn.settings` parses tolerantly: the `rosterSettings.lineupLocktimeType` values (known: `INDIVIDUAL_GAME`, `FIRST_GAME_OF_WEEK`), the `lineupSlotStatLimits` shape for NBA games-played caps, and the `acquisitionSettings.waiverHours` key.
   AC: `docs/espn-api.md` has a section per read view and per write flow (both games) plus the resolved unknowns; the test command loads every fixture under tests/fixtures/espn/real/
-- TODO [P0] [M] #15: League scoring, projection blend, basic availability — scope: src/fm/model/scoring.py, src/fm/model/projections.py, src/fm/model/availability.py, data/blend_weights.toml, tests/model/test_scoring.py, tests/model/test_projections.py, tests/model/test_availability.py — depends: #6, #7, #9, #10
+- TODO [P0] [M] #15: League scoring, projection blend, basic availability — scope: src/fm/model/scoring.py, src/fm/model/projections.py, src/fm/model/availability.py, data/blend_weights.toml, tests/model/test_scoring.py, tests/model/test_projections.py, tests/model/test_availability.py — depends: #6 ✓, #7, #9, #10
   - Stat line → fantasy points from league scoring items; categories pass through.
   - Projection-source registry and a per-stat weighted blend of ESPN + Sleeper; weights read from `data/blend_weights.toml`.
   - SD by position.
   - Designation → `p_active`.
   AC: test command passes for the three model tests (PPR, half-PPR, and custom scoring; blend weights; designation mapping)
-- TODO [P0] [M] #16: Sync job — scope: src/fm/jobs/sync.py, src/fm/commands/sync.py, tests/jobs/test_sync.py — depends: #3, #6, #9, #10
+- TODO [P0] [M] #16: Sync job — scope: src/fm/jobs/sync.py, src/fm/commands/sync.py, tests/jobs/test_sync.py — depends: #3 ✓, #6 ✓, #9, #10
   - `fm sync` pulls league state and sources into the store, running the unmapped-rostered-player gate.
+  - Surfaces `Fetched.stale` / `Fetched.degraded` and `warnings` from the source adapters (#6) in its output, since Sleeper's undocumented endpoints fail as HTTP 200 with junk rather than an error, so a silent break is noticed.
   AC: test command passes for tests/jobs/test_sync.py (fixture-backed sync populates the store; fails on an unmapped rostered player); `uv run fm sync --help` exits 0
 - TODO [P1] [M] #17: NBA plugin and crosswalk — scope: src/fm/sports/nba.py, src/fm/model/ids_nba.py, data/id_overrides_nba.csv, tests/sports/test_nba.py, tests/model/test_ids_nba.py — depends: #7, #10, #11
   - Daily scoring periods, per-game lineup locks, add/drop cutoff at the day's first tip, PG/SG/SF/PF/C/G/F/UTIL eligibility.
@@ -114,7 +95,7 @@ Built: uv project (`espn-fantasy`, package `fm`, Python 3.13 pinned, MIT) declar
   - Alert and report helpers.
   - Live use needs a Telegram account + @BotFather token, or the ntfy app; tests mock both.
   AC: test command passes for tests/notify/ with mocked Telegram and ntfy APIs (buttons rendered; callback records approval; other chats and bad tokens ignored; expired proposal can't be approved)
-- TODO [P0] [M] #19: Executor framework — scope: src/fm/executor/, src/fm/browser/flows/__init__.py, src/fm/browser/fakes.py, src/fm/commands/execute.py, tests/executor/test_framework.py — depends: #5, #8, #9
+- TODO [P0] [M] #19: Executor framework — scope: src/fm/executor/, src/fm/browser/flows/__init__.py, src/fm/browser/fakes.py, src/fm/commands/execute.py, tests/executor/test_framework.py — depends: #5 ✓, #8, #9
   - Flow protocol (API mode + UI mode) and registry.
   - API precondition checks, then run, then verify by API re-read.
   - Write safety: single-use execution token per approved proposal; no automatic write retries; hard timeouts; a timeout marks the execution `UNKNOWN` and forces a re-read.
@@ -137,7 +118,7 @@ Built: uv project (`espn-fantasy`, package `fm`, Python 3.13 pinned, MIT) declar
   - Claude news signals applied clamped to bounds and logged.
   - Late-game pivot awareness.
   AC: test command passes for tests/model/test_availability.py (trend shifts, clamping, logging)
-- TODO [P1] [M] #23: News ingest and relevance — scope: src/fm/sources/news.py, src/fm/model/relevance.py, tests/sources/test_news.py, tests/model/test_relevance.py — depends: #6, #16
+- TODO [P1] [M] #23: News ingest and relevance — scope: src/fm/sources/news.py, src/fm/model/relevance.py, tests/sources/test_news.py, tests/model/test_relevance.py — depends: #6 ✓, #16
   - ESPN news API + RotoWire RSS (poll ≤ every 10 min), deduped.
   - Relevance filter: your roster, this week's opponent, top free agents, trade targets.
   AC: test command passes for test_news and test_relevance
@@ -163,9 +144,10 @@ Built: uv project (`espn-fantasy`, package `fm`, Python 3.13 pinned, MIT) declar
 - TODO [P0] [M] #29: Tick and Windows scheduler — scope: src/fm/jobs/tick.py, src/fm/jobs/deadlines.py, src/fm/jobs/scheduler_windows.py, src/fm/commands/schedule.py, tests/jobs/test_tick.py, tests/jobs/test_scheduler_windows.py — depends: #8, #16, #19, #20, #21
   - Each tick: computes deadlines from pro schedules and league settings (international and holiday slots, the NBA first-tip add cutoff, the waiver run), runs due registered decisions once, and executes approved/auto proposals at their time.
   - Auto-bench fires only when unanswered at T-15; missed-window alerts.
+  - Session check before any execution: `fm.espn.auth.load_session()` raises `NotLoggedInError` when no session is saved and `EspnSession.status()` is only OK/EXPIRING/EXPIRED, so the tick maps the exception to its own "missing" verdict and alerts.
   - `fm schedule install|uninstall|show` via schtasks + `.cmd` wrapper + wake/battery settings (port from software-factory).
   AC: test command passes for test_tick and test_scheduler_windows (rendered commands only, nothing installed); `uv run fm schedule show` exits 0
-- TODO [P1] [M] #30: Advisor client and news triage — scope: src/fm/advisor/client.py, src/fm/advisor/news_triage.py, src/fm/advisor/prompts/, tests/advisor/test_client.py, tests/advisor/test_news_triage.py — depends: #2, #23
+- TODO [P1] [M] #30: Advisor client and news triage — scope: src/fm/advisor/client.py, src/fm/advisor/news_triage.py, src/fm/advisor/prompts/, tests/advisor/test_client.py, tests/advisor/test_news_triage.py — depends: #2 ✓, #23
   - anthropic SDK client (`claude-opus-5-5`, effort per worker, structured outputs via `messages.parse`, `stop_reason` checks, refusal fallback, prompt caching, Batches for overnight work, `llm_usage` tracking, daily budget cap).
   - News triage → stored signals.
   AC: test command passes for tests/advisor/ with a stubbed client (parsed output stored; refusal/max_tokens handled; budget cap blocks calls)
