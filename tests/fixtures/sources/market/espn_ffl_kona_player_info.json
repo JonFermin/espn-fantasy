@@ -1,0 +1,883 @@
+{
+ "players": [
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4429795,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 57,
+      "published": false,
+      "rank": 1,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 57,
+      "published": false,
+      "rank": 1,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 52,
+      "published": false,
+      "rank": 1,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 57,
+      "published": false,
+      "rank": 7,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     2,
+     3,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Jahmyr",
+    "fullName": "Jahmyr Gibbs",
+    "id": 4429795,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "0",
+    "lastName": "Gibbs",
+    "lastNewsDate": 1790549049000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 73.38,
+     "auctionValueAverageChange": 0.75,
+     "averageDraftPosition": 1.69,
+     "averageDraftPositionPercentChange": 0.01,
+     "date": 1791160220436,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.95,
+     "percentStarted": 99.86
+    },
+    "proTeamId": 8
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 1,
+     "totalRanking": 2,
+     "totalRating": 98.3
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4374302,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 52,
+      "published": false,
+      "rank": 8,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 52,
+      "published": false,
+      "rank": 8,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 34,
+      "published": false,
+      "rank": 10,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 43,
+      "published": false,
+      "rank": 18,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     3,
+     4,
+     5,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Amon-Ra",
+    "fullName": "Amon-Ra St. Brown",
+    "id": 4374302,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "14",
+    "lastName": "St. Brown",
+    "lastNewsDate": 1790549338000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 52.67,
+     "auctionValueAverageChange": -0.69,
+     "averageDraftPosition": 8.72,
+     "averageDraftPositionPercentChange": -0.16,
+     "date": 1791160219891,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.93,
+     "percentStarted": 99.72
+    },
+    "proTeamId": 8
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 2,
+     "totalRanking": 7,
+     "totalRating": 75.8
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4362628,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 55,
+      "published": false,
+      "rank": 4,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 56,
+      "published": false,
+      "rank": 3,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 41,
+      "published": false,
+      "rank": 4,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 53,
+      "published": false,
+      "rank": 10,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     3,
+     4,
+     5,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Ja'Marr",
+    "fullName": "Ja'Marr Chase",
+    "id": 4362628,
+    "injured": false,
+    "injuryStatus": "QUESTIONABLE",
+    "jersey": "1",
+    "lastName": "Chase",
+    "lastNewsDate": 1791139671000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 55.87,
+     "auctionValueAverageChange": -0.23,
+     "averageDraftPosition": 5.47,
+     "averageDraftPositionPercentChange": -0.18,
+     "date": 1791160219734,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.93,
+     "percentStarted": 99.68
+    },
+    "proTeamId": 4
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 9,
+     "totalRanking": 30,
+     "totalRating": 54.5
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 3918298,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 22,
+      "published": false,
+      "rank": 36,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 30,
+      "published": false,
+      "rank": 26,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 39,
+      "published": false,
+      "rank": 6,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 59,
+      "published": false,
+      "rank": 1,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     0,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Josh",
+    "fullName": "Josh Allen",
+    "id": 3918298,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "17",
+    "lastName": "Allen",
+    "lastNewsDate": 1791149679000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 40.1,
+     "auctionValueAverageChange": -1.53,
+     "averageDraftPosition": 12.99,
+     "averageDraftPositionPercentChange": -0.12,
+     "date": 1791160218349,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.93,
+     "percentStarted": 98.75
+    },
+    "proTeamId": 2
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 1,
+     "totalRanking": 3,
+     "totalRating": 93.94
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4430878,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 54,
+      "published": false,
+      "rank": 5,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 53,
+      "published": false,
+      "rank": 6,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 39,
+      "published": false,
+      "rank": 5,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 51,
+      "published": false,
+      "rank": 11,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     3,
+     4,
+     5,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Jaxon",
+    "fullName": "Jaxon Smith-Njigba",
+    "id": 4430878,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "11",
+    "lastName": "Smith-Njigba",
+    "lastNewsDate": 1791159884000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 68.18,
+     "auctionValueAverageChange": -0.05,
+     "averageDraftPosition": 4.46,
+     "averageDraftPositionPercentChange": 0.03,
+     "date": 1791160220540,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.93,
+     "percentStarted": 99.83
+    },
+    "proTeamId": 26
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 1,
+     "totalRanking": 1,
+     "totalRating": 104.06
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4241389,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 51,
+      "published": false,
+      "rank": 9,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 50,
+      "published": false,
+      "rank": 10,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 32,
+      "published": false,
+      "rank": 12,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 42,
+      "published": false,
+      "rank": 19,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     3,
+     4,
+     5,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "CeeDee",
+    "fullName": "CeeDee Lamb",
+    "id": 4241389,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "88",
+    "lastName": "Lamb",
+    "lastNewsDate": 1791148312000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 45.89,
+     "auctionValueAverageChange": -0.21,
+     "averageDraftPosition": 11.93,
+     "averageDraftPositionPercentChange": 0.08,
+     "date": 1791160219027,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.92,
+     "percentStarted": 99.36
+    },
+    "proTeamId": 6
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 3,
+     "totalRanking": 9,
+     "totalRating": 70.9
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 3117251,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 53,
+      "published": false,
+      "rank": 6,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 52,
+      "published": false,
+      "rank": 7,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 37,
+      "published": false,
+      "rank": 8,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 49,
+      "published": false,
+      "rank": 12,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     2,
+     3,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Christian",
+    "fullName": "Christian McCaffrey",
+    "id": 3117251,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "23",
+    "lastName": "McCaffrey",
+    "lastNewsDate": 1790558046000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 48.75,
+     "auctionValueAverageChange": -0.1,
+     "averageDraftPosition": 9.0,
+     "averageDraftPositionPercentChange": 0.07,
+     "date": 1791160217854,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.92,
+     "percentStarted": 99.59
+    },
+    "proTeamId": 25
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 6,
+     "totalRanking": 23,
+     "totalRating": 58.0
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4430807,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 56,
+      "published": false,
+      "rank": 2,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 56,
+      "published": false,
+      "rank": 2,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 47,
+      "published": false,
+      "rank": 2,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 57,
+      "published": false,
+      "rank": 8,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     2,
+     3,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Bijan",
+    "fullName": "Bijan Robinson",
+    "id": 4430807,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "7",
+    "lastName": "Robinson",
+    "lastNewsDate": 1790307011000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 64.7,
+     "auctionValueAverageChange": -1.33,
+     "averageDraftPosition": 3.36,
+     "averageDraftPositionPercentChange": -0.08,
+     "date": 1791160220520,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.92,
+     "percentStarted": 99.77
+    },
+    "proTeamId": 1
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 3,
+     "totalRanking": 6,
+     "totalRating": 77.7
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4361307,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 4,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 35,
+      "published": false,
+      "rank": 20,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 34,
+      "published": false,
+      "rank": 21,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 25,
+      "published": false,
+      "rank": 21,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 34,
+      "published": false,
+      "rank": 28,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     5,
+     6,
+     23,
+     7,
+     20,
+     21
+    ],
+    "firstName": "Trey",
+    "fullName": "Trey McBride",
+    "id": 4361307,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "85",
+    "lastName": "McBride",
+    "lastNewsDate": 1791156158000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 31.87,
+     "auctionValueAverageChange": -0.37,
+     "averageDraftPosition": 20.81,
+     "averageDraftPositionPercentChange": -0.1,
+     "date": 1791160219538,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.9,
+     "percentStarted": 99.49
+    },
+    "proTeamId": 22
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 1,
+     "totalRanking": 22,
+     "totalRating": 59.1
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 3953687,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 5,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 1,
+      "published": false,
+      "rank": 240,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "PPR": {
+      "auctionValue": 1,
+      "published": false,
+      "rank": 255,
+      "rankSourceId": 0,
+      "rankType": "PPR",
+      "slotId": 0
+     },
+     "ELIMINATION": {
+      "auctionValue": 1,
+      "published": false,
+      "rank": 751,
+      "rankSourceId": 0,
+      "rankType": "ELIMINATION",
+      "slotId": 0
+     },
+     "SUPERFLEX": {
+      "auctionValue": 0,
+      "published": false,
+      "rank": 251,
+      "rankSourceId": 0,
+      "rankType": "SUPERFLEX",
+      "slotId": 0
+     }
+    },
+    "droppable": true,
+    "eligibleSlots": [
+     17,
+     20,
+     21
+    ],
+    "firstName": "Brandon",
+    "fullName": "Brandon Aubrey",
+    "id": 3953687,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "17",
+    "lastName": "Aubrey",
+    "lastNewsDate": 1791158744000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 2.97,
+     "auctionValueAverageChange": 0.05,
+     "averageDraftPosition": 74.81,
+     "averageDraftPositionPercentChange": 0.06,
+     "date": 1791156616733,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.49,
+     "percentStarted": 98.14
+    },
+    "proTeamId": 6
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 10,
+     "totalRanking": 123,
+     "totalRating": 29.0
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  }
+ ]
+}

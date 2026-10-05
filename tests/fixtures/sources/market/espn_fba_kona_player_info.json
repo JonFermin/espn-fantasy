@@ -1,0 +1,519 @@
+{
+ "players": [
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 5104157,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 5,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 60,
+      "published": false,
+      "rank": 4,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "ROTO": {
+      "auctionValue": 65,
+      "published": false,
+      "rank": 2,
+      "rankSourceId": 0,
+      "rankType": "ROTO",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     4,
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "firstName": "Victor",
+    "fullName": "Victor Wembanyama",
+    "id": 5104157,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "1",
+    "lastName": "Wembanyama",
+    "lastNewsDate": 1790622760000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 81.0,
+     "auctionValueAverageChange": -1.05,
+     "averageDraftPosition": 3.1,
+     "averageDraftPositionPercentChange": 0.02,
+     "date": 1791160232451,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.92,
+     "percentStarted": 99.53
+    },
+    "proTeamId": 24
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 2,
+     "totalRanking": 2,
+     "totalRating": 18.197899
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 3112335,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 5,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 65,
+      "published": false,
+      "rank": 1,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "ROTO": {
+      "auctionValue": 68,
+      "published": false,
+      "rank": 1,
+      "rankSourceId": 0,
+      "rankType": "ROTO",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     4,
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "firstName": "Nikola",
+    "fullName": "Nikola Jokic",
+    "id": 3112335,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "15",
+    "lastName": "Jokic",
+    "lastNewsDate": 1790626894000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 82.22,
+     "auctionValueAverageChange": -1.88,
+     "averageDraftPosition": 1.55,
+     "averageDraftPositionPercentChange": 0.03,
+     "date": 1791160231780,
+     "leagueType": 0,
+     "percentChange": 0.01,
+     "percentOwned": 99.91,
+     "percentStarted": 99.22
+    },
+    "proTeamId": 7
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 1,
+     "totalRanking": 1,
+     "totalRating": 20.66775
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4278073,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 62,
+      "published": false,
+      "rank": 2,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "ROTO": {
+      "auctionValue": 64,
+      "published": false,
+      "rank": 3,
+      "rankSourceId": 0,
+      "rankType": "ROTO",
+      "slotId": 0
+     }
+    },
+    "droppable": false,
+    "eligibleSlots": [
+     0,
+     5,
+     8,
+     11,
+     12,
+     13
+    ],
+    "firstName": "Shai",
+    "fullName": "Shai Gilgeous-Alexander",
+    "id": 4278073,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "2",
+    "lastName": "Gilgeous-Alexander",
+    "lastNewsDate": 1790273747000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 72.62,
+     "auctionValueAverageChange": -1.28,
+     "averageDraftPosition": 2.93,
+     "averageDraftPositionPercentChange": 0.0,
+     "date": 1791160232065,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.91,
+     "percentStarted": 99.42
+    },
+    "proTeamId": 25
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 1,
+     "totalRanking": 3,
+     "totalRating": 18.080956
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 4594268,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 56,
+      "published": false,
+      "rank": 8,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "ROTO": {
+      "auctionValue": 60,
+      "published": false,
+      "rank": 5,
+      "rankSourceId": 0,
+      "rankType": "ROTO",
+      "slotId": 0
+     }
+    },
+    "droppable": true,
+    "eligibleSlots": [
+     1,
+     2,
+     5,
+     6,
+     7,
+     8,
+     10,
+     11,
+     12,
+     13
+    ],
+    "firstName": "Anthony",
+    "fullName": "Anthony Edwards",
+    "id": 4594268,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "5",
+    "lastName": "Edwards",
+    "lastNewsDate": 1782404509000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 60.41,
+     "auctionValueAverageChange": -1.05,
+     "averageDraftPosition": 7.21,
+     "averageDraftPositionPercentChange": 0.0,
+     "date": 1791160232249,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.9,
+     "percentStarted": 99.12
+    },
+    "proTeamId": 16
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 5,
+     "totalRanking": 26,
+     "totalRating": 10.480911
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 3945274,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 61,
+      "published": false,
+      "rank": 3,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "ROTO": {
+      "auctionValue": 63,
+      "published": false,
+      "rank": 4,
+      "rankSourceId": 0,
+      "rankType": "ROTO",
+      "slotId": 0
+     }
+    },
+    "droppable": true,
+    "eligibleSlots": [
+     0,
+     5,
+     8,
+     11,
+     12,
+     13
+    ],
+    "firstName": "Luka",
+    "fullName": "Luka Doncic",
+    "id": 3945274,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "77",
+    "lastName": "Doncic",
+    "lastNewsDate": 1790902210000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 72.38,
+     "auctionValueAverageChange": -1.04,
+     "averageDraftPosition": 3.6,
+     "averageDraftPositionPercentChange": 0.02,
+     "date": 1791160231942,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.88,
+     "percentStarted": 99.13
+    },
+    "proTeamId": 13
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 4,
+     "totalRanking": 8,
+     "totalRating": 14.846952
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 3032977,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 4,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 59,
+      "published": false,
+      "rank": 5,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "ROTO": {
+      "auctionValue": 40,
+      "published": false,
+      "rank": 20,
+      "rankSourceId": 0,
+      "rankType": "ROTO",
+      "slotId": 0
+     }
+    },
+    "droppable": true,
+    "eligibleSlots": [
+     3,
+     4,
+     6,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "firstName": "Giannis",
+    "fullName": "Giannis Antetokounmpo",
+    "id": 3032977,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "7",
+    "lastName": "Antetokounmpo",
+    "lastNewsDate": 1791079350000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 62.45,
+     "auctionValueAverageChange": -1.19,
+     "averageDraftPosition": 5.87,
+     "averageDraftPositionPercentChange": 0.08,
+     "date": 1791160231750,
+     "leagueType": 0,
+     "percentChange": 0.0,
+     "percentOwned": 99.85,
+     "percentStarted": 98.54
+    },
+    "proTeamId": 14
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 27,
+     "totalRanking": 185,
+     "totalRating": 1.7868454
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  },
+  {
+   "draftAuctionValue": 0,
+   "droppedByEliminatedTeam": false,
+   "id": 5041939,
+   "keeperValue": 0,
+   "keeperValueFuture": 0,
+   "lineupLocked": false,
+   "onTeamId": 0,
+   "player": {
+    "active": true,
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+     "STANDARD": {
+      "auctionValue": 34,
+      "published": false,
+      "rank": 24,
+      "rankSourceId": 0,
+      "rankType": "STANDARD",
+      "slotId": 0
+     },
+     "ROTO": {
+      "auctionValue": 44,
+      "published": false,
+      "rank": 16,
+      "rankSourceId": 0,
+      "rankType": "ROTO",
+      "slotId": 0
+     }
+    },
+    "droppable": true,
+    "eligibleSlots": [
+     2,
+     3,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "firstName": "Cooper",
+    "fullName": "Cooper Flagg",
+    "id": 5041939,
+    "injured": false,
+    "injuryStatus": "ACTIVE",
+    "jersey": "32",
+    "lastName": "Flagg",
+    "lastNewsDate": 1790353390000,
+    "ownership": {
+     "activityLevel": null,
+     "auctionValueAverage": 41.9,
+     "auctionValueAverageChange": -0.19,
+     "averageDraftPosition": 17.38,
+     "averageDraftPositionPercentChange": 0.0,
+     "date": 1791160232428,
+     "leagueType": 0,
+     "percentChange": 0.01,
+     "percentOwned": 99.78,
+     "percentStarted": 97.23
+    },
+    "proTeamId": 6
+   },
+   "ratings": {
+    "0": {
+     "positionalRanking": 8,
+     "totalRanking": 31,
+     "totalRating": 9.911225
+    }
+   },
+   "rosterLocked": false,
+   "status": "WAIVERS",
+   "tradeLocked": false,
+   "waiverProcessDate": 1791270000000
+  }
+ ]
+}
