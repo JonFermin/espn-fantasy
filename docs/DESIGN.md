@@ -228,7 +228,7 @@ writes are unverified**, and the spike covers them.
 | Sleeper | Trending adds/drops; player DB (injury, practice, news timestamps); RotoWire-based projections and same-day snaps via undocumented endpoints | no auth | free; < 1,000 calls/min | real time | core (needs a fallback) |
 | FantasyCalc | Redraft trade values keyed by `espnId` | no key | free; no published terms | ~daily | market value |
 | RotoWire RSS | Player news | RSS | free; poll ≤ every 10 min | minutes | news |
-| Open-Meteo | Hourly forecasts at stadium coordinates (`greerreNFL/stadiums`) for outdoor games | no key | free non-commercial; 10k calls/day | hourly | P2 |
+| Open-Meteo | Hourly forecasts at stadium coordinates (`data/stadiums.csv`, hand-entered from public venue locations since `greerreNFL/stadiums` was unreachable) for outdoor games | no key | free non-commercial; 10k calls/day | hourly | P2 |
 | The Odds API | Posted team totals | key | free tier: 500 credits/month | near-live | optional |
 | FantasyPros API | ECR and projections | key | a personal production key needs the HOF tier (~$108/yr) | live | optional; ECR is already free via nflverse |
 
@@ -250,7 +250,7 @@ Sportradar/SportsDataIO (cost).
 | ESPN site APIs | Injuries (status + comments), news, scoreboard with DraftKings spread/O-U, team rosters | no key; send a browser UA | none stated | live | core |
 | `nba_api` (stats.nba.com) | League-wide game logs, Base/Advanced/Usage splits, V3 box scores, on/off splits | full nba.com header set; **home IP only** (cloud IPs hang) | free; throttling undocumented, so ~0.6 s between calls and nightly cached pulls | nightly | core |
 | NBA CDN `scheduleLeagueV2.json` | 2026-27 schedule → games per fantasy day/week, back-to-backs | full Chrome header set (a bare UA gets 403) | free | weekly; re-pull after Cup group play | core |
-| DARKO | Projections CSV including projected minutes, with ESPN-points and 9-cat presets | CSV download | free | daily | core projection source |
+| DARKO | Projections CSV including projected minutes, with ESPN-points and 9-cat presets | public Google Sheet exports (the Shiny app closed June 2026; `darko.app` only has a client-side CSV button) | free | daily | core projection source |
 | Official injury report PDFs | Pregame "reason" detail beyond ESPN's status | `ak-static.cms.nba.com/referee/injury/Injury-Report_<date>_<time>.pdf` | free; updated every 15 min on game days | 15 min | optional |
 | The Odds API | Backup lines | key | free tier: 500 credits/month | near-live | optional |
 
@@ -368,6 +368,18 @@ the `as_of` of each input.
 - **Prior art to read before building:** `TylerGrossi/Fantasy-Basketball-Simulation-Model` (ESPN 9-cat, streamers,
   acquisition-limit aware, MIT) and `giasemidis/espn-nba-fantasy` (weekly Monte Carlo on the ESPN API).
 - A Monday plan sets which categories are winnable, which to concede, and target stats for streamers.
+- **Facts from the real leagues (read 2026-10-05; confirm with real fixtures in #14):**
+  - NBA scoring periods are **days**. Day 1 is opening night (Tue Oct 20, 2026), and `status.finalScoringPeriod` is the
+    last fantasy day (153, Sun Mar 21, 2027 in the real league). NBA games in `proTeamSchedules_wl` are keyed by
+    that day number.
+  - `scheduleSettings.matchupPeriods` maps a matchup to schedule-period IDs (`{"1": [1], …}`), **not to days**.
+    Matchups run Monday to Sunday, and the first one also absorbs the opening partial week: days 1–13 (Oct 20 – Nov 1),
+    then 7-day matchups through day 153 (13 + 20×7 = 153). This is inferred from those totals, so verify it against
+    the league schedule once games are played.
+  - `matchupAcquisitionLimit` is a per-day rate when `matchupLimitPerScoringPeriod` is true: "3 adds per weekly
+    matchup" arrives as 3/7. Use `AcquisitionSettings.matchup_limit_for(days)`, never the raw number.
+  - Both real leagues are H2H points with traditional waivers (no FAAB, so there are no bids). The NFL league seeds its
+    4-team playoff by total points scored, not record, so raw points matter beyond weekly wins.
 
 ### 9.4 Trades
 

@@ -50,3 +50,11 @@ def test_named_paths_hang_off_config_dir(tmp_path: Path) -> None:
     assert paths.browser_profile_dir() == config / "browser-profile"
     assert paths.audit_dir() == config / "audit"
     assert paths.audit_dir().is_dir()
+
+
+def test_data_dir_is_the_committed_tree_beside_src(tmp_path: Path) -> None:
+    data = paths.data_dir()
+    assert data.name == "data" and (data.parent / "pyproject.toml").is_file() and (data.parent / "src").is_dir()
+    assert not data.is_relative_to(tmp_path)  # unaffected by FM_CONFIG_DIR / FM_CACHE_DIR
+    assert paths.data_file("id_overrides.csv") == data / "id_overrides.csv"
+    assert paths.data_file("id_overrides.csv").is_file() and paths.data_file("stadiums.csv").is_file()

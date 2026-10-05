@@ -3,7 +3,8 @@
 ``config_dir()`` (``~/.config/espn-fantasy``) holds ``config.toml``, ``.env``, the browser profile, ``state.db`` and
 audit artifacts. ``cache_dir()`` (``~/.cache/espn-fantasy``) holds raw source responses and parquet snapshots and is
 safe to delete. ``FM_CONFIG_DIR`` / ``FM_CACHE_DIR`` override them (tests point both at temp dirs). Both are created
-on first use.
+on first use. ``data_dir()`` is the one read-only exception: the repo's committed ``data/`` tree (id overrides, stadium
+coordinates, blend weights) beside ``src/``.
 
 Windows deliberately does not use ``%APPDATA%``: packaged (MSIX) apps virtualize AppData writes, so a process started
 from such an app and one started by Task Scheduler would see different state. The home directory is not virtualized.
@@ -61,3 +62,17 @@ def audit_dir() -> Path:
     path = config_dir() / "audit"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def data_dir() -> Path:
+    """The repo's committed ``data/`` tree (``id_overrides*.csv``, ``stadiums.csv``, ``blend_weights.toml``).
+
+    Read-only and never created here: it is source, not state. It resolves relative to this package, which holds for
+    the editable install ``uv sync`` makes; a non-editable wheel would not carry ``data/`` at all.
+    """
+    return Path(__file__).resolve().parents[2] / "data"
+
+
+def data_file(name: str) -> Path:
+    """``data_dir() / name``."""
+    return data_dir() / name

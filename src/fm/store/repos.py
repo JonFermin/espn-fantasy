@@ -269,6 +269,26 @@ class PlayerIdRepo(Repository[PlayerIdRow]):
     def for_player(self, sport: Sport, espn_id: int) -> list[PlayerIdRow]:
         return self._select("sport = ? AND espn_id = ?", (sport, espn_id), order="source")
 
+    def for_sport(self, sport: Sport) -> list[PlayerIdRow]:
+        """Every mapping of ``sport`` by (``espn_id``, ``source``): what a crosswalk loads."""
+        return self._select("sport = ?", (sport,), order="espn_id, source")
+
+    def replace_sport(self, sport: Sport, mappings: Iterable[PlayerIdRow]) -> int:
+        """Replace every mapping of ``sport`` with ``mappings`` (each must be that sport) in one transaction.
+
+        A replace rather than an upsert: when a mapping re-points a source id to another player, the old row would
+        otherwise collide with the one-owner-per-source-id constraint. Returns the number of rows written.
+        """
+        rows = list(mappings)
+        for row in rows:
+            if row.sport != sport:
+                raise ValueError(f"player id mapping for ESPN {row.espn_id} is {row.sport}, not {sport}")
+        with self.db.transaction():
+            self.db.execute("DELETE FROM player_ids WHERE sport = ?", (sport,))
+            for row in rows:
+                self._insert(row)
+        return len(rows)
+
     def lookup(self, sport: Sport, source: str, source_id: str) -> PlayerIdRow | None:
         """The ESPN mapping for a source id (``sleeper`` ``"4046"`` -> espn_id ...)."""
         return self._select_one("sport = ? AND source = ? AND source_id = ?", (sport, source, source_id))

@@ -1,4 +1,5 @@
-"""Public names mean one thing across ``fm.config``, ``fm.store`` and ``fm.espn``.
+"""Public names mean one thing across ``fm.config``, ``fm.store``, ``fm.espn``, ``fm.sports``, ``fm.decide`` and
+``fm.proposals``.
 
 Store rows carry a ``Row`` suffix (``LeagueRow``) so they never shadow ``fm.config.League`` or a parsed ESPN model,
 and a name two modules both expose must be one object (a re-export such as ``Sport``), never two definitions. A module
@@ -24,6 +25,16 @@ MODULES = (
     "fm.espn.ids",
     "fm.espn.settings",
     "fm.espn.auth",
+    "fm.espn.client",
+    "fm.espn.models",
+    "fm.sports.base",
+    "fm.sports.nfl",
+    "fm.decide.registry",
+    "fm.proposals",
+    "fm.proposals.payloads",
+    "fm.proposals.policy",
+    "fm.proposals.queue",
+    "fm.proposals.pause",
 )
 
 

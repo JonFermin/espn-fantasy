@@ -305,6 +305,34 @@ def test_player_ids_crosswalk(store: Store) -> None:
     assert count(store, "player_ids") == 3
 
 
+def test_player_ids_replace_sport(store: Store) -> None:
+    nba = PlayerIdRow(sport="nba", espn_id=9, source="nba", source_id="1629029", origin="name_match", as_of=AS_OF)
+    rows = [
+        PlayerIdRow(sport="nfl", espn_id=2, source="sleeper", source_id="6794", origin="ff_playerids", as_of=AS_OF),
+        PlayerIdRow(sport="nfl", espn_id=1, source="sleeper", source_id="4046", origin="ff_playerids", as_of=AS_OF),
+        PlayerIdRow(sport="nfl", espn_id=1, source="gsis", source_id="00-0033873", origin="ff_playerids", as_of=AS_OF),
+    ]
+    assert store.player_ids.upsert_many([*rows, nba]) == 4
+    assert store.player_ids.for_sport("nfl") == [rows[2], rows[1], rows[0]]  # by espn_id, then source
+    assert store.player_ids.for_sport("nba") == [nba]
+
+    # An override re-points sleeper 4046 from ESPN 1 to ESPN 3: an upsert would hit the one-owner-per-id constraint.
+    repointed = [
+        PlayerIdRow(sport="nfl", espn_id=3, source="sleeper", source_id="4046", origin="override", as_of=AS_OF),
+        rows[2],
+    ]
+    assert store.player_ids.replace_sport("nfl", repointed) == 2
+    assert store.player_ids.for_sport("nfl") == [rows[2], repointed[0]]
+    assert store.player_ids.for_sport("nba") == [nba]  # other sports untouched
+    assert count(store, "player_ids") == 3
+
+    with pytest.raises(ValueError, match="is nba, not nfl"):
+        store.player_ids.replace_sport("nfl", [nba])
+    assert store.player_ids.for_sport("nfl") == [rows[2], repointed[0]]  # nothing written
+    assert store.player_ids.replace_sport("nfl", []) == 0
+    assert store.player_ids.for_sport("nfl") == [] and store.player_ids.for_sport("nba") == [nba]
+
+
 def test_roster_snapshot_replace(store: Store) -> None:
     league = seed_league(store)
     team = seed_team(store, league)

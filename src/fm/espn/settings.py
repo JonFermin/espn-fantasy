@@ -79,9 +79,16 @@ _SCORING_KINDS: Mapping[ScoringType, ScoringKind] = {
 
 
 class LockType(_TolerantEnum):
-    """When a lineup slot locks: at each player's own game, or for everyone at the week's first game."""
+    """When a lineup slot locks: at each player's own game, or for everyone at the period's first game.
+
+    ``FIRSTGAME_SCORINGPERIOD`` is the value ESPN's own ``settings.typeNames.locktimeTypes`` lists next to
+    ``INDIVIDUAL_GAME`` (the ``proTeamSchedules_wl`` capture under ``tests/fixtures/sports/``); ``FIRST_GAME_OF_WEEK``
+    is the earlier guess, kept until a league capture (ROADMAP #14) settles which one ``lineupLocktimeType`` carries.
+    The sport plugins treat every member but ``INDIVIDUAL_GAME`` and ``UNKNOWN`` as a first-game lock.
+    """
 
     INDIVIDUAL_GAME = "INDIVIDUAL_GAME"
+    FIRSTGAME_SCORINGPERIOD = "FIRSTGAME_SCORINGPERIOD"
     FIRST_GAME_OF_WEEK = "FIRST_GAME_OF_WEEK"
     UNKNOWN = "UNKNOWN"
 

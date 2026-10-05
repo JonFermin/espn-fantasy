@@ -426,6 +426,9 @@ def test_lock_type_variants_keep_raw_value() -> None:
     roster["lineupLocktimeType"] = "FIRST_GAME_OF_WEEK"
     assert parse_league_settings(view).lineup_lock_type is LockType.FIRST_GAME_OF_WEEK
 
+    roster["lineupLocktimeType"] = "FIRSTGAME_SCORINGPERIOD"  # the value ESPN's typeNames.locktimeTypes lists
+    assert parse_league_settings(view).lineup_lock_type is LockType.FIRSTGAME_SCORINGPERIOD
+
     roster["lineupLocktimeType"] = "FIRST_GAME_OF_DAY"
     unknown = parse_league_settings(view)
     assert unknown.lineup_lock_type is LockType.UNKNOWN and unknown.lineup_lock_type_raw == "FIRST_GAME_OF_DAY"
