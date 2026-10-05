@@ -1,0 +1,43 @@
+team,venue,city,state,country,roof,latitude,longitude
+ARI,State Farm Stadium,Glendale,AZ,USA,retractable,33.5276,-112.2626
+ATL,Mercedes-Benz Stadium,Atlanta,GA,USA,retractable,33.7554,-84.4010
+BAL,M&T Bank Stadium,Baltimore,MD,USA,outdoors,39.2780,-76.6227
+BUF,Highmark Stadium,Orchard Park,NY,USA,outdoors,42.7758,-78.7869
+CAR,Bank of America Stadium,Charlotte,NC,USA,outdoors,35.2258,-80.8528
+CHI,Soldier Field,Chicago,IL,USA,outdoors,41.8623,-87.6167
+CIN,Paycor Stadium,Cincinnati,OH,USA,outdoors,39.0955,-84.5161
+CLE,Huntington Bank Field,Cleveland,OH,USA,outdoors,41.5061,-81.6995
+DAL,AT&T Stadium,Arlington,TX,USA,retractable,32.7473,-97.0945
+DEN,Empower Field at Mile High,Denver,CO,USA,outdoors,39.7439,-105.0201
+DET,Ford Field,Detroit,MI,USA,dome,42.3400,-83.0456
+GB,Lambeau Field,Green Bay,WI,USA,outdoors,44.5013,-88.0622
+HOU,NRG Stadium,Houston,TX,USA,retractable,29.6847,-95.4107
+IND,Lucas Oil Stadium,Indianapolis,IN,USA,retractable,39.7601,-86.1639
+JAX,EverBank Stadium,Jacksonville,FL,USA,outdoors,30.3239,-81.6373
+KC,GEHA Field at Arrowhead Stadium,Kansas City,MO,USA,outdoors,39.0489,-94.4839
+LV,Allegiant Stadium,Las Vegas,NV,USA,dome,36.0909,-115.1833
+LAC,SoFi Stadium,Inglewood,CA,USA,dome,33.9535,-118.3392
+LAR,SoFi Stadium,Inglewood,CA,USA,dome,33.9535,-118.3392
+MIA,Hard Rock Stadium,Miami Gardens,FL,USA,outdoors,25.9580,-80.2389
+MIN,U.S. Bank Stadium,Minneapolis,MN,USA,dome,44.9736,-93.2575
+NE,Gillette Stadium,Foxborough,MA,USA,outdoors,42.0909,-71.2643
+NO,Caesars Superdome,New Orleans,LA,USA,dome,29.9511,-90.0812
+NYG,MetLife Stadium,East Rutherford,NJ,USA,outdoors,40.8135,-74.0745
+NYJ,MetLife Stadium,East Rutherford,NJ,USA,outdoors,40.8135,-74.0745
+PHI,Lincoln Financial Field,Philadelphia,PA,USA,outdoors,39.9008,-75.1675
+PIT,Acrisure Stadium,Pittsburgh,PA,USA,outdoors,40.4468,-80.0158
+SF,Levi's Stadium,Santa Clara,CA,USA,outdoors,37.4033,-121.9694
+SEA,Lumen Field,Seattle,WA,USA,outdoors,47.5952,-122.3316
+TB,Raymond James Stadium,Tampa,FL,USA,outdoors,27.9759,-82.5033
+TEN,Nissan Stadium,Nashville,TN,USA,outdoors,36.1665,-86.7713
+WSH,Northwest Stadium,Landover,MD,USA,outdoors,38.9076,-76.8645
+,Tottenham Hotspur Stadium,London,,England,outdoors,51.6042,-0.0662
+,Wembley Stadium,London,,England,outdoors,51.5560,-0.2796
+,Allianz Arena,Munich,,Germany,outdoors,48.2188,11.6247
+,Deutsche Bank Park,Frankfurt,,Germany,retractable,50.0686,8.6455
+,Olympiastadion,Berlin,,Germany,outdoors,52.5147,13.2395
+,Santiago Bernabeu,Madrid,,Spain,retractable,40.4531,-3.6883
+,Croke Park,Dublin,,Ireland,outdoors,53.3607,-6.2512
+,Estadio Azteca,Mexico City,,Mexico,outdoors,19.3029,-99.1505
+,Neo Quimica Arena,Sao Paulo,,Brazil,outdoors,-23.5453,-46.4742
+,Melbourne Cricket Ground,Melbourne,,Australia,outdoors,-37.8200,144.9834

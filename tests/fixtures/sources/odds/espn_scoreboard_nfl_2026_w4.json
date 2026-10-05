@@ -1,0 +1,316 @@
+{
+ "season": {
+  "type": 2,
+  "year": 2026
+ },
+ "week": {
+  "number": 4
+ },
+ "events": [
+  {
+   "id": "401872978",
+   "date": "2026-10-05T00:20Z",
+   "name": "Detroit Lions at Carolina Panthers",
+   "shortName": "DET @ CAR",
+   "season": {
+    "year": 2026,
+    "type": 2,
+    "slug": "regular-season"
+   },
+   "week": {
+    "number": 4
+   },
+   "competitions": [
+    {
+     "id": "401872978",
+     "date": "2026-10-05T00:20Z",
+     "neutralSite": false,
+     "startDate": "2026-10-05T00:20Z",
+     "venue": {
+      "id": "3628",
+      "fullName": "Bank of America Stadium",
+      "address": {
+       "city": "Charlotte",
+       "state": "NC",
+       "country": "USA"
+      },
+      "indoor": false
+     },
+     "competitors": [
+      {
+       "id": "29",
+       "homeAway": "home",
+       "team": {
+        "id": "29",
+        "location": "Carolina",
+        "name": "Panthers",
+        "abbreviation": "CAR",
+        "displayName": "Carolina Panthers"
+       },
+       "score": "7"
+      },
+      {
+       "id": "8",
+       "homeAway": "away",
+       "team": {
+        "id": "8",
+        "location": "Detroit",
+        "name": "Lions",
+        "abbreviation": "DET",
+        "displayName": "Detroit Lions"
+       },
+       "score": "3"
+      }
+     ]
+    }
+   ],
+   "weather": {
+    "displayValue": "7",
+    "temperature": 65,
+    "highTemperature": 65,
+    "conditionId": "Cloudy",
+    "link": {
+     "href": "http://www.accuweather.com/en/us/bank-of-america-stadium-nc/28202/current-weather/53601_poi?lang=en-us"
+    }
+   },
+   "status": {
+    "clock": 761.0,
+    "displayClock": "12:41",
+    "period": 2,
+    "type": {
+     "id": "2",
+     "name": "STATUS_IN_PROGRESS",
+     "state": "in",
+     "completed": false,
+     "description": "In Progress",
+     "detail": "12:41 - 2nd Quarter",
+     "shortDetail": "12:41 - 2nd"
+    }
+   }
+  },
+  {
+   "id": "401872965",
+   "date": "2026-10-04T13:30Z",
+   "name": "Indianapolis Colts at Washington Commanders",
+   "shortName": "IND VS WSH",
+   "season": {
+    "year": 2026,
+    "type": 2,
+    "slug": "regular-season"
+   },
+   "week": {
+    "number": 4
+   },
+   "competitions": [
+    {
+     "id": "401872965",
+     "date": "2026-10-04T13:30Z",
+     "neutralSite": true,
+     "startDate": "2026-10-04T13:30Z",
+     "venue": {
+      "id": "5534",
+      "fullName": "Tottenham Hotspur Stadium",
+      "address": {
+       "city": "London",
+       "country": "England"
+      },
+      "indoor": false
+     },
+     "competitors": [
+      {
+       "id": "28",
+       "homeAway": "home",
+       "team": {
+        "id": "28",
+        "location": "Washington",
+        "name": "Commanders",
+        "abbreviation": "WSH",
+        "displayName": "Washington Commanders"
+       },
+       "score": "13"
+      },
+      {
+       "id": "11",
+       "homeAway": "away",
+       "team": {
+        "id": "11",
+        "location": "Indianapolis",
+        "name": "Colts",
+        "abbreviation": "IND",
+        "displayName": "Indianapolis Colts"
+       },
+       "score": "30"
+      }
+     ]
+    }
+   ],
+   "status": {
+    "clock": 0.0,
+    "displayClock": "0:00",
+    "period": 4,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    }
+   }
+  },
+  {
+   "id": "401872979",
+   "date": "2026-10-06T00:15Z",
+   "name": "Atlanta Falcons at New Orleans Saints",
+   "shortName": "ATL @ NO",
+   "season": {
+    "year": 2026,
+    "type": 2,
+    "slug": "regular-season"
+   },
+   "week": {
+    "number": 4
+   },
+   "competitions": [
+    {
+     "id": "401872979",
+     "date": "2026-10-06T00:15Z",
+     "neutralSite": false,
+     "startDate": "2026-10-06T00:15Z",
+     "venue": {
+      "id": "3493",
+      "fullName": "Caesars Superdome",
+      "address": {
+       "city": "New Orleans",
+       "state": "LA",
+       "country": "USA"
+      },
+      "indoor": true
+     },
+     "competitors": [
+      {
+       "id": "18",
+       "homeAway": "home",
+       "team": {
+        "id": "18",
+        "location": "New Orleans",
+        "name": "Saints",
+        "abbreviation": "NO",
+        "displayName": "New Orleans Saints"
+       },
+       "score": "0"
+      },
+      {
+       "id": "1",
+       "homeAway": "away",
+       "team": {
+        "id": "1",
+        "location": "Atlanta",
+        "name": "Falcons",
+        "abbreviation": "ATL",
+        "displayName": "Atlanta Falcons"
+       },
+       "score": "0"
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "NO -1.5",
+       "overUnder": 47.5,
+       "spread": -1.5,
+       "awayTeamOdds": {
+        "favorite": false,
+        "underdog": true,
+        "team": {
+         "id": "1",
+         "abbreviation": "ATL"
+        }
+       },
+       "homeTeamOdds": {
+        "favorite": true,
+        "underdog": false,
+        "team": {
+         "id": "18",
+         "abbreviation": "NO"
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "close": {
+          "line": "-1.5",
+          "odds": "-115"
+         },
+         "open": {
+          "line": "-2.5",
+          "odds": "-110"
+         }
+        },
+        "away": {
+         "close": {
+          "line": "+1.5",
+          "odds": "-105"
+         },
+         "open": {
+          "line": "+2.5",
+          "odds": "-110"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "close": {
+          "line": "o47.5",
+          "odds": "-115"
+         },
+         "open": {
+          "line": "o45.5",
+          "odds": "-110"
+         }
+        },
+        "under": {
+         "close": {
+          "line": "u47.5",
+          "odds": "-105"
+         },
+         "open": {
+          "line": "u45.5",
+          "odds": "-110"
+         }
+        }
+       }
+      }
+     ]
+    }
+   ],
+   "weather": {
+    "displayValue": "Cloudy",
+    "temperature": 78,
+    "highTemperature": 78,
+    "conditionId": "7",
+    "link": {
+     "href": "http://www.accuweather.com/en/us/caesars-superdome-la/70112/hourly-weather-forecast/19245_poi?day=2&hbhhour=19&lang=en-us"
+    }
+   },
+   "status": {
+    "clock": 0.0,
+    "displayClock": "0:00",
+    "period": 0,
+    "type": {
+     "id": "1",
+     "name": "STATUS_SCHEDULED",
+     "state": "pre",
+     "completed": false,
+     "description": "Scheduled",
+     "detail": "Mon, October 5th at 8:15 PM EDT",
+     "shortDetail": "10/5 - 8:15 PM EDT"
+    }
+   }
+  }
+ ]
+}
