@@ -1,0 +1,534 @@
+{
+  "gameId": 3,
+  "id": 3456789,
+  "schedule": [
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 5,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 66.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 2.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 5.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 5.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 0.489
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 4.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 0.882
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 12.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 23.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 1,
+          "wins": 3
+        },
+        "gamesPlayed": 2,
+        "rosterForCurrentScoringPeriod": {
+          "appliedStatTotal": 0.0,
+          "entries": [
+            {
+              "acquisitionDate": 1791853200000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 4278073,
+              "playerPoolEntry": {
+                "id": 4278073,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": true,
+                "onTeamId": 2,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Shai",
+                  "fullName": "Shai Gilgeous-Alexander",
+                  "id": 4278073,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Gilgeous-Alexander",
+                  "proTeamId": 25,
+                  "stats": [
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "2027",
+                      "id": "002027",
+                      "proTeamId": 0,
+                      "scoringPeriodId": 0,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 0,
+                      "stats": {
+                        "0": 33.0,
+                        "1": 1.0,
+                        "11": 2.0,
+                        "13": 12.0,
+                        "14": 22.0,
+                        "15": 8.0,
+                        "16": 9.0,
+                        "17": 1.0,
+                        "2": 2.0,
+                        "3": 7.0,
+                        "6": 5.0
+                      }
+                    },
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "20271",
+                      "id": "0120271",
+                      "proTeamId": 25,
+                      "scoringPeriodId": 1,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 1,
+                      "stats": {
+                        "0": 33.0,
+                        "1": 1.0,
+                        "11": 2.0,
+                        "13": 12.0,
+                        "14": 22.0,
+                        "15": 8.0,
+                        "16": 9.0,
+                        "17": 1.0,
+                        "2": 2.0,
+                        "3": 7.0,
+                        "6": 5.0
+                      }
+                    }
+                  ],
+                  "universeId": 1
+                },
+                "rosterLocked": true,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": 1791853200000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 4,
+              "pendingTransactionIds": null,
+              "playerId": 5104157,
+              "playerPoolEntry": {
+                "id": 5104157,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": true,
+                "onTeamId": 2,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Victor",
+                  "fullName": "Victor Wembanyama",
+                  "id": 5104157,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Wembanyama",
+                  "proTeamId": 24,
+                  "stats": [
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "2027",
+                      "id": "002027",
+                      "proTeamId": 0,
+                      "scoringPeriodId": 0,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 0,
+                      "stats": {
+                        "0": 24.0,
+                        "1": 4.0,
+                        "11": 3.0,
+                        "13": 9.0,
+                        "14": 20.0,
+                        "15": 4.0,
+                        "16": 5.0,
+                        "17": 2.0,
+                        "2": 1.0,
+                        "3": 3.0,
+                        "6": 12.0
+                      }
+                    },
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "20271",
+                      "id": "0120271",
+                      "proTeamId": 24,
+                      "scoringPeriodId": 1,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 1,
+                      "stats": {
+                        "0": 24.0,
+                        "1": 4.0,
+                        "11": 3.0,
+                        "13": 9.0,
+                        "14": 20.0,
+                        "15": 4.0,
+                        "16": 5.0,
+                        "17": 2.0,
+                        "2": 1.0,
+                        "3": 3.0,
+                        "6": 12.0
+                      }
+                    }
+                  ],
+                  "universeId": 1
+                },
+                "rosterLocked": true,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "teamId": 2,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 3,
+          "scoreByStat": {
+            "0": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 71.0
+            },
+            "1": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 3.0
+            },
+            "11": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 7.0
+            },
+            "17": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "TIE",
+              "score": 5.0
+            },
+            "19": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 0.531
+            },
+            "2": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 2.0
+            },
+            "20": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "LOSS",
+              "score": 0.8
+            },
+            "3": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 18.0
+            },
+            "6": {
+              "ineligible": false,
+              "rank": 0.0,
+              "result": "WIN",
+              "score": 24.0
+            }
+          },
+          "statBySlot": null,
+          "ties": 1,
+          "wins": 5
+        },
+        "gamesPlayed": 2,
+        "rosterForCurrentScoringPeriod": {
+          "appliedStatTotal": 0.0,
+          "entries": [
+            {
+              "acquisitionDate": 1791853200000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 4,
+              "pendingTransactionIds": null,
+              "playerId": 3112335,
+              "playerPoolEntry": {
+                "id": 3112335,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": true,
+                "onTeamId": 1,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 5,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    3,
+                    4,
+                    6,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Nikola",
+                  "fullName": "Nikola Jokic",
+                  "id": 3112335,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Jokic",
+                  "proTeamId": 7,
+                  "stats": [
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "2027",
+                      "id": "002027",
+                      "proTeamId": 0,
+                      "scoringPeriodId": 0,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 0,
+                      "stats": {
+                        "0": 29.0,
+                        "1": 1.0,
+                        "11": 3.0,
+                        "13": 11.0,
+                        "14": 19.0,
+                        "15": 6.0,
+                        "16": 7.0,
+                        "17": 1.0,
+                        "2": 1.0,
+                        "3": 11.0,
+                        "6": 14.0
+                      }
+                    },
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "20271",
+                      "id": "0120271",
+                      "proTeamId": 7,
+                      "scoringPeriodId": 1,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 1,
+                      "stats": {
+                        "0": 29.0,
+                        "1": 1.0,
+                        "11": 3.0,
+                        "13": 11.0,
+                        "14": 19.0,
+                        "15": 6.0,
+                        "16": 7.0,
+                        "17": 1.0,
+                        "2": 1.0,
+                        "3": 11.0,
+                        "6": 14.0
+                      }
+                    }
+                  ],
+                  "universeId": 1
+                },
+                "rosterLocked": true,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": 1791853200000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 3945274,
+              "playerPoolEntry": {
+                "id": 3945274,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": true,
+                "onTeamId": 1,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    0,
+                    1,
+                    5,
+                    7,
+                    8,
+                    11,
+                    12,
+                    13
+                  ],
+                  "firstName": "Luka",
+                  "fullName": "Luka Doncic",
+                  "id": 3945274,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "lastName": "Doncic",
+                  "proTeamId": 13,
+                  "stats": [
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "2027",
+                      "id": "002027",
+                      "proTeamId": 0,
+                      "scoringPeriodId": 0,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 0,
+                      "stats": {
+                        "0": 34.0,
+                        "1": 0.0,
+                        "11": 4.0,
+                        "13": 11.0,
+                        "14": 24.0,
+                        "15": 8.0,
+                        "16": 10.0,
+                        "17": 4.0,
+                        "2": 2.0,
+                        "3": 9.0,
+                        "6": 8.0
+                      }
+                    },
+                    {
+                      "appliedTotal": 0.0,
+                      "externalId": "20271",
+                      "id": "0120271",
+                      "proTeamId": 13,
+                      "scoringPeriodId": 1,
+                      "seasonId": 2027,
+                      "statSourceId": 0,
+                      "statSplitTypeId": 1,
+                      "stats": {
+                        "0": 34.0,
+                        "1": 0.0,
+                        "11": 4.0,
+                        "13": 11.0,
+                        "14": 24.0,
+                        "15": 8.0,
+                        "16": 10.0,
+                        "17": 4.0,
+                        "2": 2.0,
+                        "3": 9.0,
+                        "6": 8.0
+                      }
+                    }
+                  ],
+                  "universeId": 1
+                },
+                "rosterLocked": true,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "teamId": 1,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 1,
+      "matchupPeriodId": 1,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    }
+  ],
+  "scoringPeriodId": 1,
+  "seasonId": 2027,
+  "segmentId": 0,
+  "status": {
+    "currentMatchupPeriod": 1,
+    "finalScoringPeriod": 175,
+    "firstScoringPeriod": 1,
+    "isActive": true,
+    "latestScoringPeriod": 1,
+    "previousSeasons": [],
+    "teamsJoined": 10,
+    "transactionScoringPeriod": 1,
+    "waiverNextExecutionDate": 1792594800000
+  }
+}

@@ -1,0 +1,151 @@
+{
+  "gameId": 1,
+  "id": 1234567,
+  "pendingTransactions": [
+    {
+      "executionType": "EXECUTE",
+      "expirationDate": 1791126000000,
+      "id": "3b6b7b9e-0000-4000-8000-0000000000c1",
+      "isActingAsTeamOwner": false,
+      "isLeagueManager": false,
+      "isPending": true,
+      "items": [
+        {
+          "fromLineupSlotId": -1,
+          "fromTeamId": 2,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 15847,
+          "toLineupSlotId": -1,
+          "toTeamId": 1,
+          "type": "TRADE"
+        },
+        {
+          "fromLineupSlotId": -1,
+          "fromTeamId": 1,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 4361307,
+          "toLineupSlotId": -1,
+          "toTeamId": 2,
+          "type": "TRADE"
+        }
+      ],
+      "memberId": "{00000000-0000-0000-0000-000000000002}",
+      "proposedDate": 1790953200000,
+      "rating": 0,
+      "scoringPeriodId": 4,
+      "skipTransactionCounters": false,
+      "status": "PENDING",
+      "subOrder": 0,
+      "teamId": 2,
+      "type": "TRADE_PROPOSAL"
+    },
+    {
+      "bidAmount": 12,
+      "executionType": "EXECUTE",
+      "id": "3b6b7b9e-0000-4000-8000-00000000c1a1",
+      "isActingAsTeamOwner": false,
+      "isLeagueManager": false,
+      "isPending": true,
+      "items": [
+        {
+          "fromLineupSlotId": -1,
+          "fromTeamId": 0,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 4569173,
+          "toLineupSlotId": 20,
+          "toTeamId": 1,
+          "type": "ADD"
+        },
+        {
+          "fromLineupSlotId": 20,
+          "fromTeamId": 1,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 4249836,
+          "toLineupSlotId": -1,
+          "toTeamId": 0,
+          "type": "DROP"
+        }
+      ],
+      "memberId": "{00000000-0000-0000-0000-000000000001}",
+      "proposedDate": 1791057600000,
+      "rating": 0,
+      "scoringPeriodId": 4,
+      "skipTransactionCounters": false,
+      "status": "PENDING",
+      "subOrder": 0,
+      "teamId": 1,
+      "type": "WAIVER"
+    },
+    {
+      "executionType": "EXECUTE",
+      "expirationDate": 1791207000000,
+      "id": "3b6b7b9e-0000-4000-8000-0000000000d1",
+      "isActingAsTeamOwner": false,
+      "isLeagueManager": false,
+      "isPending": true,
+      "items": [
+        {
+          "fromLineupSlotId": -1,
+          "fromTeamId": 6,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 4047650,
+          "toLineupSlotId": -1,
+          "toTeamId": 1,
+          "type": "TRADE"
+        },
+        {
+          "fromLineupSlotId": -1,
+          "fromTeamId": 1,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 4426515,
+          "toLineupSlotId": -1,
+          "toTeamId": 6,
+          "type": "TRADE"
+        }
+      ],
+      "memberId": "{00000000-0000-0000-0000-000000000006}",
+      "proposedDate": 1791034200000,
+      "rating": 0,
+      "scoringPeriodId": 4,
+      "skipTransactionCounters": false,
+      "status": "PENDING",
+      "subOrder": 0,
+      "teamId": 6,
+      "type": "TRADE_PROPOSAL"
+    }
+  ],
+  "scoringPeriodId": 4,
+  "seasonId": 2026,
+  "segmentId": 0,
+  "status": {
+    "activatedDate": 1787630400000,
+    "createdAsLeagueType": 0,
+    "currentLeagueType": 0,
+    "currentMatchupPeriod": 4,
+    "finalScoringPeriod": 18,
+    "firstScoringPeriod": 1,
+    "isActive": true,
+    "isExpired": false,
+    "isFull": true,
+    "isPlayoffMatchupEdited": false,
+    "isToBeDeleted": false,
+    "isViewable": true,
+    "isWaiverOrderEdited": false,
+    "latestScoringPeriod": 4,
+    "previousSeasons": [
+      2024,
+      2025
+    ],
+    "standingsUpdateDate": 1790763000000,
+    "teamsJoined": 10,
+    "transactionScoringPeriod": 4,
+    "waiverLastExecutionDate": 1790751720000,
+    "waiverNextExecutionDate": 1791356400000
+  }
+}

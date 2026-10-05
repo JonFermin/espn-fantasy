@@ -1,0 +1,321 @@
+{
+  "gameId": 1,
+  "id": 1234567,
+  "schedule": [
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "pointsByScoringPeriod": {
+          "3": 140.3
+        },
+        "teamId": 2,
+        "tiebreak": 0.0,
+        "totalPoints": 140.3
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "pointsByScoringPeriod": {
+          "3": 118.9
+        },
+        "teamId": 1,
+        "tiebreak": 0.0,
+        "totalPoints": 118.9
+      },
+      "id": 11,
+      "matchupPeriodId": 3,
+      "playoffTierType": "NONE",
+      "winner": "AWAY"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "pointsByScoringPeriod": {
+          "3": 99.5
+        },
+        "teamId": 4,
+        "tiebreak": 0.0,
+        "totalPoints": 99.5
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "pointsByScoringPeriod": {
+          "3": 101.2
+        },
+        "teamId": 3,
+        "tiebreak": 0.0,
+        "totalPoints": 101.2
+      },
+      "id": 12,
+      "matchupPeriodId": 3,
+      "playoffTierType": "NONE",
+      "winner": "HOME"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 2,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 1,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 16,
+      "matchupPeriodId": 4,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 4,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 3,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 17,
+      "matchupPeriodId": 4,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 6,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 5,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 18,
+      "matchupPeriodId": 4,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 8,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 7,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 19,
+      "matchupPeriodId": 4,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 10,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 9,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 20,
+      "matchupPeriodId": 4,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    },
+    {
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 2,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 71,
+      "matchupPeriodId": 15,
+      "playoffTierType": "WINNERS_BRACKET",
+      "winner": "UNDECIDED"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 5,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 9,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0
+      },
+      "id": 73,
+      "matchupPeriodId": 15,
+      "playoffTierType": "WINNERS_BRACKET",
+      "winner": "UNDECIDED"
+    }
+  ],
+  "scoringPeriodId": 4,
+  "seasonId": 2026,
+  "segmentId": 0,
+  "status": {
+    "activatedDate": 1787630400000,
+    "createdAsLeagueType": 0,
+    "currentLeagueType": 0,
+    "currentMatchupPeriod": 4,
+    "finalScoringPeriod": 18,
+    "firstScoringPeriod": 1,
+    "isActive": true,
+    "isExpired": false,
+    "isFull": true,
+    "isPlayoffMatchupEdited": false,
+    "isToBeDeleted": false,
+    "isViewable": true,
+    "isWaiverOrderEdited": false,
+    "latestScoringPeriod": 4,
+    "previousSeasons": [
+      2024,
+      2025
+    ],
+    "standingsUpdateDate": 1790763000000,
+    "teamsJoined": 10,
+    "transactionScoringPeriod": 4,
+    "waiverLastExecutionDate": 1790751720000,
+    "waiverNextExecutionDate": 1791356400000
+  }
+}

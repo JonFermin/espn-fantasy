@@ -1,0 +1,165 @@
+{
+  "display": true,
+  "id": 3,
+  "settings": {
+    "proTeams": [
+      {
+        "abbrev": "FA",
+        "id": 0,
+        "location": "Free Agent",
+        "name": "FA",
+        "universeId": 1
+      },
+      {
+        "abbrev": "BOS",
+        "id": 2,
+        "location": "Boston",
+        "name": "Celtics",
+        "proGamesByScoringPeriod": {
+          "1": [
+            {
+              "awayProTeamId": 18,
+              "date": 1792539000000,
+              "homeProTeamId": 2,
+              "id": 401800001,
+              "scoringPeriodId": 1,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ],
+          "2": [
+            {
+              "awayProTeamId": 2,
+              "date": 1792625400000,
+              "homeProTeamId": 18,
+              "id": 401800003,
+              "scoringPeriodId": 2,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ]
+        },
+        "universeId": 1
+      },
+      {
+        "abbrev": "DEN",
+        "id": 7,
+        "location": "Denver",
+        "name": "Nuggets",
+        "proGamesByScoringPeriod": {
+          "1": [
+            {
+              "awayProTeamId": 13,
+              "date": 1792548000000,
+              "homeProTeamId": 7,
+              "id": 401800002,
+              "scoringPeriodId": 1,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ]
+        },
+        "universeId": 1
+      },
+      {
+        "abbrev": "LAL",
+        "id": 13,
+        "location": "Los Angeles",
+        "name": "Lakers",
+        "proGamesByScoringPeriod": {
+          "1": [
+            {
+              "awayProTeamId": 13,
+              "date": 1792548000000,
+              "homeProTeamId": 7,
+              "id": 401800002,
+              "scoringPeriodId": 1,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ]
+        },
+        "universeId": 1
+      },
+      {
+        "abbrev": "NYK",
+        "id": 18,
+        "location": "New York",
+        "name": "Knicks",
+        "proGamesByScoringPeriod": {
+          "1": [
+            {
+              "awayProTeamId": 18,
+              "date": 1792539000000,
+              "homeProTeamId": 2,
+              "id": 401800001,
+              "scoringPeriodId": 1,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ],
+          "2": [
+            {
+              "awayProTeamId": 2,
+              "date": 1792625400000,
+              "homeProTeamId": 18,
+              "id": 401800003,
+              "scoringPeriodId": 2,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ]
+        },
+        "universeId": 1
+      },
+      {
+        "abbrev": "SAS",
+        "id": 24,
+        "location": "San Antonio",
+        "name": "Spurs",
+        "proGamesByScoringPeriod": {
+          "2": [
+            {
+              "awayProTeamId": 25,
+              "date": 1792627200000,
+              "homeProTeamId": 24,
+              "id": 401800004,
+              "scoringPeriodId": 2,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ]
+        },
+        "universeId": 1
+      },
+      {
+        "abbrev": "OKC",
+        "id": 25,
+        "location": "Oklahoma City",
+        "name": "Thunder",
+        "proGamesByScoringPeriod": {
+          "2": [
+            {
+              "awayProTeamId": 25,
+              "date": 1792627200000,
+              "homeProTeamId": 24,
+              "id": 401800004,
+              "scoringPeriodId": 2,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ]
+        },
+        "universeId": 1
+      }
+    ]
+  }
+}

@@ -1,0 +1,372 @@
+{
+  "gameId": 1,
+  "id": 1234567,
+  "schedule": [
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "rosterForCurrentScoringPeriod": {
+          "appliedStatTotal": 0.0,
+          "entries": [
+            {
+              "acquisitionDate": 1788135300000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 3916387,
+              "playerPoolEntry": {
+                "id": 3916387,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": false,
+                "onTeamId": 2,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    0,
+                    7,
+                    20,
+                    21
+                  ],
+                  "firstName": "Lamar",
+                  "fullName": "Lamar Jackson",
+                  "id": 3916387,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "jersey": "26",
+                  "lastName": "Jackson",
+                  "lastNewsDate": 1790965800000,
+                  "proTeamId": 33,
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": 1788135300000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 2,
+              "pendingTransactionIds": null,
+              "playerId": 3929630,
+              "playerPoolEntry": {
+                "id": 3929630,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": false,
+                "onTeamId": 2,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    23,
+                    7,
+                    20,
+                    21
+                  ],
+                  "firstName": "Saquon",
+                  "fullName": "Saquon Barkley",
+                  "id": 3929630,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "jersey": "26",
+                  "lastName": "Barkley",
+                  "lastNewsDate": 1790965800000,
+                  "proTeamId": 21,
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "teamId": 2,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0,
+        "totalPointsLive": 0.0,
+        "totalProjectedPointsLive": 121.8
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "rosterForCurrentScoringPeriod": {
+          "appliedStatTotal": 31.4,
+          "entries": [
+            {
+              "acquisitionDate": 1788135300000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 0,
+              "pendingTransactionIds": null,
+              "playerId": 3918298,
+              "playerPoolEntry": {
+                "id": 3918298,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": false,
+                "onTeamId": 1,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 1,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    0,
+                    7,
+                    20,
+                    21
+                  ],
+                  "firstName": "Josh",
+                  "fullName": "Josh Allen",
+                  "id": 3918298,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "jersey": "17",
+                  "lastName": "Allen",
+                  "lastNewsDate": 1790965800000,
+                  "proTeamId": 2,
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": 1788135300000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 2,
+              "pendingTransactionIds": null,
+              "playerId": 4429795,
+              "playerPoolEntry": {
+                "id": 4429795,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": true,
+                "onTeamId": 1,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 2,
+                  "droppable": false,
+                  "eligibleSlots": [
+                    2,
+                    3,
+                    23,
+                    7,
+                    20,
+                    21
+                  ],
+                  "firstName": "Jahmyr",
+                  "fullName": "Jahmyr Gibbs",
+                  "id": 4429795,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "jersey": "26",
+                  "lastName": "Gibbs",
+                  "lastNewsDate": 1790965800000,
+                  "proTeamId": 8,
+                  "stats": [
+                    {
+                      "appliedAverage": 18.76,
+                      "appliedStats": {
+                        "24": 138.0,
+                        "25": 78.0,
+                        "42": 47.0,
+                        "53": 56.0
+                      },
+                      "appliedTotal": 319.0,
+                      "externalId": "2026",
+                      "id": "102026",
+                      "proTeamId": 0,
+                      "scoringPeriodId": 0,
+                      "seasonId": 2026,
+                      "statSourceId": 1,
+                      "statSplitTypeId": 0,
+                      "stats": {
+                        "23": 262.0,
+                        "24": 1380.0,
+                        "25": 13.0,
+                        "42": 470.0,
+                        "53": 56.0
+                      }
+                    },
+                    {
+                      "appliedAverage": 21.91,
+                      "appliedStats": {
+                        "24": 9.21,
+                        "25": 4.8,
+                        "42": 3.3,
+                        "53": 4.6
+                      },
+                      "appliedTotal": 21.91,
+                      "externalId": "202604",
+                      "id": "1120264",
+                      "proTeamId": 8,
+                      "scoringPeriodId": 4,
+                      "seasonId": 2026,
+                      "statSourceId": 1,
+                      "statSplitTypeId": 1,
+                      "stats": {
+                        "23": 17.4,
+                        "24": 92.1,
+                        "25": 0.8,
+                        "42": 33.0,
+                        "53": 4.6
+                      }
+                    }
+                  ],
+                  "universeId": 2
+                },
+                "rosterLocked": true,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            },
+            {
+              "acquisitionDate": 1788135300000,
+              "acquisitionType": "DRAFT",
+              "injuryStatus": "NORMAL",
+              "lineupSlotId": 6,
+              "pendingTransactionIds": null,
+              "playerId": 4361307,
+              "playerPoolEntry": {
+                "id": 4361307,
+                "keeperValue": 0,
+                "keeperValueFuture": 0,
+                "lineupLocked": false,
+                "onTeamId": 1,
+                "player": {
+                  "active": true,
+                  "defaultPositionId": 4,
+                  "droppable": true,
+                  "eligibleSlots": [
+                    5,
+                    6,
+                    23,
+                    7,
+                    20,
+                    21
+                  ],
+                  "firstName": "Trey",
+                  "fullName": "Trey McBride",
+                  "id": 4361307,
+                  "injured": false,
+                  "injuryStatus": "ACTIVE",
+                  "jersey": "26",
+                  "lastName": "McBride",
+                  "lastNewsDate": 1790965800000,
+                  "proTeamId": 22,
+                  "universeId": 2
+                },
+                "rosterLocked": false,
+                "status": "ONTEAM",
+                "tradeLocked": false
+              },
+              "status": "NORMAL"
+            }
+          ]
+        },
+        "teamId": 1,
+        "tiebreak": 0.0,
+        "totalPoints": 31.4,
+        "totalPointsLive": 31.4,
+        "totalProjectedPointsLive": 128.6
+      },
+      "id": 16,
+      "matchupPeriodId": 4,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    },
+    {
+      "away": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 4,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0,
+        "totalPointsLive": 0.0,
+        "totalProjectedPointsLive": 104.0
+      },
+      "home": {
+        "adjustment": 0.0,
+        "cumulativeScore": {
+          "losses": 0,
+          "scoreByStat": null,
+          "statBySlot": null,
+          "ties": 0,
+          "wins": 0
+        },
+        "teamId": 3,
+        "tiebreak": 0.0,
+        "totalPoints": 0.0,
+        "totalPointsLive": 0.0,
+        "totalProjectedPointsLive": 110.3
+      },
+      "id": 17,
+      "matchupPeriodId": 4,
+      "playoffTierType": "NONE",
+      "winner": "UNDECIDED"
+    }
+  ],
+  "scoringPeriodId": 4,
+  "seasonId": 2026,
+  "segmentId": 0,
+  "status": {
+    "activatedDate": 1787630400000,
+    "createdAsLeagueType": 0,
+    "currentLeagueType": 0,
+    "currentMatchupPeriod": 4,
+    "finalScoringPeriod": 18,
+    "firstScoringPeriod": 1,
+    "isActive": true,
+    "isExpired": false,
+    "isFull": true,
+    "isPlayoffMatchupEdited": false,
+    "isToBeDeleted": false,
+    "isViewable": true,
+    "isWaiverOrderEdited": false,
+    "latestScoringPeriod": 4,
+    "previousSeasons": [
+      2024,
+      2025
+    ],
+    "standingsUpdateDate": 1790763000000,
+    "teamsJoined": 10,
+    "transactionScoringPeriod": 4,
+    "waiverLastExecutionDate": 1790751720000,
+    "waiverNextExecutionDate": 1791356400000
+  }
+}
