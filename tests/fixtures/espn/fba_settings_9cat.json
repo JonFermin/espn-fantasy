@@ -314,7 +314,7 @@
           62
         ]
       },
-      "periodTypeId": 2,
+      "periodTypeId": 1,
       "playoffMatchupPeriodLength": 7,
       "playoffReseed": false,
       "playoffSeedingRule": "H2H_RECORD",

@@ -69,13 +69,16 @@ one (`tests/fixtures/espn/real/test_real_fixtures.py`).
   points). `matchupTieRule` and `playoffMatchupTieRule` are `NONE`.
 - `settings.rosterSettings`: `lineupSlotCounts` (`ffl`: QB 1, RB 2, WR 2, TE 1, FLEX 1, D/ST 1, K 1, BE 7, IR 1;
   `fba`: PG, SG, SF, PF, C, G, F 1 each, UTIL 3, BE 3, IR 3), `positionLimits` (−1 = none), the two lock types (§1
-  #4), `lineupSlotStatLimits: {}`, `isBenchUnlimited: true`, `isUsingUndroppableList: true`, `moveLimit: -1`.
+  #4; `LeagueSettings.lineup_lock_type` and `roster_lock_type`), `lineupSlotStatLimits: {}`, `isBenchUnlimited: true`,
+  `isUsingUndroppableList: true`, `moveLimit: -1`.
 - `settings.acquisitionSettings`: `WAIVERS_TRADITIONAL`, `isUsingAcquisitionBudget: false` (budget 100 unused),
   `waiverHours: 24`, `waiverProcessDays` (`ffl`: every day but Tuesday; `fba`: Sunday), `waiverProcessHour` (§1 #8),
   `matchupAcquisitionLimit` (`ffl`: −1; `fba`: 3/7 per day), `transactionLockingEnabled: false`.
 - `settings.scheduleSettings`: `periodTypeId` (1 in `ffl`, 2 in `fba`), `matchupPeriodCount` (13 and 18 regular-season
   matchups), `matchupPeriods`, `playoffTeamCount` (4 and 6), `playoffMatchupPeriodLength` (2 weeks and 1 week),
   `playoffSeedingRule` (`TOTAL_POINTS_SCORED`, `H2H_RECORD`). NFL playoffs: matchup 14 = weeks 14–15, 15 = weeks 16–17.
+  `ScheduleSettings` reads `matchupPeriods` as scoring periods only under `periodTypeId` 1 and answers `None` for the
+  NBA league's week ids (§1 #1).
 - `settings.tradeSettings`: deadline Wed Dec 2 2026 noon ET (`ffl`) and Fri Feb 26 2027 noon ET (`fba`),
   `revisionHours: 24`, `vetoVotesRequired` 4 and 3, `max: -1`.
 - `status`: `currentMatchupPeriod`, `latestScoringPeriod`, `firstScoringPeriod`, `finalScoringPeriod` (17 and 153),
@@ -177,7 +180,9 @@ one (`tests/fixtures/espn/real/test_real_fixtures.py`).
 - The web client ships each game's calendar as constants: `scoringPeriods[]` (`id`, `startDate`, `endDate`,
   `preSeason`, `postSeason`) and `periodTypes[]` (0 season-long, 1 daily, 2 weekly; `periods[]` with
   `scoringPeriodStart`/`scoringPeriodEnd`). Periods run 3 a.m. to 3 a.m. ET; period 1's stored start is a preseason
-  placeholder, so the client uses `endDate` minus one period (NFL weeks run Tuesday to Tuesday).
+  placeholder, so the client uses `endDate` minus one period (NFL weeks run Tuesday to Tuesday). Both sport plugins
+  turn their periods at that hour (`fm.sports.base.PERIOD_TURN`). The "daily" type (1) is one scoring period per
+  period in both games (a week each in `ffl`); the weekly type (2) groups `fba` days into weeks.
 - `scripts/capture/capture.py webclient` re-extracts it each season and checks it against the pro schedule.
   Fixtures: `*/calendar.json` (the league's own period type plus the season-long one). The same bundle labels each
   game's stat splits (§1 #11) and holds the write code (section 4), both in `webclient.json`.
@@ -274,7 +279,8 @@ pending item (new, gone or changed) touching our team.
 - **NFL:** free agents after waivers clear; a dropped player sits on waivers 24 h (`waiverHours`). **NBA:**
   `rosterLocktimeType: FIRSTGAME_SCORINGPERIOD`: adds and drops lock at the day's first tip, and the per-matchup
   limit is `rate × days in the matchup`. Which day an add lands on after the first tip (the client sends
-  `latestScoringPeriod`) is unverified.
+  `latestScoringPeriod`) is unverified. The cutoff follows each league's roster lock type:
+  `SportPlugin.transaction_cutoff(team, period, schedule, lock_type=settings.roster_lock_type)`.
 - **Verify:** `mRoster`: roster has `add`, lacks `drop`; `transactionCounter` moved.
 - **Mode: API**, as for lineups.
 

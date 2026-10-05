@@ -167,7 +167,7 @@ writes are unverified**, and the spike covers them.
 | Flow | Preconditions (checked via API) | Verified via API |
 |---|---|---|
 | `set_lineup(moves)` | no affected player locked; slot eligibility | slots match the requested lineup |
-| `add_drop(add, drop)` | add is a free agent (not on waivers); drop not protected; roster space; NBA: before the day's first tip | roster has `add`, lacks `drop` |
+| `add_drop(add, drop)` | add is a free agent (not on waivers); drop not protected; roster space; before the league's roster lock (`rosterLocktimeType`: the day's first tip in the NBA league) | roster has `add`, lacks `drop` |
 | `claim_waiver(add, drop, bid)` | claim window open; budget ≥ bid; no duplicate claim | pending claim exists with the bid |
 | `propose_trade(team, give, get)` | before deadline; **no player locked**; both rosters legal afterward; no open offer to that team | pending offer exists |
 | `respond_trade(offer, accept\|decline)` | offer still pending; no player locked | status changed |
@@ -356,8 +356,10 @@ the `as_of` of each input.
 
 ### 9.3 NBA streaming
 
-- **Timing:** ESPN locks NBA adds, drops, and trades at the day's *first* tip, even though lineups lock per game. A
-  streamer must be added before the first game of the day to play that day.
+- **Timing:** adds, drops, and trades lock by the league's `rosterLocktimeType`, a setting of its own next to the
+  lineup lock. The real NBA league's `FIRSTGAME_SCORINGPERIOD` locks them at the day's *first* tip even though its
+  lineups lock per game, so a streamer must be added before the first game of the day to play that day
+  (`SportPlugin.transaction_cutoff` with `LeagueSettings.roster_lock_type`; an unknown or weekly type is refused).
 - **Limits:** respect the league's matchup acquisition limit (often about one per game day) and any games-played
   limit, both read from settings.
 - For the current matchup week, find **open slot-days**: days where active slots outnumber players with games.
@@ -371,12 +373,16 @@ the `as_of` of each input.
 - **Facts from the real leagues (read 2026-10-05; confirmed by the real fixtures of #14, `docs/espn-api.md`):**
   - NBA scoring periods are **days**. Day 1 is opening night (Tue Oct 20, 2026), and `status.finalScoringPeriod` is the
     last fantasy day (153, Sun Mar 21, 2027 in the real league). NBA games in `proTeamSchedules_wl` are keyed by
-    that day number.
+    that day number. ESPN's days (and NFL weeks) run from 3 a.m. to 3 a.m. ET, not midnight to midnight: a late West
+    Coast game is still in its day after midnight, and so is a lineup set before 3 a.m.
   - `scheduleSettings.matchupPeriods` maps a matchup to schedule-period IDs (`{"1": [1], …}`), **not to days**: the
     IDs are periods of the type `scheduleSettings.periodTypeId` names (weeks in the real league), and ESPN's web client
     calendar maps those to days. Matchup 1 = days 1–6 (Tue Oct 20 – Sun Oct 25), matchups 2–17 = 7-day Monday–Sunday
     weeks, matchup 18 = days 119–132 (14 days around the All-Star break), matchups 19–21 (playoffs) = days 133–153:
     6 + 16×7 + 14 + 3×7 = 153 (`tests/fixtures/espn/real/fba/calendar.json`). No read view carries that calendar.
+    `fm.espn.settings` reads `matchupPeriods` as scoring periods only under `periodTypeId` 1 (ESPN's per-scoring-period
+    type, the NFL league's) and otherwise answers `None`, so the weekly transaction cap counts the trailing seven days
+    in NBA until #31 ships the calendar.
   - `matchupAcquisitionLimit` is a per-day rate when `matchupLimitPerScoringPeriod` is true: "3 adds per weekly
     matchup" arrives as 3/7. Use `AcquisitionSettings.matchup_limit_for(days)`, never the raw number.
   - Both real leagues are H2H points with traditional waivers (no FAAB, so there are no bids). The NFL league seeds its

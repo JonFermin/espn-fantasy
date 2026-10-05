@@ -14,7 +14,7 @@ import json
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -46,6 +46,7 @@ from fm.sports.base import (
     game_for,
     is_provisional,
     last_start,
+    period_turn,
     plugin_for,
     start_times,
     teams_in,
@@ -57,6 +58,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 PRO_SCHEDULE = FIXTURES / "sports" / "ffl_pro_schedule_2026.json"
 FFL_PPR = FIXTURES / "espn" / "ffl_settings_ppr.json"
 FBA_POINTS = FIXTURES / "espn" / "fba_settings_points.json"
+REAL_FFL = FIXTURES / "espn" / "real" / "ffl"  # the real NFL league (ROADMAP #14): mSettings and ESPN's calendar
 EASTERN = ZoneInfo("America/New_York")
 
 # Week 4 and 5 instants from the fixture (UTC). Oct 1 20:15 ET is Oct 2 00:15 UTC, and so on.
@@ -578,21 +580,69 @@ def test_period_window_spans_first_to_last_kickoff(schedule: ScheduleLike) -> No
     assert NFL.period_window(99, schedule) is None
 
 
-def test_scoring_period_rolls_over_when_the_last_game_ends(schedule: ScheduleLike) -> None:
+def test_scoring_period_turns_at_3am_eastern_after_the_last_game(schedule: ScheduleLike) -> None:
     assert NFL.scoring_period_at(datetime(2026, 9, 1, tzinfo=UTC), schedule) == 4  # before the first known game
     assert NFL.scoring_period_at(TNF_WEEK_4, schedule) == 4
     assert NFL.scoring_period_at(EARLY_WEEK_4 + timedelta(hours=1), schedule) == 4
     assert NFL.scoring_period_at(MNF_WEEK_4 + timedelta(hours=3), schedule) == 4  # Monday night still on
-    assert NFL.scoring_period_at(MNF_WEEK_4 + NFL_GAME_DURATION, schedule) == 5
+    # ESPN turns the week at 3 a.m. ET after Monday night, not when the game ends: Tuesday 00:15 ET is still week 4.
+    tuesday = datetime(2026, 10, 6, 7, 0, tzinfo=UTC)  # 03:00 EDT
+    assert period_turn(date(2026, 10, 6)) == tuesday and eastern(tuesday) == "Tue 03:00"
+    assert NFL.scoring_period_at(MNF_WEEK_4 + NFL_GAME_DURATION, schedule) == 4
+    assert NFL.scoring_period_at(tuesday - timedelta(seconds=1), schedule) == 4
+    assert NFL.scoring_period_at(tuesday, schedule) == 5
     assert NFL.scoring_period_at(TNF_WEEK_5 - timedelta(days=1), schedule) == 5  # mid-week: next lineup is week 5
-    assert NFL.scoring_period_at(MNF_WEEK_5 + timedelta(hours=3), schedule) == 5
-    assert NFL.scoring_period_at(MNF_WEEK_5 + NFL_GAME_DURATION, schedule) is None  # past the fixture's last game
+    assert NFL.scoring_period_at(MNF_WEEK_5 + NFL_GAME_DURATION, schedule) == 5
+    week_5_turn = datetime(2026, 10, 13, 7, 0, tzinfo=UTC)
+    assert NFL.scoring_period_at(week_5_turn - timedelta(seconds=1), schedule) == 5
+    assert NFL.scoring_period_at(week_5_turn, schedule) is None  # past the fixture's last week
     with pytest.raises(ValueError, match="aware"):
         NFL.scoring_period_at(datetime(2026, 10, 4), schedule)
 
 
-def test_nfl_has_no_transaction_cutoff(schedule: ScheduleLike) -> None:
-    assert NFL.transaction_cutoff(4, schedule) is None
+def test_weeks_turn_where_espns_own_calendar_turns_them(schedule: ScheduleLike) -> None:
+    """ESPN's web client runs ffl week N from Tuesday 3 a.m. to Tuesday 3 a.m. ET (``real/ffl/calendar.json``,
+    docs/espn-api.md section 3); the plugin derives the same turn from the schedule's games, no weekday hardcoded."""
+    calendar = json.loads((REAL_FFL / "calendar.json").read_text(encoding="utf-8"))
+    windows = {
+        period["id"]: (
+            datetime.fromtimestamp(period["startDate"] / 1000, tz=UTC),
+            datetime.fromtimestamp(period["endDate"] / 1000, tz=UTC),
+        )
+        for period in calendar["scoringPeriods"]
+        if period["id"] in (4, 5)  # the weeks the schedule fixture holds
+    }
+    assert windows[4][1] == windows[5][0]
+    for period, (start, end) in windows.items():
+        assert eastern(start) == eastern(end) == "Tue 03:00"
+        assert NFL.scoring_period_at(start, schedule) == period
+        assert NFL.scoring_period_at(end - timedelta(milliseconds=1), schedule) == period
+
+
+@pytest.mark.parametrize(
+    ("lock_type", "buf", "car"),
+    [
+        (LockType.INDIVIDUAL_GAME, MNF_WEEK_5, None),  # each player at his own kickoff; a bye never closes
+        (LockType.FIRSTGAME_SCORINGPERIOD, TNF_WEEK_5, TNF_WEEK_5),  # everyone at the week's opener
+    ],
+    ids=["per-game", "first-game"],
+)
+def test_adds_and_drops_close_by_the_leagues_roster_lock(
+    schedule: ScheduleLike, lock_type: LockType, buf: datetime, car: datetime | None
+) -> None:
+    assert NFL.transaction_cutoff(team("BUF"), 5, schedule, lock_type=lock_type) == buf
+    assert NFL.transaction_cutoff(team("CAR"), 5, schedule, lock_type=lock_type) == car  # CAR is on bye
+    assert NFL.transaction_cutoff(team("BUF"), 99, schedule, lock_type=lock_type) is None
+
+
+def test_the_roster_lock_comes_from_league_settings(schedule: ScheduleLike, ffl_ppr: LeagueSettings) -> None:
+    # Both NFL leagues lock rosters per game (rosterLocktimeType): a player can be dropped until his own kickoff.
+    real = load_league_settings(REAL_FFL / "mSettings.json")
+    assert ffl_ppr.roster_lock_type is LockType.INDIVIDUAL_GAME and real.roster_lock_type is LockType.INDIVIDUAL_GAME
+    assert NFL.transaction_cutoff(team("ATL"), 4, schedule, lock_type=real.roster_lock_type) == MNF_WEEK_4
+    assert NFL.transaction_cutoff(team("PIT"), 4, schedule, lock_type=real.roster_lock_type) == TNF_WEEK_4
+    with pytest.raises(ValueError, match="roster lock type is UNKNOWN"):
+        NFL.transaction_cutoff(team("ATL"), 4, schedule, lock_type=LockType.UNKNOWN)
 
 
 # --- decision registry ------------------------------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 """ESPN id maps and the ``mSettings`` parser on the NFL PPR, NBA points and NBA 9-cat fixtures.
 
 The fixtures under ``tests/fixtures/espn/`` are hand-built stand-ins in the shape of ESPN's ``mSettings`` response
-(no real league or manager names); ROADMAP #14 replaces them with scrubbed real-league captures.
+(no real league or manager names); ROADMAP #14 replaces them with scrubbed real-league captures. The schedule tests
+already read those captures (``tests/fixtures/espn/real/``) where the real leagues show what a stand-in cannot.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pydantic import ValidationError
 
 from fm.espn.ids import FBA, FFL, Game, InjuryStatus, ids_for
 from fm.espn.settings import (
+    SCORING_PERIOD_TYPE,
     AcquisitionType,
     LeagueSettings,
     LockType,
@@ -31,6 +33,8 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "espn"
 FFL_PPR = FIXTURES / "ffl_settings_ppr.json"
 FBA_POINTS = FIXTURES / "fba_settings_points.json"
 FBA_9CAT = FIXTURES / "fba_settings_9cat.json"
+REAL_FFL = FIXTURES / "real" / "ffl" / "mSettings.json"
+REAL_FBA = FIXTURES / "real" / "fba" / "mSettings.json"
 
 
 def _view(path: Path) -> dict[str, Any]:
@@ -181,6 +185,7 @@ def test_ffl_position_limits(ffl_ppr: LeagueSettings) -> None:
 def test_ffl_lock_type(ffl_ppr: LeagueSettings) -> None:
     assert ffl_ppr.lineup_lock_type is LockType.INDIVIDUAL_GAME
     assert ffl_ppr.lineup_lock_type_raw == "INDIVIDUAL_GAME"
+    assert ffl_ppr.roster_lock_type is LockType.INDIVIDUAL_GAME
     assert ffl_ppr.roster_lock_type_raw == "INDIVIDUAL_GAME"
 
 
@@ -207,6 +212,7 @@ def test_ffl_trade_deadline(ffl_ppr: LeagueSettings) -> None:
 
 def test_ffl_schedule_and_playoff_weeks(ffl_ppr: LeagueSettings) -> None:
     schedule = ffl_ppr.schedule
+    assert schedule.period_type_id == SCORING_PERIOD_TYPE and schedule.lists_scoring_periods
     assert schedule.regular_season_matchups == 14 and schedule.playoff_team_count == 6
     assert schedule.playoff_matchup_period_length == 1 and not schedule.variable_playoff_matchup_period_length
     assert schedule.playoff_seeding_rule == "TOTAL_POINTS_SCORED"
@@ -298,16 +304,58 @@ def test_fba_acquisition_limits_without_faab(fba_points: LeagueSettings) -> None
 
 def test_fba_daily_scoring_periods_and_playoffs(fba_points: LeagueSettings) -> None:
     schedule = fba_points.schedule
+    # This stand-in lists each matchup's days, which ESPN does under its per-scoring-period type (1): day N is
+    # period N. The real league lists weeks instead (test_real_nba_matchups_list_weeks_not_days).
+    assert schedule.period_type_id == SCORING_PERIOD_TYPE and schedule.lists_scoring_periods
     assert schedule.regular_season_matchups == 19
     assert schedule.scoring_periods(1) == (1, 2, 3, 4, 5, 6)  # opening Tuesday through Sunday
     assert schedule.scoring_periods(2) == (7, 8, 9, 10, 11, 12, 13)
     assert schedule.matchup_period_for(9) == 2
     assert schedule.matchup_period_for(fba_points.current_scoring_period or 0) == fba_points.current_matchup_period == 4
     assert schedule.playoff_matchup_periods == (20, 21, 22)
-    assert len(schedule.playoff_scoring_periods) == 21 and schedule.playoff_scoring_periods[0] == 133
+    playoff_days = schedule.playoff_scoring_periods
+    assert playoff_days is not None and len(playoff_days) == 21 and playoff_days[0] == 133
     assert schedule.playoff_matchup_period_length == 7
     assert fba_points.trade.deadline == datetime(2027, 2, 4, 20, 0, tzinfo=UTC)
     assert (fba_points.first_scoring_period, fba_points.final_scoring_period) == (1, 175)
+
+
+def test_real_nba_matchups_list_weeks_not_days() -> None:
+    """The real NBA league lists its matchups as weeks (``periodTypeId`` 2; docs/espn-api.md section 1 #1): matchup 1 is
+    week 1, days 1-6, and the playoffs are days 133-153. Read as days, matchup N would be the single day N, so the
+    schedule answers ``None`` instead until ESPN's web-client calendar maps weeks to days (ROADMAP #31)."""
+    real = load_league_settings(REAL_FBA)
+    schedule = real.schedule
+    assert schedule.period_type_id == 2 and not schedule.lists_scoring_periods
+    assert schedule.matchup_periods[1] == (1,) and schedule.matchup_periods[21] == (21,)  # week ids, as ESPN sends them
+    assert schedule.matchup_period_for(5) is None  # day 5 is in matchup 1, not "matchup 5"
+    assert schedule.scoring_periods(1) is None and schedule.scoring_periods(5) is None
+    assert schedule.playoff_scoring_periods is None  # not (19, 20, 21)
+    assert schedule.playoff_matchup_periods == real.playoff_matchup_periods == (19, 20, 21)  # matchup ids still hold
+    assert (real.current_matchup_period, real.final_scoring_period) == (1, 153)
+
+
+def test_real_nfl_matchups_list_scoring_periods() -> None:
+    real = load_league_settings(REAL_FFL)
+    schedule = real.schedule
+    assert schedule.period_type_id == SCORING_PERIOD_TYPE and schedule.lists_scoring_periods
+    assert schedule.matchup_period_for(4) == 4 and schedule.matchup_period_for(15) == 14
+    assert schedule.scoring_periods(14) == (14, 15) and schedule.scoring_periods(99) == ()
+    assert schedule.playoff_scoring_periods == (14, 15, 16, 17)
+
+
+def test_matchups_of_an_unknown_period_type_are_not_read_as_scoring_periods(ffl_ppr: LeagueSettings) -> None:
+    view = _view(FFL_PPR)
+    del view["settings"]["scheduleSettings"]["periodTypeId"]
+    missing = parse_league_settings(view).schedule
+    assert missing.period_type_id is None and not missing.lists_scoring_periods
+    assert missing.matchup_period_for(4) is None and missing.scoring_periods(4) is None
+    # Settings stored before periodTypeId was read validate too, as unknown, until the next sync re-parses them.
+    stored = ffl_ppr.model_dump(mode="json")
+    del stored["schedule"]["period_type_id"]
+    del stored["roster_lock_type"]
+    restored = LeagueSettings.model_validate(stored)
+    assert restored.schedule.period_type_id is None and restored.roster_lock_type is LockType.UNKNOWN
 
 
 # --- NBA 9-cat --------------------------------------------------------------------------------------------------------
@@ -436,11 +484,22 @@ def test_lock_type_variants_keep_raw_value() -> None:
     unknown = parse_league_settings(view)
     assert unknown.lineup_lock_type is LockType.UNKNOWN and unknown.lineup_lock_type_raw == "FIRST_GAME_OF_DAY"
 
+    # rosterLocktimeType (adds, drops and trades) parses the same way, independently of the lineup lock.
+    roster["rosterLocktimeType"] = "FIRSTGAME_SCORINGPERIOD"  # the real NBA league's value
+    first_game = parse_league_settings(view)
+    assert first_game.roster_lock_type is LockType.FIRSTGAME_SCORINGPERIOD
+    assert first_game.roster_lock_type_raw == "FIRSTGAME_SCORINGPERIOD"
+    assert first_game.lineup_lock_type is LockType.UNKNOWN
+    for weekly in ("FIRSTGAME_WEEKLY", "INDIVIDUAL_FIRSTGAME_WEEKLY"):
+        roster["rosterLocktimeType"] = weekly
+        parsed = parse_league_settings(view)
+        assert parsed.roster_lock_type is LockType.UNKNOWN and parsed.roster_lock_type_raw == weekly
+
     del roster["lineupLocktimeType"]
     del roster["rosterLocktimeType"]
     missing = parse_league_settings(view)
     assert missing.lineup_lock_type is LockType.UNKNOWN and missing.lineup_lock_type_raw is None
-    assert missing.roster_lock_type_raw is None
+    assert missing.roster_lock_type is LockType.UNKNOWN and missing.roster_lock_type_raw is None
 
 
 def test_unknown_acquisition_type_keeps_raw_value() -> None:

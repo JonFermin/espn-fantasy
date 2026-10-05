@@ -8,10 +8,12 @@ A :class:`SportPlugin` answers four questions about its sport:
   in NBA). ESPN sends ``eligibleSlots`` per player and that wins where present; the plugin table is the rule for a
   position and the fallback for a player without one.
 - **Scoring periods** (:class:`PeriodKind`): a week in NFL, a day in NBA, and where one period gives way to the next
-  given the pro schedule.
-- **Lock times**: when each player locks, from the pro schedule and the league's lock type
-  (``LeagueSettings.lineup_lock_type``: at each player's own game, or everyone at the period's first game). Nothing
-  here is hardcoded to a kickoff time or a weekday; league settings are data.
+  given the pro schedule. ESPN turns its periods at 03:00 US Eastern (:data:`PERIOD_TURN`), not at midnight and not
+  when the last game ends.
+- **Lock times**: when each player locks, from the pro schedule and the league's lock types
+  (``LeagueSettings.lineup_lock_type`` for lineups, ``roster_lock_type`` for adds, drops and trades: at each player's
+  own game, or everyone at the period's first game). Nothing here is hardcoded to a kickoff time or a weekday; league
+  settings are data.
 
 The pro schedule is ESPN's ``proTeamSchedules_wl`` view, which the ESPN read client parses into
 ``fm.espn.models.ProSchedule`` (ROADMAP #9). This module does not import that model: it asks for the small
@@ -33,11 +35,12 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from functools import cached_property
 from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Protocol
+from typing import Annotated, Any, ClassVar, Final, Protocol
+from zoneinfo import ZoneInfo
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict
 
@@ -48,6 +51,13 @@ from fm.espn.settings import LeagueSettings, LockType
 PLUGIN_ATTR = "PLUGIN"
 FREE_AGENT_TEAM = 0  # ESPN's pro team id for unsigned players; it never has a game
 _PLACEHOLDER_STAT = re.compile(r"^STAT_(\d+)$")  # the label IdMaps gives an unknown stat id
+
+EASTERN: Final = ZoneInfo("America/New_York")
+"""ESPN's fantasy calendar runs on US Eastern time."""
+PERIOD_TURN: Final = time(3)
+"""When ESPN's scoring periods turn, US Eastern time. Its web client's calendar runs every period from 3 a.m. to 3 a.m.
+ET (docs/espn-api.md section 3), so a game still on after midnight is in the period it started in, and a lineup set
+before 3 a.m. is still for that period (``ROSTER``, not ``FUTURE_ROSTER``)."""
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -61,6 +71,20 @@ type UtcInstant = Annotated[AwareDatetime, AfterValidator(_to_utc)]
 def _require_aware(at: datetime, what: str = "at") -> None:
     if at.tzinfo is None or at.utcoffset() is None:
         raise ValueError(f"{what} must be an aware datetime (UTC); got a naive {at.isoformat()}")
+
+
+def fantasy_day(at: datetime) -> date:
+    """The day of ESPN's fantasy calendar an aware instant falls in: its US Eastern date, except that the day turns at
+    :data:`PERIOD_TURN` (03:00 ET) rather than at midnight."""
+    _require_aware(at)
+    local = at.astimezone(EASTERN)
+    return local.date() if local.time() >= PERIOD_TURN else local.date() - timedelta(days=1)
+
+
+def period_turn(day: date) -> datetime:
+    """When ESPN's fantasy ``day`` begins, and the day before it ends: :data:`PERIOD_TURN` (03:00 US Eastern) on that
+    date, as an aware UTC instant."""
+    return datetime.combine(day, PERIOD_TURN, tzinfo=EASTERN).astimezone(UTC)
 
 
 class PeriodKind(StrEnum):
@@ -159,7 +183,8 @@ def teams_in(schedule: ScheduleLike, scoring_period: int) -> frozenset[int]:
 
 class PeriodWindow(BaseModel):
     """The span of a scoring period's games: first start, last start, and ``end`` (last start plus the sport's game
-    duration), after which the next period's lineups are the current ones."""
+    duration), when its games should be over. Its lineups stay current until ESPN's calendar turns, later
+    (:meth:`SportPlugin.scoring_period_at`)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -293,7 +318,8 @@ class SportPlugin(ABC):
     A subclass sets ``game`` (ESPN game key), ``sport`` (the ``config.toml`` value), ``period_kind`` and
     ``game_duration``, and provides ``slot_positions``; everything else is derived here so NFL and NBA share one
     implementation of eligibility, period windows and lock times. ``game_duration`` is how long after its start a game
-    is assumed to run; it only decides when one scoring period gives way to the next (:meth:`scoring_period_at`).
+    is assumed to run; it only puts the end of a period's games (:class:`PeriodWindow`). Which period is current
+    follows ESPN's calendar instead (:meth:`scoring_period_at`).
 
     Plugins are stateless; each module exposes one instance as ``PLUGIN`` for :func:`plugin_for`.
     """
@@ -365,15 +391,17 @@ class SportPlugin(ABC):
     def scoring_period_at(self, at: datetime, schedule: ScheduleLike) -> int | None:
         """The scoring period whose lineups are current at ``at``, from the schedule alone.
 
-        A period is current from the end of the previous period's last game until the end of its own; before the
-        schedule's first game it is the first period, after its last game ``None``. ESPN's own ``scoringPeriodId``
-        (``LeagueSettings.current_scoring_period``) is authoritative when fresh; this is the estimate for the ticks
-        between syncs, and it never hardcodes a rollover weekday.
+        ESPN moves on from a period at :data:`PERIOD_TURN` (03:00 US Eastern) after the fantasy day of its last game:
+        Tuesday 3 a.m. after Monday night, Monday 3 a.m. after a week that ends on Sunday. A period is current from the
+        previous period's turn until its own; before the schedule's first game it is the first period, after the last
+        period's turn ``None``. ESPN's own ``scoringPeriodId`` (``LeagueSettings.current_scoring_period``) is
+        authoritative when fresh; this is the estimate for the ticks between syncs, and it never hardcodes a rollover
+        weekday.
         """
         _require_aware(at)
         for period in sorted(schedule.scoring_periods):
-            window = self.period_window(period, schedule)
-            if window is not None and at < window.end:
+            last = last_start(schedule, period)
+            if last is not None and at < period_turn(fantasy_day(last) + timedelta(days=1)):
                 return period
         return None
 
@@ -474,13 +502,30 @@ class SportPlugin(ABC):
                 )
         return tuple(sorted(locks, key=lambda lock: (lock.at, lock.team_id)))
 
-    def transaction_cutoff(self, period: int, schedule: ScheduleLike) -> datetime | None:
-        """When adds and drops for ``period`` close, or ``None`` when the sport has no such cutoff.
+    def transaction_cutoff(
+        self,
+        team_id: int,
+        period: int,
+        schedule: ScheduleLike,
+        *,
+        lock_type: LockType,
+    ) -> datetime | None:
+        """When adds, drops and trades of players on pro team ``team_id`` close in ``period``, under the league's roster
+        lock type (``LeagueSettings.roster_lock_type``, ESPN's ``rosterLocktimeType``; docs/espn-api.md section 1 #4).
 
-        NFL has none (waivers run on the league's own schedule, read from settings); NBA locks adds, drops and trades
-        at the day's first tip (DESIGN section 9.3), which the NBA plugin returns.
+        The rule is :meth:`lock_time`'s, applied to the roster lock instead of the lineup lock. ``INDIVIDUAL_GAME``
+        closes them at the team's own start and never for a team without a game; a first-game lock
+        (``FIRSTGAME_SCORINGPERIOD``, the real NBA league's) closes them for everyone at the period's first start, so
+        a streamer must be added before the day's first tip (DESIGN section 9.3). ``LockType.UNKNOWN``, which ESPN's
+        weekly types parse as, raises ``ValueError``, and there is no default: a guessed cutoff could plan an add that
+        can no longer play or a drop of a player who is already locked.
         """
-        return None
+        if lock_type is LockType.UNKNOWN:
+            raise ValueError(
+                "roster lock type is UNKNOWN; map ESPN's value (LeagueSettings.roster_lock_type_raw) to "
+                "INDIVIDUAL_GAME or a first-game lock before computing when adds and drops close"
+            )
+        return self.lock_time(team_id, period, schedule, lock_type=lock_type)
 
 
 # --- discovery --------------------------------------------------------------------------------------------------------

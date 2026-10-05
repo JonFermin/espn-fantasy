@@ -2,7 +2,8 @@
 
 Leagues come from ``tests/fixtures/config.sample.toml`` (nfl: 3 transactions/week, 35% FAAB cap, untouchables
 ``"Sample Player"`` and ``4242424``) and league settings from the hand-built ``mSettings`` fixtures (ffl: $100 FAAB,
-one scoring period per matchup; fba: daily scoring periods grouped into weekly matchups).
+one scoring period per matchup; fba: daily scoring periods grouped into weekly matchups), plus the real NBA league's
+``mSettings`` (``tests/fixtures/espn/real/fba``), whose matchups list week ids instead of days.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from fm.proposals import (
     TradeResponsePayload,
     TransactionCancelPayload,
     WaiverPayload,
+    acquisitions_this_week,
     default_setting,
     effective_setting,
     evaluate,
@@ -454,6 +456,24 @@ class TestWeeklyCap:
         with pytest.raises(PolicyError, match="1 of 1 transactions already used this week"):
             add_drop(store, config, league, 2, period=13)
         assert add_drop(store, config, league, 2, period=14).status == "proposed"
+
+    def test_real_nba_week_ids_are_not_read_as_days(self, store: Store, config: Config) -> None:
+        """The real NBA league lists its matchups as weeks: matchup 1 is days 1-6 but its ``matchupPeriods`` say
+        ``{"1": [1]}``. Read as days, day 5 was "matchup 5" holding only itself and moves on days 2-4 went uncounted
+        (1 of 4 in the phase 4 review). Until ESPN's calendar maps weeks to days (ROADMAP #31) the cap is the
+        trailing seven days."""
+        nba = config.league("nba").model_copy(update={"policy": Policy(max_transactions_per_week=4)})
+        config = config.model_copy(update={"leagues": (config.league("nfl"), nba)})
+        league = seed_league(store, nba)
+        real = seed_settings(store, league, "real/fba/mSettings.json")
+        assert real.schedule.matchup_period_for(5) is None
+        for add, day in ((1, 2), (2, 3), (3, 4), (4, 5)):
+            add_drop(store, config, league, add, period=day)
+        assert acquisitions_this_week(store, league, real, scoring_period_id=5, now=NOW) == 4
+        with pytest.raises(PolicyError, match="4 of 4 transactions already used this week"):
+            add_drop(store, config, league, 5, period=5)
+        later = NOW + timedelta(days=7, seconds=1)  # the four have left the trailing week
+        assert add_drop(store, config, league, 5, period=12, now=later).status == "proposed"
 
     def test_without_settings_or_period_the_window_is_the_trailing_week(self, store: Store, config: Config) -> None:
         league = seed_league(store, config.league("nfl"))

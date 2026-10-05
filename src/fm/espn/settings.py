@@ -10,11 +10,12 @@ holds the league configuration, ``status`` the season position, and ``gameId`` /
 
 Parsing is strict about the blocks a decision depends on (``scoringSettings``, ``rosterSettings``,
 ``scheduleSettings``) and forgiving about enumerations: an unseen ``scoringType``, lock type or acquisition type maps
-to ``UNKNOWN`` while the raw string is kept, so a new ESPN value surfaces in output instead of crashing a sync. The
-exact lineup-lock key and value set is an open unknown that the real-league capture (ROADMAP #14) settles; this module
-reads ``rosterSettings.lineupLocktimeType`` and keeps ``rosterLocktimeType`` raw. The shape of
-``rosterSettings.lineupSlotStatLimits`` (NBA games-played caps) is another: the parser accepts the bare integer per
-slot and stat that the fixtures use and raises on anything else, because a cap dropped silently makes lineups illegal.
+to ``UNKNOWN`` while the raw string is kept, so a new ESPN value surfaces in output instead of crashing a sync. Two
+lock keys sit in ``rosterSettings`` (ROADMAP #14, docs/espn-api.md section 1 #4): ``lineupLocktimeType`` says when
+lineup slots lock and ``rosterLocktimeType`` when adds, drops and trades do; both parse into :class:`LockType`. The
+shape of ``rosterSettings.lineupSlotStatLimits`` (NBA games-played caps) is still unseen: the parser accepts the bare
+integer per slot and stat that the fixtures use and raises on anything else, because a cap dropped silently makes
+lineups illegal.
 
 Times: ``tradeSettings.deadlineDate`` is epoch milliseconds and becomes an aware UTC datetime. ``waiverProcessHour``
 is an hour of the day in US Eastern time, as ESPN configures it; turning it into instants is the deadline job's work.
@@ -37,6 +38,11 @@ from fm.espn.ids import Game, IdMaps, ids_for
 VIEW = "mSettings"
 SLOT_STAT_LIMITS = "rosterSettings.lineupSlotStatLimits"
 FBA_GAMES_PLAYED_STAT = 42  # fba stat id ``GP``, the stat behind NBA games-played limits
+SCORING_PERIOD_TYPE = 1
+"""The ``scheduleSettings.periodTypeId`` of ESPN's per-scoring-period type (the web client calendar's ``daily`` type:
+period N is scoring period N, a week in ``ffl`` and a day in ``fba``). Only under it does ``matchupPeriods`` list
+scoring periods. The real NBA league uses the weekly type (2), whose ids are weeks that only ESPN's web-client
+calendar maps to days (docs/espn-api.md section 1 #1, ROADMAP #31)."""
 
 
 class SettingsParseError(ValueError):
@@ -79,13 +85,15 @@ _SCORING_KINDS: Mapping[ScoringType, ScoringKind] = {
 
 
 class LockType(_TolerantEnum):
-    """When a lineup slot locks: at each player's own game, or for everyone at the scoring period's first game.
+    """When a lineup slot locks (``lineupLocktimeType``), or adds, drops and trades do (``rosterLocktimeType``): at each
+    player's own game, or for everyone at the scoring period's first game.
 
     These are ESPN's own names (``settings.typeNames.locktimeTypes``). Both real leagues carry ``INDIVIDUAL_GAME`` in
-    ``rosterSettings.lineupLocktimeType`` and the NBA one ``FIRSTGAME_SCORINGPERIOD`` in ``rosterLocktimeType``
-    (ROADMAP #14, ``tests/fixtures/espn/real/*/mSettings.json``). ESPN also lists ``FIRSTGAME_WEEKLY`` and
-    ``INDIVIDUAL_FIRSTGAME_WEEKLY`` for ``fba``; a weekly lock spans several daily periods and needs the league's
-    matchup periods, so those parse as ``UNKNOWN``, which every sport plugin refuses rather than guess a lock time.
+    ``rosterSettings.lineupLocktimeType``; in ``rosterLocktimeType`` the NFL one carries ``INDIVIDUAL_GAME`` and the NBA
+    one ``FIRSTGAME_SCORINGPERIOD`` (ROADMAP #14, ``tests/fixtures/espn/real/*/mSettings.json``). ESPN also lists
+    ``FIRSTGAME_WEEKLY`` and ``INDIVIDUAL_FIRSTGAME_WEEKLY`` for ``fba``; a weekly lock spans several daily periods and
+    needs the league's matchup periods, so those parse as ``UNKNOWN``, which every sport plugin refuses rather than
+    guess a lock time.
     """
 
     INDIVIDUAL_GAME = "INDIVIDUAL_GAME"
@@ -182,35 +190,55 @@ class TradeSettings(BaseModel):
 
 
 class ScheduleSettings(BaseModel):
-    """``scheduleSettings``: matchup periods, the scoring periods inside them, and the playoff structure.
+    """``scheduleSettings``: matchup periods, the periods inside them, and the playoff structure.
 
-    A scoring period is a week in ``ffl`` and a day in ``fba``. Matchup periods above ``regular_season_matchups`` are
-    playoff rounds.
+    ``matchup_periods`` maps each matchup period to period ids of the type ``period_type_id`` names. Under
+    :data:`SCORING_PERIOD_TYPE` those are scoring periods (a week in ``ffl``, a day in ``fba``); under any other type,
+    such as the real NBA league's weeks, they are not, so :meth:`scoring_periods`, :meth:`matchup_period_for` and
+    :attr:`playoff_scoring_periods` answer ``None`` rather than read a week id as a day: only ESPN's web-client
+    calendar maps those weeks to days (ROADMAP #31). Matchup periods above ``regular_season_matchups`` are playoff
+    rounds.
     """
 
     model_config = ConfigDict(frozen=True)
 
     regular_season_matchups: int
-    matchup_periods: dict[int, tuple[int, ...]]  # matchup period -> scoring periods
+    matchup_periods: dict[int, tuple[int, ...]]  # matchup period -> period ids of the type period_type_id names
     playoff_team_count: int
     playoff_matchup_period_length: int | None
     variable_playoff_matchup_period_length: bool
     playoff_seeding_rule: str | None
+    period_type_id: int | None = None
+    """``periodTypeId``; ``None`` when ESPN sent none or the settings were stored before it was read: unknown."""
+
+    @property
+    def lists_scoring_periods(self) -> bool:
+        """True when ``matchup_periods`` lists scoring periods (:data:`SCORING_PERIOD_TYPE`)."""
+        return self.period_type_id == SCORING_PERIOD_TYPE
 
     @property
     def playoff_matchup_periods(self) -> tuple[int, ...]:
         return tuple(sorted(mp for mp in self.matchup_periods if mp > self.regular_season_matchups))
 
     @property
-    def playoff_scoring_periods(self) -> tuple[int, ...]:
+    def playoff_scoring_periods(self) -> tuple[int, ...] | None:
+        """Scoring periods of the playoff matchups; ``None`` when the matchups are not listed in scoring periods."""
+        if not self.lists_scoring_periods:
+            return None
         return tuple(sp for mp in self.playoff_matchup_periods for sp in self.matchup_periods[mp])
 
-    def scoring_periods(self, matchup_period: int) -> tuple[int, ...]:
-        """Scoring periods in a matchup period; empty when ESPN does not list it."""
+    def scoring_periods(self, matchup_period: int) -> tuple[int, ...] | None:
+        """Scoring periods in a matchup period: empty when ESPN does not list it, ``None`` when the league's matchups
+        are not listed in scoring periods (:attr:`lists_scoring_periods`)."""
+        if not self.lists_scoring_periods:
+            return None
         return self.matchup_periods.get(matchup_period, ())
 
     def matchup_period_for(self, scoring_period: int) -> int | None:
-        """The matchup period containing a scoring period, or ``None`` outside the schedule."""
+        """The matchup period containing a scoring period; ``None`` outside the schedule, and when the league's
+        matchups are not listed in scoring periods (:attr:`lists_scoring_periods`)."""
+        if not self.lists_scoring_periods:
+            return None
         for matchup_period, periods in self.matchup_periods.items():
             if scoring_period in periods:
                 return matchup_period
@@ -243,6 +271,9 @@ class LeagueSettings(BaseModel):
     slot_stat_limits: dict[int, dict[int, int]]  # slot id -> stat id -> season cap (NBA games-played limits)
     lineup_lock_type: LockType
     lineup_lock_type_raw: str | None
+    roster_lock_type: LockType = LockType.UNKNOWN
+    """When adds, drops and trades lock (``rosterLocktimeType``); ``UNKNOWN`` too for settings stored before it was
+    read, so nothing computes a cutoff from them until the next sync."""
     roster_lock_type_raw: str | None
     acquisition: AcquisitionSettings
     trade: TradeSettings
@@ -357,6 +388,7 @@ def parse_league_settings(view: Mapping[str, Any], *, game: Game | str | None = 
     scoring_kind = _SCORING_KINDS.get(scoring_type) or _infer_scoring_kind(scoring_items)
 
     lineup_lock_raw = _optional_str(roster.get("lineupLocktimeType"))
+    roster_lock_raw = _optional_str(roster.get("rosterLocktimeType"))
 
     return LeagueSettings(
         game=resolved_game,
@@ -377,7 +409,8 @@ def parse_league_settings(view: Mapping[str, Any], *, game: Game | str | None = 
         slot_stat_limits=_parse_slot_stat_limits(roster.get("lineupSlotStatLimits")),
         lineup_lock_type=LockType(lineup_lock_raw) if lineup_lock_raw else LockType.UNKNOWN,
         lineup_lock_type_raw=lineup_lock_raw,
-        roster_lock_type_raw=_optional_str(roster.get("rosterLocktimeType")),
+        roster_lock_type=LockType(roster_lock_raw) if roster_lock_raw else LockType.UNKNOWN,
+        roster_lock_type_raw=roster_lock_raw,
         acquisition=_parse_acquisition(acquisition),
         trade=_parse_trade(trade),
         schedule=_parse_schedule(schedule),
@@ -528,6 +561,7 @@ def _parse_schedule(raw: Mapping[str, Any]) -> ScheduleSettings:
         playoff_matchup_period_length=_optional_int(raw.get("playoffMatchupPeriodLength")),
         variable_playoff_matchup_period_length=bool(raw.get("variablePlayoffMatchupPeriodLength", False)),
         playoff_seeding_rule=_optional_str(raw.get("playoffSeedingRule")),
+        period_type_id=_optional_int(raw.get("periodTypeId")),
     )
 
 

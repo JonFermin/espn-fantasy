@@ -7,9 +7,11 @@ flow lookup) have passed, so a refused run never starts a browser.
 :func:`live_opener` is the real thing: it opens the persistent browser profile (``fm.browser.session``), harvests the
 ESPN session from it (``fm.espn.auth``), builds an :class:`fm.espn.client.EspnClient` with those cookies for the reads,
 and a :class:`fm.executor.transport.PlaywrightTransport` over the same browser context for the writes. A missing or
-expired session is refused before any read. For a dry run the transport refuses every send and the context aborts
-every request to ESPN's write host, so not even a UI walk that clicked too far could reach it. Tests hand the executor
-the fakes in ``fm.browser.fakes`` instead.
+expired session is refused before any read. For a dry run the transport refuses every send, and the context routes
+every request through :func:`dry_run_block_reason`, aborting anything sent to ESPN's write host and every request
+other than a GET to ``espn.com`` or its subdomains (league messages on ``lm-api-communication`` included), so not even
+a UI walk that clicked past ``UiDriver.confirm`` could save anything. Tests hand the executor the fakes in
+``fm.browser.fakes`` instead.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from playwright.sync_api import BrowserContext, Page, Route
 
@@ -33,8 +36,11 @@ from fm.store import LeagueRow
 
 logger = logging.getLogger(__name__)
 
-WRITES_ROUTE = f"https://{WRITES_HOST}/**"
-"""Every URL on ESPN's write host, as a Playwright route pattern; a dry run aborts all of them."""
+ESPN_DOMAIN = "espn.com"
+DRY_RUN_ROUTE = "**/*"
+"""A dry run routes every request of the browser context through :func:`dry_run_block_reason`."""
+DRY_RUN_ABORT = "blockedbyclient"
+"""The network error a request the dry run aborted fails with in the page."""
 
 
 class BrowserLike(Protocol):
@@ -81,9 +87,40 @@ class LiveBrowser:
         self.context.tracing.stop(path=path)
 
 
-def _abort_write(route: Route) -> None:
-    logger.warning("executor: dry run aborted a request to %s", route.request.url)
-    route.abort()
+def dry_run_block_reason(method: str, url: str) -> str | None:
+    """Why a dry run aborts this request, or ``None`` when it may go out.
+
+    Aborted: anything sent to ESPN's write host (:data:`fm.browser.flows.WRITES_HOST`), and every request other than a
+    GET to ``espn.com`` or a subdomain of it, which covers every league API (transactions, league messages on
+    ``lm-api-communication``) and the web app itself. This is the capture's write guard (``scripts/capture/guard.py``)
+    without its ``transactions`` URL marker, which only adds GETs. Page loads, API reads and the Disney sign-in
+    (``registerdisney.go.com``) go through.
+    """
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    if host == WRITES_HOST:
+        return "ESPN's write host"
+    verb = method.upper()
+    if verb != "GET" and (host == ESPN_DOMAIN or host.endswith(f".{ESPN_DOMAIN}")):
+        return f"a {verb} to an {ESPN_DOMAIN} host"
+    return None
+
+
+def _dry_run_route(route: Route) -> None:
+    """The dry run's route over every request: abort what :func:`dry_run_block_reason` names, let the rest through. A
+    request it cannot classify is aborted too."""
+    try:
+        request = route.request
+        method, url = request.method, request.url
+        reason = dry_run_block_reason(method, url)
+    except Exception as exc:  # fail closed
+        logger.warning("executor: dry run aborted a request it could not classify: %r", exc)
+        route.abort(DRY_RUN_ABORT)
+        return
+    if reason is None:
+        route.continue_()
+        return
+    logger.warning("executor: dry run aborted %s %s (%s)", method, url, reason)
+    route.abort(DRY_RUN_ABORT)
 
 
 @contextmanager
@@ -104,7 +141,7 @@ def open_live_runtime(league: LeagueRow, *, dry_run: bool, launch: LaunchOptions
         if status is SessionStatus.EXPIRING:
             logger.warning("executor: %s", describe(session))
         if dry_run:
-            browser.context.route(WRITES_ROUTE, _abort_write)
+            browser.context.route(DRY_RUN_ROUTE, _dry_run_route)
             transport: WriteTransport = RefusingTransport("dry run")
         else:
             transport = PlaywrightTransport(browser.context.request)

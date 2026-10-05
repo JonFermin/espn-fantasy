@@ -1,5 +1,5 @@
-"""The NBA sport plugin (ROADMAP #17): eligibility, stat schema, daily scoring periods, per-game locks and the add/drop
-cutoff at the day's first tip.
+"""The NBA sport plugin (ROADMAP #17): eligibility, stat schema, daily scoring periods that turn at 03:00 ET, and the
+lineup and roster locks (when lineups lock, and when adds, drops and trades close) under each league lock type.
 
 ``tests/fixtures/sports/fba_pro_schedule_2027.json`` is a real ``proTeamSchedules_wl`` capture for ``fba`` 2027 (public,
 no cookies, 2026-10-05) trimmed to days 1-3 and Christmas Day (day 67), every game listed under both teams as ESPN
@@ -30,12 +30,16 @@ from fm.espn.models import ProSchedule
 from fm.espn.settings import LeagueSettings, LockType, load_league_settings, parse_league_settings
 from fm.sports.base import (
     FREE_AGENT_TEAM,
+    PERIOD_TURN,
     LineupLock,
     PeriodKind,
     PeriodWindow,
     ScheduleLike,
     SportPlugin,
     StatSchema,
+    fantasy_day,
+    first_start,
+    period_turn,
     plugin_for,
     start_times,
     teams_in,
@@ -57,6 +61,7 @@ POOL = FIXTURES / "sources" / "market" / "espn_fba_kona_player_info.json"  # rea
 FBA_POINTS = FIXTURES / "espn" / "fba_settings_points.json"
 FBA_9CAT = FIXTURES / "espn" / "fba_settings_9cat.json"
 FFL_PPR = FIXTURES / "espn" / "ffl_settings_ppr.json"
+REAL_FBA = FIXTURES / "espn" / "real" / "fba"  # the real NBA league (ROADMAP #14): mSettings and ESPN's calendar
 
 OPENING_NIGHT = date(2026, 10, 20)  # day 1
 CHRISTMAS = 67
@@ -106,6 +111,10 @@ def _set_game(view: dict[str, Any], game_id: int, **fields: Any) -> None:
 
 def _epoch_ms(at: datetime) -> int:
     return int(at.timestamp() * 1000)
+
+
+def _from_ms(epoch_ms: int) -> datetime:
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
 
 
 def load_schedule(view: dict[str, Any] | None = None) -> ScheduleLike:
@@ -304,24 +313,50 @@ def test_every_tip_falls_on_its_periods_eastern_day(schedule: ScheduleLike) -> N
     assert eastern(DAY2_LAST) == "Wed 10-21 22:30" and DAY2_LAST.date() == date(2026, 10, 22)
 
 
-def test_scoring_period_turns_at_eastern_midnight(schedule: ScheduleLike) -> None:
+def test_scoring_period_turns_at_3am_eastern(schedule: ScheduleLike) -> None:
     assert NBA.scoring_period_at(datetime(2026, 10, 5, tzinfo=UTC), schedule) == 1  # preseason: opening night is next
     assert NBA.scoring_period_at(DAY1_FIRST - timedelta(hours=8), schedule) == 1
     assert NBA.scoring_period_at(DAY1_LAST + timedelta(hours=1), schedule) == 1  # 10:30 p.m. ET, Oct 20
+    # Day 1 lasts until 3 a.m. ET on Oct 21, not midnight: OKC at SAS may still be on after midnight (its window runs
+    # to 04:30 UTC), and a lineup set then is still day 1's (ROSTER), not day 2's (FUTURE_ROSTER).
     midnight = datetime(2026, 10, 21, 4, 0, tzinfo=UTC)  # 00:00 EDT on Oct 21
-    assert NBA.scoring_period_at(midnight - timedelta(seconds=1), schedule) == 1
-    assert NBA.scoring_period_at(midnight, schedule) == 2
-    # OKC at SAS may still be on (its window runs to 04:30 UTC), but its slots are locked in day 1's lineup; the
-    # game-end rule of the base plugin would still say day 1.
-    assert midnight < DAY1_LAST + NBA_GAME_DURATION
-    assert SportPlugin.scoring_period_at(NBA, midnight, schedule) == 1
+    turn = datetime(2026, 10, 21, 7, 0, tzinfo=UTC)  # 03:00 EDT
+    assert period_turn(date(2026, 10, 21)) == turn and fantasy_day(midnight) == OPENING_NIGHT
+    assert midnight < DAY1_LAST + NBA_GAME_DURATION < turn
+    assert NBA.scoring_period_at(midnight, schedule) == 1
+    assert NBA.scoring_period_at(turn - timedelta(seconds=1), schedule) == 1
+    assert NBA.scoring_period_at(turn, schedule) == 2
+    # The base plugin's rule (the turn after the day of a period's last game) agrees on a day with games.
+    assert SportPlugin.scoring_period_at(NBA, turn - timedelta(seconds=1), schedule) == 1
+    assert SportPlugin.scoring_period_at(NBA, turn, schedule) == 2
     assert NBA.scoring_period_at(datetime(2026, 11, 26, 17, 0, tzinfo=UTC), schedule) == 38  # a day without games
     assert NBA.scoring_period_at(XMAS_LAST, schedule) == CHRISTMAS
-    christmas_midnight = datetime(2026, 12, 26, 5, 0, tzinfo=UTC)  # 00:00 EST on Dec 26
-    assert NBA.scoring_period_at(christmas_midnight - timedelta(seconds=1), schedule) == CHRISTMAS
-    assert NBA.scoring_period_at(christmas_midnight, schedule) is None  # past the trimmed schedule's last day
+    christmas_turn = datetime(2026, 12, 26, 8, 0, tzinfo=UTC)  # 03:00 EST on Dec 26
+    assert NBA.scoring_period_at(christmas_turn - timedelta(seconds=1), schedule) == CHRISTMAS
+    assert NBA.scoring_period_at(christmas_turn, schedule) is None  # past the trimmed schedule's last day
     with pytest.raises(ValueError, match="aware"):
         NBA.scoring_period_at(datetime(2026, 10, 21, 12, 0), schedule)
+
+
+def test_scoring_periods_follow_espns_own_calendar(schedule: ScheduleLike) -> None:
+    """ESPN's web client runs fba day N from 3 a.m. to 3 a.m. ET (``real/fba/calendar.json``, docs/espn-api.md section
+    3). The plugin turns every day the trimmed schedule spans exactly there, across the end of daylight saving time."""
+    calendar = json.loads((REAL_FBA / "calendar.json").read_text(encoding="utf-8"))
+    windows = {
+        period["id"]: (_from_ms(period["startDate"]), _from_ms(period["endDate"]))
+        for period in calendar["scoringPeriods"]
+        if 2 <= period["id"] <= CHRISTMAS  # period 1 starts at a preseason placeholder; the schedule ends at day 67
+    }
+    assert len(windows) == CHRISTMAS - 1
+    for period, (start, end) in windows.items():
+        assert start.astimezone(EASTERN).time() == PERIOD_TURN and period_turn(fantasy_day(start)) == start
+        assert NBA.scoring_period_at(start, schedule) == period
+        assert NBA.scoring_period_at(end - timedelta(milliseconds=1), schedule) == period
+    assert windows[13][0] == datetime(2026, 11, 1, 8, 0, tzinfo=UTC)  # 03:00 EST, after the change from EDT
+    # The instants the phase 4 review found the plugin a day ahead of ESPN (it turned the day at midnight).
+    assert NBA.scoring_period_at(datetime(2026, 10, 22, 1, 30, tzinfo=EASTERN), schedule) == 2
+    assert NBA.scoring_period_at(datetime(2026, 10, 22, 2, 59, tzinfo=EASTERN), schedule) == 2
+    assert NBA.scoring_period_at(datetime(2026, 10, 21, 0, 30, tzinfo=EASTERN), schedule) == 1
 
 
 def test_eastern_days_follow_daylight_saving_time(schedule: ScheduleLike) -> None:
@@ -330,11 +365,19 @@ def test_eastern_days_follow_daylight_saving_time(schedule: ScheduleLike) -> Non
     assert eastern_day(datetime(2026, 11, 1, 4, 0, tzinfo=UTC)) == date(2026, 11, 1)
     assert eastern_day(datetime(2026, 11, 2, 4, 59, tzinfo=UTC)) == date(2026, 11, 1)
     assert eastern_day(datetime(2026, 11, 2, 5, 0, tzinfo=UTC)) == date(2026, 11, 2)
-    assert NBA.scoring_period_at(datetime(2026, 11, 2, 4, 59, tzinfo=UTC), schedule) == 13
-    assert NBA.scoring_period_at(datetime(2026, 11, 2, 5, 0, tzinfo=UTC), schedule) == 14
+    # ESPN's day turns at 3 a.m. local time either way: 07:00 UTC under EDT, 08:00 UTC under EST. Nov 1 is day 13.
+    assert period_turn(date(2026, 10, 31)) == datetime(2026, 10, 31, 7, 0, tzinfo=UTC)
+    assert period_turn(date(2026, 11, 1)) == datetime(2026, 11, 1, 8, 0, tzinfo=UTC)
+    assert NBA.scoring_period_at(datetime(2026, 11, 1, 6, 30, tzinfo=UTC), schedule) == 12  # the second 01:30 ET
+    assert NBA.scoring_period_at(datetime(2026, 11, 1, 7, 59, tzinfo=UTC), schedule) == 12  # 02:59 EST
+    assert NBA.scoring_period_at(datetime(2026, 11, 1, 8, 0, tzinfo=UTC), schedule) == 13
+    assert NBA.scoring_period_at(datetime(2026, 11, 2, 5, 0, tzinfo=UTC), schedule) == 13  # midnight: still day 13
+    assert NBA.scoring_period_at(datetime(2026, 11, 2, 8, 0, tzinfo=UTC), schedule) == 14
     assert eastern_day(datetime(2026, 10, 20, 23, 0, tzinfo=EASTERN)) == OPENING_NIGHT  # any aware zone works
     with pytest.raises(ValueError, match="aware"):
         eastern_day(datetime(2026, 10, 20, 23, 0))
+    with pytest.raises(ValueError, match="aware"):
+        fantasy_day(datetime(2026, 10, 20, 23, 0))
 
 
 def test_a_schedule_that_breaks_the_day_count_raises() -> None:
@@ -346,7 +389,7 @@ def test_a_schedule_that_breaks_the_day_count_raises() -> None:
     with pytest.raises(ValueError, match="consecutive US Eastern days"):
         NBA.period_day(1, broken)
     # Locks and the add/drop cutoff read the schedule as it is; only the day count refuses to guess.
-    assert NBA.transaction_cutoff(1, broken) == DAY1_FIRST
+    assert NBA.transaction_cutoff(team("SAS"), 1, broken, lock_type=LockType.FIRSTGAME_SCORINGPERIOD) == DAY1_FIRST
 
 
 def test_placeholder_tips_neither_anchor_nor_break_the_day_count() -> None:
@@ -356,7 +399,8 @@ def test_placeholder_tips_neither_anchor_nor_break_the_day_count() -> None:
     schedule = load_schedule(view)
     assert NBA.period_day(1, schedule) == OPENING_NIGHT and NBA.period_day(CHRISTMAS, schedule) == date(2026, 12, 25)
     assert NBA.scoring_period_at(DAY1_SECOND, schedule) == 1
-    assert NBA.transaction_cutoff(1, schedule) == placeholder  # an unscheduled start errs early, like a lock
+    first_tip = LockType.FIRSTGAME_SCORINGPERIOD  # an unscheduled start errs early, like a lock
+    assert NBA.transaction_cutoff(team("SAS"), 1, schedule, lock_type=first_tip) == placeholder
     provisional = {lock.team_id for lock in NBA.locks(1, schedule) if lock.provisional}
     assert provisional == {team("BOS"), team("DET")}
 
@@ -392,9 +436,10 @@ def _property_schedule() -> ScheduleLike:
 
 
 @given(st.datetimes(min_value=datetime(2026, 9, 1), max_value=datetime(2027, 1, 31), timezones=st.just(UTC)))
-def test_scoring_period_is_the_eastern_day_number(at: datetime) -> None:
+def test_scoring_period_is_the_fantasy_day_number(at: datetime) -> None:
     schedule = _property_schedule()
-    day = eastern_day(at)
+    day = fantasy_day(at)  # the US Eastern date, turning at 3 a.m. as ESPN's calendar does
+    assert day == (at.astimezone(EASTERN) - timedelta(hours=3)).date()
     period = NBA.scoring_period_at(at, schedule)
     if day > date(2026, 12, 25):
         assert period is None
@@ -411,20 +456,70 @@ def test_scoring_period_is_the_eastern_day_number(at: datetime) -> None:
 # --- adds and drops ---------------------------------------------------------------------------------------------------
 
 
-def test_adds_and_drops_close_at_the_days_first_tip(schedule: ScheduleLike) -> None:
-    assert NBA.transaction_cutoff(1, schedule) == DAY1_FIRST and eastern(DAY1_FIRST) == "Tue 10-20 15:00"
-    assert NBA.transaction_cutoff(2, schedule) == DAY2_FIRST
-    assert NBA.transaction_cutoff(CHRISTMAS, schedule) == XMAS_FIRST and eastern(XMAS_FIRST) == "Fri 12-25 12:00"
-    assert NBA.transaction_cutoff(38, schedule) is None and NBA.transaction_cutoff(999, schedule) is None
+@pytest.mark.parametrize(
+    ("lock_type", "sas", "lal"),
+    [
+        (LockType.FIRSTGAME_SCORINGPERIOD, DAY1_FIRST, DAY1_FIRST),  # everyone at the day's first tip
+        (LockType.INDIVIDUAL_GAME, DAY1_LAST, None),  # each player at his own tip; an off day never closes
+    ],
+    ids=["first-game", "per-game"],
+)
+def test_adds_and_drops_close_by_the_leagues_roster_lock(
+    schedule: ScheduleLike, lock_type: LockType, sas: datetime, lal: datetime | None
+) -> None:
+    assert NBA.transaction_cutoff(team("SAS"), 1, schedule, lock_type=lock_type) == sas
+    assert NBA.transaction_cutoff(team("LAL"), 1, schedule, lock_type=lock_type) == lal  # LAL is off on day 1
+    assert NBA.transaction_cutoff(team("DET"), 1, schedule, lock_type=lock_type) == DAY1_FIRST  # tips first either way
+    assert NBA.transaction_cutoff(team("DET"), 38, schedule, lock_type=lock_type) is None  # Thanksgiving: no games
+    assert NBA.transaction_cutoff(team("DET"), 999, schedule, lock_type=lock_type) is None
+    # The cutoff is the roster lock under the same rule as a lineup lock of that type, for every team and day.
+    for period in schedule.scoring_periods:
+        first = first_start(schedule, period)
+        for team_id in teams_in(schedule, period):
+            cutoff = NBA.transaction_cutoff(team_id, period, schedule, lock_type=lock_type)
+            assert cutoff == NBA.lock_time(team_id, period, schedule, lock_type=lock_type)
+            assert cutoff is None or (first is not None and cutoff >= first)
+
+
+def test_the_real_nba_league_closes_adds_and_drops_at_the_days_first_tip(schedule: ScheduleLike) -> None:
+    """The real league locks rosters at the first tip and lineups per game (``rosterLocktimeType`` and
+    ``lineupLocktimeType``, docs/espn-api.md section 1 #4): a streamer must be added before the day's first game."""
+    real = load_league_settings(REAL_FBA / "mSettings.json")
+    assert real.roster_lock_type is LockType.FIRSTGAME_SCORINGPERIOD
+    assert real.lineup_lock_type is LockType.INDIVIDUAL_GAME
+    roster_lock = real.roster_lock_type
+    assert NBA.transaction_cutoff(team("SAS"), 1, schedule, lock_type=roster_lock) == DAY1_FIRST
+    assert eastern(DAY1_FIRST) == "Tue 10-20 15:00"
+    assert NBA.transaction_cutoff(team("LAC"), 2, schedule, lock_type=roster_lock) == DAY2_FIRST
+    assert NBA.transaction_cutoff(team("GSW"), CHRISTMAS, schedule, lock_type=roster_lock) == XMAS_FIRST
+    assert eastern(XMAS_FIRST) == "Fri 12-25 12:00"
     recorded = ProSchedule.model_validate(_recorded_view())
     for period in recorded.scoring_periods:
         first = recorded.first_game(period)
-        assert first is not None and NBA.transaction_cutoff(period, schedule) == first.date
-        cutoff = NBA.transaction_cutoff(period, schedule)
-        assert cutoff is not None and all(cutoff <= lock.at for lock in NBA.locks(period, schedule))
+        assert first is not None
+        cutoffs = {
+            NBA.transaction_cutoff(t, period, schedule, lock_type=roster_lock) for t in teams_in(schedule, period)
+        }
+        assert cutoffs == {first.date}
     # Lineups still move per game after the cutoff: PHI at NYK locks four hours later.
-    assert not NBA.is_locked(team("NYK"), 1, DAY1_FIRST, schedule)
-    assert NBA.lock_time(team("NYK"), 1, schedule) == DAY1_SECOND
+    assert not NBA.is_locked(team("NYK"), 1, DAY1_FIRST, schedule, lock_type=real.lineup_lock_type)
+    assert NBA.lock_time(team("NYK"), 1, schedule, lock_type=real.lineup_lock_type) == DAY1_SECOND
+
+
+@pytest.mark.parametrize("raw", ["FIRSTGAME_WEEKLY", "INDIVIDUAL_FIRSTGAME_WEEKLY", "FIRST_GAME_OF_DAY", None])
+def test_an_unknown_or_weekly_roster_lock_has_no_cutoff(schedule: ScheduleLike, raw: str | None) -> None:
+    """A guessed cutoff could plan an add that can no longer play, or a drop of a locked player: refuse instead."""
+    view = json.loads(FBA_POINTS.read_text(encoding="utf-8"))
+    roster = view["settings"]["rosterSettings"]
+    if raw is None:
+        del roster["rosterLocktimeType"]
+    else:
+        roster["rosterLocktimeType"] = raw
+    settings = parse_league_settings(view)
+    assert settings.roster_lock_type is LockType.UNKNOWN and settings.roster_lock_type_raw == raw
+    assert settings.lineup_lock_type is LockType.INDIVIDUAL_GAME  # the lineup lock is a separate setting
+    with pytest.raises(ValueError, match=r"roster lock type is UNKNOWN.*roster_lock_type_raw"):
+        NBA.transaction_cutoff(team("SAS"), 1, schedule, lock_type=settings.roster_lock_type)
 
 
 # --- lock times -------------------------------------------------------------------------------------------------------

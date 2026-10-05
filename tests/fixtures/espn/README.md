@@ -16,6 +16,11 @@ unknowns (the lineup-lock key and value set, the pending-offer view and its list
 | `fba_settings_points.json` | 10-team NBA league `2345678`, 2027, H2H points with ESPN's default scoring, PG/SG/SF/PF/C/G/F + 3 UTIL + 3 BE + IR, 4 adds per matchup, 19 matchup weeks of daily scoring periods, matchups 20–22 playoffs, Feb 4 2027 trade deadline |
 | `fba_settings_9cat.json` | NBA league `3456789`, 2027, same roster, H2H most-categories 9-cat (TO reversed), FAAB ($200, $1 minimum), 60 adds per season, per-slot games-played limits, no trade deadline |
 
+Both NBA stand-ins list each matchup's days in `scheduleSettings.matchupPeriods`, so their `periodTypeId` is 1, ESPN's
+per-scoring-period type (under it period N is day N). The real NBA league uses the weekly type 2 instead and lists week
+ids (`real/fba/mSettings.json`, docs/espn-api.md section 1 #1). The stand-ins said 2 until the phase 4 review, which
+under ESPN's calendar would have made matchup 1 weeks 1 to 6 rather than days 1 to 6.
+
 ## Read views (`fm.espn.client` / `fm.espn.models`)
 
 The NFL files describe league `1234567` in week 4 of 2026 (matchup period 4, our team is 1, opponent 2); the NBA

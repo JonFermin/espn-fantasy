@@ -3,7 +3,8 @@
 Everything runs offline on ``fm.browser.fakes``: ESPN's read views come from ``tests/fixtures/espn`` through a fake read
 API, writes go to a fake transport that records them, and UI mode clicks through a fake page. :class:`SwapFlow` is a
 minimal lineup flow (the real one is ROADMAP #25): in the week-4 roster fixture our team 1 swaps Chuba Hubbard (FLEX)
-with Tyler Allgeier (bench), and Jahmyr Gibbs is locked since Thursday night.
+with Tyler Allgeier (bench), and Jahmyr Gibbs is locked since Thursday night. ``open_live_runtime`` itself (what a dry
+run installs in the browser) runs against a recording browser context in place of Playwright's.
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ import importlib
 import json
 import sys
 import types
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -51,6 +53,7 @@ from fm.browser.flows import (
     UnknownFlowError,
     Verification,
     WriteOutcome,
+    WriteRefusedError,
     WriteRequest,
     WriteResponse,
     WriteTimeoutError,
@@ -62,16 +65,21 @@ from fm.browser.flows import (
 )
 from fm.commands import execute as execute_cmd
 from fm.config import load_config
-from fm.espn.auth import AuthError, NotLoggedInError
+from fm.espn.auth import AuthError, EspnSession, NotLoggedInError
 from fm.executor import (
+    STALE_EXECUTION,
     ExecutionResult,
     ExecutorOptions,
     NoFlowError,
     PlaywrightTransport,
     PreconditionReadError,
+    RefusingTransport,
+    dry_run_block_reason,
     execute,
     open_live_runtime,
+    reconcile_executions,
 )
+from fm.executor import runtime as executor_runtime
 from fm.proposals import (
     LifecycleError,
     LineupMove,
@@ -85,7 +93,7 @@ from fm.proposals import (
     propose,
     resume,
 )
-from fm.store import LeagueRow, ProposalRow, Store
+from fm.store import ExecutionRow, LeagueRow, ProposalRow, Store
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 ROSTERS = FIXTURES / "espn" / "ffl_rosters_week4.json"
@@ -223,6 +231,24 @@ class UncapturedFlow(SwapFlow):
         raise ModeUnavailableError("this lineup request is not captured yet (#14)")
 
 
+class InterruptedFlow(SwapFlow):
+    """Ctrl+C lands while the flow is still building its request: nothing has been sent."""
+
+    name = "interrupted"
+
+    def build_request(self, ctx: FlowContext[LineupPayload], pre: Preconditions) -> WriteRequest:
+        raise KeyboardInterrupt
+
+
+class ExitingFlow(SwapFlow):
+    """The process exits while the executor re-reads the league after ESPN accepted the write."""
+
+    name = "exiting"
+
+    def verify(self, ctx: FlowContext[LineupPayload], pre: Preconditions) -> Verification:
+        raise SystemExit(3)
+
+
 class RacingFlow(SwapFlow):
     """Another process spends the execution token while this run is still reading the preconditions."""
 
@@ -269,7 +295,12 @@ class Harness:
         self.opener = FakeOpener(fake_runtime(self.api, self.league, transport=self.transport, browser=self.browser))
 
     def propose(
-        self, payload: LineupPayload = SWAP, *, kind: ProposalKind = ProposalKind.LINEUP, approved: bool = True
+        self,
+        payload: LineupPayload = SWAP,
+        *,
+        kind: ProposalKind = ProposalKind.LINEUP,
+        approved: bool = True,
+        dedupe_key: str | None = None,
     ) -> ProposalRow:
         row = propose(
             self.store,
@@ -280,6 +311,7 @@ class Harness:
             created_by="test",
             scoring_period_id=WEEK,
             deadline=DEADLINE,
+            dedupe_key=dedupe_key,
             now=NOW,
         )
         return approve(self.store, row.row_id, decided_by="test", now=NOW) if approved else row
@@ -576,6 +608,8 @@ def test_a_dry_run_builds_and_saves_the_request_but_sends_nothing(h: Harness) ->
     assert get_proposal(h.store, proposal.row_id) == proposal
     assert h.slot(HUBBARD) == FLEX and h.api.reads("mRoster") == 1
     assert h.opener.calls == [(h.league.row_id, True)]
+    (runtime,) = h.opener.opened  # as live, the dry run held a transport that refuses to send
+    assert isinstance(runtime.transport, RefusingTransport) and runtime.reader is h.opener.runtime.reader
 
 
 def test_a_dry_run_leaves_an_approved_proposal_ready_to_execute(h: Harness) -> None:
@@ -906,6 +940,203 @@ def test_the_browser_session_transport_sends_once_with_a_hard_timeout() -> None:
 def test_the_live_runtime_refuses_without_a_browser_profile(h: Harness) -> None:
     with pytest.raises(NotLoggedInError, match="run `fm login`"), open_live_runtime(h.league, dry_run=True):
         pass  # never reached: no profile, so no browser starts
+
+
+# --- the live runtime: a dry run's backstop in the browser ------------------------------------------------------------
+
+
+class RecordingContext:
+    """The slice of a Playwright ``BrowserContext`` that ``open_live_runtime`` uses: routes and the request client."""
+
+    def __init__(self) -> None:
+        self.routes: list[tuple[str, Callable[..., object]]] = []
+        self.request = StubRequests((200, '{"id": "live-transaction-1"}'))
+
+    def route(self, url: str, handler: Callable[..., object]) -> None:
+        self.routes.append((url, handler))
+
+
+class RecordingRoute:
+    """The slice of a Playwright ``Route`` the dry-run handler uses; records whether it aborted or continued."""
+
+    def __init__(self, method: str, url: str, *, readable: bool = True) -> None:
+        self.method, self.url, self.readable = method, url, readable
+        self.outcome: tuple[str, str | None] | None = None
+
+    @property
+    def request(self) -> types.SimpleNamespace:
+        if not self.readable:
+            raise RuntimeError("the request's frame is gone")
+        return types.SimpleNamespace(method=self.method, url=self.url)
+
+    def abort(self, error_code: str | None = None) -> None:
+        self.outcome = ("abort", error_code)
+
+    def continue_(self) -> None:
+        self.outcome = ("continue", None)
+
+
+def live_browser(monkeypatch: pytest.MonkeyPatch, *, expires_at: datetime | None = None) -> RecordingContext:
+    """Stand in for what ``open_live_runtime`` opens (the profile, the browser, its cookie jar), not for the runtime
+    itself; returns the browser context it gets."""
+    context = RecordingContext()
+
+    @contextmanager
+    def open_browser(options: Any) -> Iterator[types.SimpleNamespace]:
+        yield types.SimpleNamespace(context=context)
+
+    session = EspnSession(espn_s2="fake-s2", swid=FAKE_SWID, expires_at=expires_at)
+    monkeypatch.setattr(executor_runtime, "profile_exists", lambda _profile: True)
+    monkeypatch.setattr(executor_runtime, "open_browser", open_browser)
+    monkeypatch.setattr(executor_runtime, "harvest_session", lambda _context: session)
+    return context
+
+
+LEAGUE_PATH = "apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567"
+DRY_RUN_REQUESTS = [
+    ("POST", TRANSACTIONS, True),
+    ("GET", "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026", True),  # the write host: any verb
+    ("PUT", "https://lm-api-writes.fantasy.espn.com./apis/v3/x", True),  # trailing dot
+    ("PUT", "https://lm-api-communication.fantasy.espn.com/x", True),  # league messages
+    ("POST", f"https://fantasy.espn.com/{LEAGUE_PATH}/teams/1/pendingTransactions", True),  # reorder our claims
+    ("DELETE", f"https://lm-api-reads.fantasy.espn.com/{LEAGUE_PATH}", True),
+    ("post", "https://ESPN.com/x", True),
+    ("POST", "https://sw88.espn.com/b/ss/x", True),  # any non-GET to an espn.com host, analytics too
+    ("GET", f"https://lm-api-reads.fantasy.espn.com/{LEAGUE_PATH}?view=mRoster", False),
+    ("GET", ROSTER_PAGE, False),
+    ("POST", "https://registerdisney.go.com/jgc/v8/client/ESPN-ONESITE.WEB-PROD/guest/login", False),  # the sign-in
+    ("POST", "https://espn.com.example.net/x", False),  # not an ESPN host
+    ("POST", "https://notespn.com/x", False),
+]
+
+
+@pytest.mark.parametrize(("method", "url", "aborted"), DRY_RUN_REQUESTS)
+def test_the_dry_run_rule_blocks_every_league_write(method: str, url: str, aborted: bool) -> None:
+    assert (dry_run_block_reason(method, url) is not None) is aborted
+
+
+def test_a_live_dry_run_aborts_writes_in_the_browser_and_refuses_to_send(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = live_browser(monkeypatch)
+    with open_live_runtime(h.league, dry_run=True) as runtime:
+        assert isinstance(runtime.transport, RefusingTransport) and runtime.member_id == FAKE_SWID
+        ((pattern, handler),) = context.routes
+        assert pattern == "**/*"  # every request goes through the rule, not only the write host's
+        for method, url, aborted in DRY_RUN_REQUESTS:
+            route = RecordingRoute(method, url)
+            handler(route)
+            assert route.outcome == (("abort", "blockedbyclient") if aborted else ("continue", None)), (method, url)
+        unreadable = RecordingRoute("GET", ROSTER_PAGE, readable=False)
+        handler(unreadable)
+        assert unreadable.outcome == ("abort", "blockedbyclient")  # fails closed
+        with pytest.raises(WriteRefusedError, match="dry run: nothing is sent"):
+            runtime.transport.send(WriteRequest(url=TRANSACTIONS, body={"teamId": TEAM}), timeout_s=1.0)
+    assert context.request.calls == []
+
+
+def test_a_live_run_installs_no_route_and_writes_through_the_browser_session(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = live_browser(monkeypatch)
+    with open_live_runtime(h.league, dry_run=False) as runtime:
+        assert isinstance(runtime.transport, PlaywrightTransport)
+        response = runtime.transport.send(WriteRequest(url=TRANSACTIONS, body={"teamId": TEAM}), timeout_s=1.0)
+    assert context.routes == []
+    assert response.status == 200 and [call["url"] for call in context.request.calls] == [TRANSACTIONS]
+
+
+def test_the_live_runtime_refuses_an_expired_session_before_routing_anything(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = live_browser(monkeypatch, expires_at=datetime.now(UTC) - timedelta(days=1))
+    with pytest.raises(AuthError, match="expired .* run `fm login`"), open_live_runtime(h.league, dry_run=True):
+        pass
+    assert context.routes == [] and context.request.calls == []
+
+
+# --- interruptions: a run that something escapes still ends -----------------------------------------------------------
+
+
+def test_an_interrupt_after_the_write_left_still_ends_the_run(h: Harness) -> None:
+    h.transport.replies.append(Reply(error=KeyboardInterrupt(), applies=True))  # the write lands, then Ctrl+C
+    proposal = h.propose(dedupe_key="hubbard-allgeier")
+    with pytest.raises(KeyboardInterrupt):
+        h.run(proposal)
+
+    row = get_proposal(h.store, proposal.row_id)
+    assert row.status == "failed" and row.token_consumed_at == NOW  # not left executing for good
+    (attempt,) = h.store.executions.for_proposal(proposal.row_id)
+    assert attempt.status == "unknown" and attempt.finished_at == NOW
+    assert attempt.error == (
+        "interrupted after the write started (KeyboardInterrupt); check the league before acting again"
+    )
+    assert h.slot(HUBBARD) == BENCH  # it did land, which is why the attempt is unknown and not failed
+    with pytest.raises(LifecycleError, match="cannot execute proposal #1: it is failed"):
+        h.run(proposal)
+    assert len(h.transport.sent) == 1
+    # Left executing, the open proposal would have been handed back for its dedupe key forever.
+    again = h.propose(dedupe_key="hubbard-allgeier", approved=False)
+    assert again.row_id != proposal.row_id and again.status == "proposed"
+
+
+def test_an_interrupt_before_anything_was_sent_fails_the_attempt(h: Harness) -> None:
+    registry = FlowRegistry()
+    registry.register(InterruptedFlow())
+    proposal = h.propose()
+    with pytest.raises(KeyboardInterrupt):
+        h.run(proposal, registry=registry)
+
+    (attempt,) = h.store.executions.for_proposal(proposal.row_id)
+    assert attempt.status == "failed" and attempt.error == "interrupted before anything was written (KeyboardInterrupt)"
+    assert get_proposal(h.store, proposal.row_id).status == "failed"
+    assert h.transport.sent == [] and h.slot(HUBBARD) == FLEX
+
+
+def test_an_exit_during_the_re_read_leaves_the_write_unknown(h: Harness) -> None:
+    registry = FlowRegistry()
+    registry.register(ExitingFlow())
+    proposal = h.propose()
+    with pytest.raises(SystemExit):
+        h.run(proposal, registry=registry)
+
+    (attempt,) = h.store.executions.for_proposal(proposal.row_id)
+    assert attempt.status == "unknown" and attempt.response is not None and attempt.response["status"] == 200
+    assert attempt.error is not None and attempt.error.startswith("interrupted after the write started (SystemExit: 3)")
+    assert get_proposal(h.store, proposal.row_id).status == "failed" and len(h.transport.sent) == 1
+
+
+def test_an_interrupted_dry_run_closes_its_attempt_and_leaves_the_proposal_be(h: Harness) -> None:
+    registry = FlowRegistry()
+    registry.register(InterruptedFlow())
+    proposal = h.propose()
+    with pytest.raises(KeyboardInterrupt):
+        h.run(proposal, None, dry_run=True, registry=registry)
+
+    (attempt,) = h.store.executions.for_proposal(proposal.row_id)
+    assert attempt.status == "dry_run" and attempt.error == "interrupted (KeyboardInterrupt); nothing was sent"
+    assert get_proposal(h.store, proposal.row_id) == proposal  # still approved, its token unspent
+    assert h.run(proposal).ok
+
+
+def test_reconcile_ends_the_runs_a_killed_process_left_executing(h: Harness) -> None:
+    stuck, bare, live = (h.propose() for _ in range(3))
+    for proposal, spent in ((stuck, NOW), (bare, NOW), (live, NOW + timedelta(minutes=45))):
+        assert proposal.execution_token is not None
+        begin_execution(h.store, proposal.row_id, proposal.execution_token, now=spent)
+    # stuck died mid-attempt; bare between spending its token and its first attempt; live is running elsewhere now.
+    h.store.executions.insert(ExecutionRow(proposal_id=stuck.row_id, mode="api", status="running", started_at=NOW))
+    later = NOW + timedelta(hours=1)
+
+    failed = reconcile_executions(h.store, now=later)
+    assert [(row.row_id, row.status) for row in failed] == [(stuck.row_id, "failed"), (bare.row_id, "failed")]
+    (attempt,) = h.store.executions.for_proposal(stuck.row_id)
+    assert attempt.status == "unknown" and attempt.finished_at == later
+    assert attempt.error is not None and "check the league before acting again" in attempt.error
+    assert get_proposal(h.store, live.row_id).status == "executing"  # 15 minutes in: it may still be going
+    assert reconcile_executions(h.store, now=later) == []
+    (stale,) = reconcile_executions(h.store, now=NOW + timedelta(minutes=45) + STALE_EXECUTION)
+    assert stale.row_id == live.row_id and stale.status == "failed"
 
 
 # --- the fake page behaves like Playwright where flows depend on it ---------------------------------------------------

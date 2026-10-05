@@ -155,7 +155,7 @@ def test_fixture_is_scrubbed(relative: str) -> None:
 def test_lock_type_keys(game: str, roster_lock: LockType) -> None:
     parsed = settings(game)
     assert parsed.lineup_lock_type is LockType.INDIVIDUAL_GAME
-    assert parsed.roster_lock_type_raw == roster_lock.value
+    assert parsed.roster_lock_type is roster_lock and parsed.roster_lock_type_raw == roster_lock.value
     # The literal: the #4 guess no league carries is no longer a LockType member (it parses as UNKNOWN).
     assert "FIRST_GAME_OF_WEEK" not in json.dumps(load(f"{game}/mSettings.json"))
 

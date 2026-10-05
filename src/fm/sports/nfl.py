@@ -10,9 +10,10 @@ longer offers it to new leagues and no position in the id maps fills it.
 Lock times come from the ESPN pro schedule (any :class:`fm.sports.base.ScheduleLike`), never from a weekday or a
 kickoff time: Thursday, Friday and Saturday games, the international 9:30 a.m. ET slot and Monday night all fall out
 of each game's start. The scoring period is the NFL week (ESPN's ``scoringPeriodId``), and a week gives way to the
-next :data:`NFL_GAME_DURATION` after its last kickoff, which is how a tick finds the current week between syncs. The
-league's lock type (per game or everyone at the week's first kickoff) is read from its settings and passed in by the
-caller.
+next at 03:00 ET after the day of its last game, when ESPN's calendar turns (Tuesday 3 a.m. after Monday night;
+:data:`fm.sports.base.PERIOD_TURN`), which is how a tick finds the current week between syncs. The league's lock
+types (for lineups, and for adds, drops and trades: per game or everyone at the week's first kickoff) are read from
+its settings and passed in by the caller.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from fm.sports.base import PeriodKind, SportPlugin
 
 NFL_GAME_DURATION: Final = timedelta(hours=4)
 """How long after kickoff an NFL game is assumed to run (about 3 h 15 min typical, longer with overtime or a delay);
-only used to decide when one week's lineups give way to the next."""
+only used for ``PeriodWindow.end``."""
 
 _SLOT_POSITIONS_BY_LABEL: Mapping[str, frozenset[str]] = {
     "QB": frozenset({"QB"}),

@@ -10,7 +10,10 @@
    token is not spent, so the proposal can run once ESPN answers again.
 3. ``fm.proposals.begin_execution`` consumes the token atomically and moves the proposal to ``executing``; a second
    caller holding the same token loses there. From this point :func:`execute` always ends the proposal ``verified`` or
-   ``failed`` and returns an :class:`ExecutionResult` instead of raising.
+   ``failed`` and returns an :class:`ExecutionResult` instead of raising. The one exception is an interruption
+   (Ctrl+C mid-write, ``SystemExit``), which still ends the run first: its attempt ``unknown`` when the write may have
+   started, the proposal ``failed``. A process killed outright leaves the proposal ``executing``;
+   :func:`reconcile_executions` ends those once they are old enough that no live run can own them.
 4. A failed precondition ends the run ``failed`` with nothing sent. Otherwise each mode in the flow's order (API, then
    UI) is an attempt with its own ``executions`` row:
 
@@ -42,7 +45,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +86,7 @@ from fm.proposals import (
     parse_payload,
     pause_state,
 )
+from fm.proposals.policy import as_utc
 from fm.store import ExecutionRow, ExecutionStatus, LeagueRow, ProposalRow, Store, utc_now
 
 logger = logging.getLogger(__name__)
@@ -93,6 +97,10 @@ DEFAULT_VERIFY_ATTEMPTS = 3
 DEFAULT_VERIFY_INTERVAL_S = 2.0
 DRY_RUN_STATUSES = ("proposed", "approved")
 """Proposals a dry run accepts: still open and not executing."""
+STALE_EXECUTION = timedelta(minutes=30)
+"""How old a run must be before :func:`reconcile_executions` treats it as abandoned. A run is a few reads, one write
+with a 30 s timeout and a few re-reads (a UI walk a few minutes at most), so a run this old is no longer going, while
+one in progress in another process (``fm bot`` executing next to ``fm tick``) is never touched."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +179,9 @@ def execute(
 
     Raises only refusals, before anything is sent and with the proposal unchanged: ``PausedError`` /
     ``LifecycleError`` (``fm.proposals.ProposalError``), :class:`ExecutorError`, ``fm.espn.auth.AuthError`` and
-    ``fm.browser.session.BrowserError``. Once the token is spent every outcome is an :class:`ExecutionResult`.
+    ``fm.browser.session.BrowserError``. Once the token is spent every outcome is an :class:`ExecutionResult`, except
+    an interruption (``KeyboardInterrupt``, ``SystemExit``), which propagates once the run is recorded: the attempt
+    ``unknown`` if its write may have started (else ``failed``) and the proposal ``failed``.
     """
     opts = options if options is not None else ExecutorOptions()
     at = clock()
@@ -202,10 +212,49 @@ def execute(
         pre = _preconditions(flow, ctx)
         audit = AuditLog.create(proposal.row_id, at, dry_run=dry_run)
         run = _Run(store, flow, ctx, pre, runtime, audit, opts, clock)
-        if spend is None:
-            return run.dry_run(plan)
-        begin_execution(store, proposal.row_id, spend, now=clock())
-        return run.execute(plan)
+        if spend is not None:
+            begin_execution(store, proposal.row_id, spend, now=clock())
+        return run.run(plan)
+
+
+def reconcile_executions(
+    store: Store, *, now: datetime | None = None, older_than: timedelta = STALE_EXECUTION
+) -> list[ProposalRow]:
+    """End the runs a killed process left behind: proposals still ``executing`` whose latest attempt (or, with none,
+    the spending of the token) is at least ``older_than`` old.
+
+    A process killed mid-run (a crash, a power cut, a closed console) never records an outcome, so the proposal stays
+    ``executing`` and, being open, blocks every new proposal with its dedupe key. Each attempt still ``running``
+    becomes ``unknown`` (its write may have landed, so the league needs a re-read before anything else) and the
+    proposal ``failed``. A run younger than ``older_than`` may still be going in another process and is left alone.
+    The tick (ROADMAP #29) calls this before it executes anything. Returns the proposals it failed.
+    """
+    at = as_utc(now)
+    failed: list[ProposalRow] = []
+    for proposal in store.proposals.find(statuses=("executing",)):
+        with store.db.transaction():
+            current = store.proposals.get(proposal.row_id)
+            if current is None or current.status != "executing":
+                continue  # finished in the meantime
+            rows = store.executions.for_proposal(current.row_id)
+            started = max((row.started_at for row in rows), default=current.token_consumed_at)
+            if started is not None and at - started < older_than:
+                continue
+            for row in rows:
+                if row.status == "running":
+                    store.executions.update(
+                        row.model_copy(
+                            update={
+                                "status": "unknown",
+                                "finished_at": at,
+                                "error": "the run stopped mid-attempt (the process ended before it could record an "
+                                "outcome); the write may have landed, check the league before acting again",
+                            }
+                        )
+                    )
+            failed.append(finish_execution(store, current.row_id, "failed"))
+            logger.warning("executor: proposal #%d was left executing by a run that never finished", current.row_id)
+    return failed
 
 
 # --- refusals ---------------------------------------------------------------------------------------------------------
@@ -331,6 +380,15 @@ class _Run:
         self.shared = self._write("preconditions.json", self._preconditions_record())
 
     # --- entry points ---------------------------------------------------------------------------------------------
+
+    def run(self, plan: tuple[Mode, ...]) -> ExecutionResult:
+        """The attempts, as a dry run or for real. Whatever escapes them (Ctrl+C mid-write, ``SystemExit``, a store
+        failure) is recorded by :meth:`_interrupted` before it propagates."""
+        try:
+            return self.dry_run(plan) if self.ctx.dry_run else self.execute(plan)
+        except BaseException as exc:
+            self._interrupted(exc)
+            raise
 
     def dry_run(self, plan: tuple[Mode, ...]) -> ExecutionResult:
         if not self.pre.ok:
@@ -521,6 +579,47 @@ class _Run:
     def _finish(self, *, verified: bool) -> ExecutionResult:
         final = finish_execution(self.store, self.ctx.proposal.row_id, "verified" if verified else "failed")
         return self._result(final)
+
+    def _interrupted(self, exc: BaseException) -> None:
+        """Record a run that something escaped, before it propagates; a failure to record it is logged, not raised.
+
+        The open attempt ends ``unknown`` when its write may have started (the request may have reached ESPN, so the
+        league needs a re-read before anything else), else ``failed``, or ``dry_run`` in a dry run; an attempt already
+        ``unknown`` whose re-read was cut short says so. An executing proposal then ends ``verified`` if its last
+        attempt was, else ``failed``. Left alone it would stay ``executing`` for good: nothing moves a proposal out of
+        it, and as an open proposal it would keep every new one with its dedupe key from being made.
+        """
+        cause = _describe(exc)
+        pid = self.ctx.proposal.row_id
+        try:
+            row = self._latest()
+            if row is not None and row.status == "running":
+                if self.ctx.dry_run:
+                    row = self._close(row, "dry_run", error=f"interrupted ({cause}); nothing was sent").row
+                elif self._write_may_have_started():
+                    row = self._save(
+                        row,
+                        status="unknown",
+                        finished_at=self.clock(),
+                        error=f"interrupted after the write started ({cause}); check the league before acting again",
+                    )
+                else:
+                    row = self._close(row, "failed", error=f"interrupted before anything was written ({cause})").row
+            elif row is not None and row.status == "unknown" and row.verification is None:
+                row = self._save(row, error=f"{row.error}; interrupted ({cause}) before the re-read finished")
+            if not self.ctx.dry_run and get_proposal(self.store, pid).status == "executing":
+                verified = row is not None and row.status == "verified"
+                finish_execution(self.store, pid, "verified" if verified else "failed")
+        except Exception:
+            logger.exception("executor: could not record the interruption of proposal #%d", pid)
+        logger.warning("executor: proposal #%d was interrupted (%s)", pid, cause)
+
+    def _latest(self) -> ExecutionRow | None:
+        """The run's newest attempt as the store has it: an interruption can land between a save and ``self.rows``."""
+        if not self.rows:
+            return None
+        newest = self.rows[-1]
+        return self.store.executions.get(newest.row_id) or newest
 
     def _result(self, proposal: ProposalRow | None = None) -> ExecutionResult:
         return ExecutionResult(

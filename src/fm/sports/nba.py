@@ -1,5 +1,5 @@
-"""NBA plugin for ESPN ``fba`` leagues: daily scoring periods, per-game locks at tip, the add/drop cutoff at the day's
-first tip, and slot eligibility including ``G`` (PG/SG), ``F`` (SF/PF), the combination slots and ``UTIL``.
+"""NBA plugin for ESPN ``fba`` leagues: daily scoring periods that turn at 03:00 ET, lineup and roster locks by the
+league's lock types, and slot eligibility including ``G`` (PG/SG), ``F`` (SF/PF), the combination slots and ``UTIL``.
 
 **Eligibility** follows ESPN's position-to-slot rules for ``fba``, by position label from
 :data:`fm.espn.ids.FBA_POSITIONS`; the ids come from :data:`fm.espn.ids.FBA`, never literals. The table matches the
@@ -13,17 +13,19 @@ Tue Oct 20, 2026 in the 2027 season; DESIGN section 9.3), and ``proTeamSchedules
 Eastern day: a 10:30 p.m. ET tip is 02:30 UTC the next morning and still belongs to its day. Days without games
 (Election Day, Thanksgiving, Christmas Eve, the All-Star break, an unscheduled NBA Cup knockout window) keep their
 numbers and are simply absent from the schedule. So :meth:`NbaPlugin.scoring_period_at` answers from the calendar
-rather than from game ends: the day turns at midnight ET, and a game still running then is a locked slot in the
-previous day's lineup. The schedule anchors the count (its first day with a confirmed tip), and every other day's
+rather than from game ends, and its day turns when ESPN's does: at 03:00 ET, not at midnight
+(:data:`fm.sports.base.PERIOD_TURN`), so a West Coast game still on after midnight is in its own day, and so is a
+lineup set before 3 a.m. The schedule anchors the count (its first day with a confirmed tip), and every other day's
 first confirmed tip must sit at the matching offset; otherwise the plugin raises rather than guess which day a
 lineup belongs to.
 
-**Locks and adds.** Lineups lock per game (the base class) or, under ``FIRSTGAME_SCORINGPERIOD``, for everyone at the
-day's first tip; the lock type is the league's (``LeagueSettings.lineup_lock_type``), passed in by the caller. ESPN's
-weekly lock types (``FIRSTGAME_WEEKLY``, ``INDIVIDUAL_FIRSTGAME_WEEKLY``) span several daily periods and need the
-league's matchup periods, which a pro schedule does not carry: they parse as ``UNKNOWN``, which the base class refuses.
-Adds, drops and trades for a day close at its first tip even though lineups lock per game (DESIGN section 9.3):
-:meth:`NbaPlugin.transaction_cutoff`.
+**Locks.** Lineups lock by the league's ``LeagueSettings.lineup_lock_type`` and adds, drops and trades by its
+``roster_lock_type`` (ESPN's ``rosterLocktimeType``), both passed in by the caller and computed by the base class
+(``lock_time``, ``transaction_cutoff``): at each team's tip, or for everyone at the day's first tip under
+``FIRSTGAME_SCORINGPERIOD``. The real NBA league locks lineups per game and rosters at the first tip, so a streamer must
+be added before the day's first game to play that day (DESIGN section 9.3). ESPN's weekly lock types
+(``FIRSTGAME_WEEKLY``, ``INDIVIDUAL_FIRSTGAME_WEEKLY``) span several daily periods and need the league's matchup
+periods, which a pro schedule does not carry: they parse as ``UNKNOWN``, which the base class refuses.
 """
 
 from __future__ import annotations
@@ -33,13 +35,9 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from types import MappingProxyType
 from typing import Final
-from zoneinfo import ZoneInfo
 
 from fm.espn.ids import FBA, Game
-from fm.sports.base import PeriodKind, ScheduleLike, SportPlugin, first_start, is_provisional
-
-EASTERN: Final = ZoneInfo("America/New_York")
-"""ESPN's fantasy basketball day is the US Eastern calendar day."""
+from fm.sports.base import EASTERN, PeriodKind, ScheduleLike, SportPlugin, fantasy_day, is_provisional
 
 NBA_GAME_DURATION: Final = timedelta(hours=3)
 """How long after tip an NBA game is assumed to run (about 2 h 15 min typical, longer with overtime); only used for
@@ -76,7 +74,8 @@ NBA_SLOT_POSITIONS: Mapping[int, frozenset[str]] = _by_slot_id(_SLOT_POSITIONS_B
 
 
 def eastern_day(at: datetime) -> date:
-    """The US Eastern calendar day an aware instant falls on: the fantasy day of a game that tips at ``at``."""
+    """The US Eastern calendar day an aware instant falls on: the fantasy day of a game that tips at ``at`` (NBA games
+    tip long after 3 a.m. ET; for any other instant, :func:`fm.sports.base.fantasy_day` is the day ESPN means)."""
     if at.tzinfo is None or at.utcoffset() is None:
         raise ValueError(f"at must be an aware datetime (UTC); got a naive {at.isoformat()}")
     return at.astimezone(EASTERN).date()
@@ -100,7 +99,7 @@ class _DayNumbering:
 
 
 class NbaPlugin(SportPlugin):
-    """ESPN fantasy basketball: daily periods, per-game locks at tip, the first-tip add/drop cutoff, G/F/UTIL."""
+    """ESPN fantasy basketball: daily periods that turn at 03:00 ET, locks at tip, G/F/UTIL."""
 
     game = Game.FBA
     sport = "nba"
@@ -129,7 +128,8 @@ class NbaPlugin(SportPlugin):
         return days.period(day)
 
     def scoring_period_at(self, at: datetime, schedule: ScheduleLike) -> int | None:
-        """The scoring period current at ``at``: the US Eastern calendar day it falls on, by the schedule's numbering.
+        """The scoring period current at ``at``: the fantasy day it falls in (its US Eastern date, turning at 03:00 ET
+        as ESPN's calendar does; :func:`fm.sports.base.fantasy_day`), by the schedule's numbering.
 
         Before the schedule's first day it is the first period (opening night's lineup is the next one to set);
         after its last day, or for a schedule without games, ``None``. The pro schedule runs to the end of the NBA
@@ -137,7 +137,7 @@ class NbaPlugin(SportPlugin):
         ``scoringPeriodId`` (``LeagueSettings.current_scoring_period``) is authoritative when fresh; this is the
         estimate for the ticks between syncs.
         """
-        day = eastern_day(at)
+        day = fantasy_day(at)
         days = self._numbering(schedule)
         if days is None or day > days.day(days.last_period):
             return None
@@ -169,14 +169,6 @@ class NbaPlugin(SportPlugin):
                     "periods are consecutive US Eastern days, so this schedule needs a look before a lineup uses it"
                 )
         return days
-
-    # --- adds and drops
-
-    def transaction_cutoff(self, period: int, schedule: ScheduleLike) -> datetime | None:
-        """When adds, drops and trades for ``period`` close: the day's first tip (DESIGN section 9.3), so a streamer
-        must be added before it to play that day. ``None`` for a day without games. A placeholder start (an
-        unscheduled game) counts, which errs early, like the lock times."""
-        return first_start(schedule, period)
 
 
 NBA: Final = NbaPlugin()

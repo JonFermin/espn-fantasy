@@ -14,7 +14,8 @@ Nothing here opens a socket or starts a browser, so executor and flow tests run 
   ``playwright`` ``TimeoutError``, hidden or disabled elements are not actionable. ``on_click`` handlers script what a
   click does (open a dialog, save a move); every action lands in ``FakePage.actions``.
 - :class:`FakeBrowser` hands out pages and writes stand-in traces; :func:`fake_runtime` and :class:`FakeOpener` wire
-  it all into an ``fm.executor.Runtime`` for ``fm.executor.execute(..., opener=...)``.
+  it all into an ``fm.executor.Runtime`` for ``fm.executor.execute(..., opener=...)``. Like the live opener,
+  :class:`FakeOpener` hands a dry run a transport that refuses every send.
 
 Production code never imports this module.
 """
@@ -27,7 +28,7 @@ import zipfile
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from re import Pattern
 from typing import Any
@@ -41,6 +42,7 @@ from fm.espn.auth import EspnSession
 from fm.espn.client import READS_HOST, EspnClient
 from fm.espn.ids import Game
 from fm.executor.runtime import Runtime
+from fm.executor.transport import RefusingTransport
 from fm.store import LeagueRow
 
 FAKE_SWID = "{00000000-0000-0000-0000-000000000000}"
@@ -141,8 +143,8 @@ class Reply:
     """The JSON body; a 2xx without one answers ``{"id": "fake-transaction-N"}``."""
     timeout: bool = False
     """Raise ``WriteTimeoutError`` instead of answering."""
-    error: Exception | None = None
-    """Raise this instead of answering (``WriteUncertainError``, ``WriteRefusedError``, ...)."""
+    error: BaseException | None = None
+    """Raise this instead of answering (``WriteUncertainError``, ``WriteRefusedError``, a ``KeyboardInterrupt``)."""
     applies: bool | None = None
     """Whether the write lands (``FakeTransport.on_send`` runs). Default: only for a 2xx answer."""
 
@@ -651,13 +653,21 @@ def fake_runtime(
 
 
 class FakeOpener:
-    """``fm.executor.RuntimeOpener`` that hands out one prepared runtime and records each call."""
+    """``fm.executor.RuntimeOpener`` that hands out one prepared runtime and records each call.
+
+    A dry run gets the runtime with an ``fm.executor.RefusingTransport`` in place of its transport, as
+    ``fm.executor.open_live_runtime`` hands out, so a dry run that tried to send fails here the way it would live.
+    """
 
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
         self.calls: list[tuple[int, bool]] = []
         """``(league row id, dry_run)`` per run that got as far as opening the runtime."""
+        self.opened: list[Runtime] = []
+        """The runtime handed to each of those runs."""
 
     def __call__(self, league: LeagueRow, *, dry_run: bool) -> AbstractContextManager[Runtime]:
         self.calls.append((league.row_id, dry_run))
-        return nullcontext(self.runtime)
+        runtime = replace(self.runtime, transport=RefusingTransport("dry run")) if dry_run else self.runtime
+        self.opened.append(runtime)
+        return nullcontext(runtime)
