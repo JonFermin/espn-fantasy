@@ -1,0 +1,4 @@
+# Fixture formats whose bytes must survive checkout untouched. A PDF without NUL bytes (the hand-built injury report)
+# otherwise counts as text under core.autocrlf and its xref offsets would shift.
+*.pdf binary
+*.parquet binary
