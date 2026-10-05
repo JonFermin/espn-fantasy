@@ -1,0 +1,41 @@
+# Projection blend weights and uncertainty, read by fm.model.projections.BlendWeights through
+# fm.paths.data_file("blend_weights.toml") (DESIGN section 8.1).
+#
+# One table per sport (nfl, nba). [<sport>.default] gives every projection source's weight at all positions and
+# [<sport>.<position>] overrides single sources at one position; position keys are ESPN's labels (QB, RB, WR, TE, K,
+# "D/ST"; PG, SG, SF, PF, C). Sources are the names registered in fm.model.projections (espn and sleeper for nfl, espn
+# and darko for nba; the in-house baselines register their own); an unknown name, sport or position fails the load.
+# Weights are relative: each stat is averaged over the sources that carry it (or derive it from their own stats),
+# divided by the sum of their weights, so {espn = 1.0, sleeper = 1.0} is a plain average and a weight of 0 drops a
+# source at that position.
+#
+# [<sport>.sd] is the uncertainty behind each projection: its standard deviation in league points is
+# max(floor, cv * projected points), with the coefficient of variation cv by position and `default` for a position
+# without a row. The NFL values are starting points in the range week-to-week fantasy scoring shows per position
+# (quarterbacks steadiest, defenses noisiest); the NBA ones cover one game.
+#
+# Equal weights to start, as DESIGN asks. ROADMAP #39 owns this file: it fits per-(source, position) weights on
+# held-out weeks, refits the cv values from projection residuals (fm.model.projections.fit_position_sd over the
+# backtest weeks of ROADMAP #33), and rewrites it.
+
+[nfl.default]
+espn = 1.0
+sleeper = 1.0
+
+[nfl.sd]
+floor = 2.0
+default = 0.55
+QB = 0.40
+RB = 0.55
+WR = 0.60
+TE = 0.65
+K = 0.50
+"D/ST" = 0.75
+
+[nba.default]
+espn = 1.0
+darko = 1.0
+
+[nba.sd]
+floor = 3.0
+default = 0.35
