@@ -1,0 +1,619 @@
+{
+ "timestamp": "2026-10-05T01:11:11Z",
+ "status": "success",
+ "season": {
+  "year": 2027,
+  "type": 1,
+  "name": "Preseason",
+  "displayName": "2026-27"
+ },
+ "injuries": [
+  {
+   "id": "1",
+   "displayName": "Atlanta Hawks",
+   "injuries": [
+    {
+     "id": "-57577",
+     "longComment": "Veesaar suffered the injury during a workout on Sept. 15, and an MRI confirmed the diagnosis. The No. 52 overall pick in the 2026 NBA Draft, Veesaar was expected to spend a lot of time with Atlanta's G League affiliate this season.",
+     "shortComment": "Veesaar was diagnosed with a torn right ACL and is expected to miss the 2026-27 season, the Hawks announced Monday.",
+     "status": "Out",
+     "date": "2026-09-21T19:50Z",
+     "athlete": {
+      "firstName": "Henri",
+      "lastName": "Veesaar",
+      "displayName": "Henri Veesaar",
+      "shortName": "H. Veesaar",
+      "position": {
+       "id": "9",
+       "name": "Center",
+       "displayName": "Center",
+       "abbreviation": "C",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/5105571/henri-veesaar",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "headshot": {
+       "href": "https://a.espncdn.com/i/headshots/nba/players/full/5105571.png",
+       "alt": "Henri Veesaar"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OFS",
+       "abbreviation": "OFS"
+      },
+      "type": "Knee",
+      "location": "Leg",
+      "side": "Right",
+      "returnDate": "2027-07-01"
+     }
+    },
+    {
+     "id": "-56292",
+     "longComment": "Gueye will be re-evaluated by medical staff in 3-to-4 months, which means he'll miss all of training camp and preseason and likely the start of the 2026-27 regular season. It's a brutal blow for the fourth-year big man, given that the Hawks used the No. 23 overall pick of the 2026 NBA Draft to select St. John's product Zuby Ejiofor. Gueye's absence means Ejiofor will have more opportunities in the preseason, and the rookie could establish a key role off the bench behind Onyeka Okongwu and projected backup center Jock Landale (ankle).",
+     "shortComment": "Gueye underwent surgery Tuesday to repair a fractured left foot that he suffered during a workout last week, Brad Rowland of the Locked On Podcast Network reports.",
+     "status": "Day-To-Day",
+     "date": "2026-07-19T00:14Z",
+     "athlete": {
+      "firstName": "Mouhamed",
+      "lastName": "Gueye",
+      "displayName": "Mouhamed Gueye",
+      "shortName": "M. Gueye",
+      "position": {
+       "id": "7",
+       "name": "Forward",
+       "displayName": "Forward",
+       "abbreviation": "F",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4712863/mouhamed-gueye",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "headshot": {
+       "href": "https://a.espncdn.com/i/headshots/nba/players/full/4712863.png",
+       "alt": "Mouhamed Gueye"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Foot",
+      "location": "Leg",
+      "detail": "Fracture",
+      "side": "Left",
+      "returnDate": "2026-10-15"
+     }
+    },
+    {
+     "id": "532102",
+     "longComment": "A hip injury cost Gilbert his final three games in Las Vegas. In his one appearance for the Hawks at Summer League, he finished with 10 points, five rebounds, five assists and two steals in 20 minutes off the bench.",
+     "shortComment": "Gilbert (hip) won't play in Saturday's Las Vegas Summer League game against the Wizards, Brad Rowland of the Locked On Podcast Network reports.",
+     "status": "Day-To-Day",
+     "date": "2026-07-18T23:19Z",
+     "athlete": {
+      "firstName": "Keshon",
+      "lastName": "Gilbert",
+      "displayName": "Keshon Gilbert",
+      "shortName": "K. Gilbert",
+      "position": {
+       "id": "3",
+       "name": "Guard",
+       "displayName": "Guard",
+       "abbreviation": "G",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4585618/keshon-gilbert",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "headshot": {
+       "href": "https://a.espncdn.com/i/headshots/nba/players/full/4585618.png",
+       "alt": "Keshon Gilbert"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Hip",
+      "location": "Torso",
+      "returnDate": "2026-10-05"
+     }
+    },
+    {
+     "id": "532101",
+     "longComment": "Dennis will miss a third consecutive contest due to a right Achilles issue. He appeared in just one Las Vegas Summer League game, posting 10 points, three assists, three steals and two rebounds in 16 minutes during the July 9 win over the Spurs.",
+     "shortComment": "Dennis (Achilles) has been ruled out for Saturday's Summer League game against the Wizards, Brad Rowland of the Locked On Podcast Network reports.",
+     "status": "Day-To-Day",
+     "date": "2026-07-18T23:18Z",
+     "athlete": {
+      "firstName": "RayJ",
+      "lastName": "Dennis",
+      "displayName": "RayJ Dennis",
+      "shortName": "R. Dennis",
+      "position": {
+       "id": "3",
+       "name": "Guard",
+       "displayName": "Guard",
+       "abbreviation": "G",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4431941/rayj-dennis",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "1",
+       "uid": "s:40~l:46~t:1",
+       "slug": "atlanta-hawks",
+       "name": "Hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "headshot": {
+       "href": "https://a.espncdn.com/i/headshots/nba/players/full/4431941.png",
+       "alt": "RayJ Dennis"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Achilles",
+      "location": "Leg",
+      "detail": "Not Specified",
+      "side": "Right",
+      "returnDate": "2026-10-05"
+     }
+    }
+   ]
+  },
+  {
+   "id": "29",
+   "displayName": "Memphis Grizzlies",
+   "injuries": [
+    {
+     "id": "533071",
+     "longComment": "The Grizzlies continue to evaluate Edey throughout training camp, and they believe he's trending in the right direction. Fantasy managers should keep an eye on his recovery from elbow and ankle surgeries.",
+     "shortComment": "Edey (ankle) remains on track for Opening Night, per Drew Hill of The Daily Memphian.",
+     "status": "Day-To-Day",
+     "date": "2026-10-02T20:16Z",
+     "athlete": {
+      "firstName": "Zach",
+      "lastName": "Edey",
+      "displayName": "Zach Edey",
+      "shortName": "Z. Edey",
+      "position": {
+       "id": "9",
+       "name": "Center",
+       "displayName": "Center",
+       "abbreviation": "C",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4600663/zach-edey",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "29",
+       "uid": "s:40~l:46~t:29",
+       "slug": "memphis-grizzlies",
+       "name": "Grizzlies",
+       "abbreviation": "MEM",
+       "displayName": "Memphis Grizzlies"
+      },
+      "headshot": {
+       "href": "https://a.espncdn.com/i/headshots/nba/players/full/4600663.png",
+       "alt": "Zach Edey"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Ankle",
+      "location": "Leg",
+      "detail": "Surgery",
+      "side": "Left",
+      "returnDate": "2026-10-05"
+     }
+    },
+    {
+     "id": "532864",
+     "longComment": "Peavy was traded from New Orleans to Memphis on Sept. 8 after averaging 4.3 points and 1.9 rebounds in 15.0 minutes per game during his rookie season with the Pelicans. The 25-year-old forward faces plenty of competition for playing time on the rebuilding Grizzlies, and it's unclear if he'll be able to suit up during the preseason, which does not bode well for his chances of carving out a meaningful role early in the season.",
+     "shortComment": "General manager Zach Kleiman said Monday that Peavy recently turned his ankle and it'll be \"some time\" before the team gets a full look at him, Damichael Cole of The Memphis Commercial Appeal reports.",
+     "status": "Day-To-Day",
+     "date": "2026-09-28T16:31Z",
+     "athlete": {
+      "firstName": "Micah",
+      "lastName": "Peavy",
+      "displayName": "Micah Peavy",
+      "shortName": "M. Peavy",
+      "position": {
+       "id": "3",
+       "name": "Guard",
+       "displayName": "Guard",
+       "abbreviation": "G",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4432185/micah-peavy",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "3",
+       "uid": "s:40~l:46~t:3",
+       "slug": "new-orleans-pelicans",
+       "name": "Pelicans",
+       "abbreviation": "NO",
+       "displayName": "New Orleans Pelicans"
+      },
+      "headshot": {
+       "href": "https://a.espncdn.com/i/headshots/nba/players/full/4432185.png",
+       "alt": "Micah Peavy"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Ankle",
+      "location": "Leg",
+      "side": "Not Specified",
+      "returnDate": "2026-10-05"
+     }
+    },
+    {
+     "id": "532167",
+     "longComment": "Lopez will be inactive for a second straight game to close Summer League. The No. 21 overall pick dealt with a hamstring injury throughout Summer League, so the team could just be playing it safe with him.",
+     "shortComment": "Lopez (undisclosed) is out for Sunday's Summer League championship game against the Warriors, Drew Hill of The Daily Memphian reports.",
+     "status": "Day-To-Day",
+     "date": "2026-07-20T00:57Z",
+     "athlete": {
+      "firstName": "Karim",
+      "lastName": "Lopez",
+      "displayName": "Karim Lopez",
+      "shortName": "K. Lopez",
+      "position": {
+       "id": "7",
+       "name": "Forward",
+       "displayName": "Forward",
+       "abbreviation": "F",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/5231919/karim-lopez",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "29",
+       "uid": "s:40~l:46~t:29",
+       "slug": "memphis-grizzlies",
+       "name": "Grizzlies",
+       "abbreviation": "MEM",
+       "displayName": "Memphis Grizzlies"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Undisclosed",
+      "location": "Other",
+      "returnDate": "2026-10-05"
+     }
+    }
+   ]
+  },
+  {
+   "id": "17",
+   "displayName": "Brooklyn Nets",
+   "injuries": [
+    {
+     "id": "533124",
+     "longComment": "Brown rolled his ankle a couple of weeks ago but is ramping up ahead of the preseason. It wouldn't be surprising if the Nets proceed with caution ahead of the regular season, though the rookie guard's first opportunity to suit up in the preseason will come Tuesday against Charlotte.",
+     "shortComment": "Brown (ankle) has progressed to taking some contact in practice and said Sunday that he's \"starting to get to full speed,\" Brian Lewis of the New York Post reports.",
+     "status": "Day-To-Day",
+     "date": "2026-10-04T20:02Z",
+     "athlete": {
+      "firstName": "Mikel",
+      "lastName": "Brown Jr.",
+      "displayName": "Mikel Brown Jr.",
+      "shortName": "M. Brown Jr.",
+      "position": {
+       "id": "3",
+       "name": "Guard",
+       "displayName": "Guard",
+       "abbreviation": "G",
+       "leaf": false
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      },
+      "links": [
+       {
+        "language": "en-US",
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/5101761/mikel-brown-jr",
+        "text": "Player Card",
+        "shortText": "Player Card",
+        "isExternal": false,
+        "isPremium": false
+       }
+      ],
+      "team": {
+       "id": "17",
+       "uid": "s:40~l:46~t:17",
+       "slug": "brooklyn-nets",
+       "name": "Nets",
+       "abbreviation": "BKN",
+       "displayName": "Brooklyn Nets"
+      },
+      "headshot": {
+       "href": "https://a.espncdn.com/i/headshots/nba/players/full/5101761.png",
+       "alt": "Mikel Brown Jr."
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Ankle",
+      "location": "Leg",
+      "side": "Not Specified",
+      "returnDate": "2026-10-06"
+     }
+    }
+   ]
+  }
+ ]
+}
