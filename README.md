@@ -21,6 +21,20 @@ data yet.
 > DESIGN §6.4). This is a single-user tool. It acts only on its owner's team, at low volume, and every trade needs
 > human approval.
 
+## Running
+
+`fm` is installed into the project's virtual environment, not onto your PATH, so a bare `fm` in PowerShell says it is
+not recognized. From the repo root, prefix commands with `uv run`:
+
+```powershell
+uv sync
+uv run fm --help
+uv run fm config check
+```
+
+To type `fm` directly, activate the environment first (`.\.venv\Scripts\Activate.ps1`), or install it as a tool once
+with `uv tool install --editable .` (then `uv tool update-shell` if `fm` is still not found) and open a new shell.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
