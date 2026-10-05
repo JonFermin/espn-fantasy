@@ -368,14 +368,15 @@ the `as_of` of each input.
 - **Prior art to read before building:** `TylerGrossi/Fantasy-Basketball-Simulation-Model` (ESPN 9-cat, streamers,
   acquisition-limit aware, MIT) and `giasemidis/espn-nba-fantasy` (weekly Monte Carlo on the ESPN API).
 - A Monday plan sets which categories are winnable, which to concede, and target stats for streamers.
-- **Facts from the real leagues (read 2026-10-05; confirm with real fixtures in #14):**
+- **Facts from the real leagues (read 2026-10-05; confirmed by the real fixtures of #14, `docs/espn-api.md`):**
   - NBA scoring periods are **days**. Day 1 is opening night (Tue Oct 20, 2026), and `status.finalScoringPeriod` is the
     last fantasy day (153, Sun Mar 21, 2027 in the real league). NBA games in `proTeamSchedules_wl` are keyed by
     that day number.
-  - `scheduleSettings.matchupPeriods` maps a matchup to schedule-period IDs (`{"1": [1], …}`), **not to days**.
-    Matchups run Monday to Sunday, and the first one also absorbs the opening partial week: days 1–13 (Oct 20 – Nov 1),
-    then 7-day matchups through day 153 (13 + 20×7 = 153). This is inferred from those totals, so verify it against
-    the league schedule once games are played.
+  - `scheduleSettings.matchupPeriods` maps a matchup to schedule-period IDs (`{"1": [1], …}`), **not to days**: the
+    IDs are periods of the type `scheduleSettings.periodTypeId` names (weeks in the real league), and ESPN's web client
+    calendar maps those to days. Matchup 1 = days 1–6 (Tue Oct 20 – Sun Oct 25), matchups 2–17 = 7-day Monday–Sunday
+    weeks, matchup 18 = days 119–132 (14 days around the All-Star break), matchups 19–21 (playoffs) = days 133–153:
+    6 + 16×7 + 14 + 3×7 = 153 (`tests/fixtures/espn/real/fba/calendar.json`). No read view carries that calendar.
   - `matchupAcquisitionLimit` is a per-day rate when `matchupLimitPerScoringPeriod` is true: "3 adds per weekly
     matchup" arrives as 3/7. Use `AcquisitionSettings.matchup_limit_for(days)`, never the raw number.
   - Both real leagues are H2H points with traditional waivers (no FAAB, so there are no bids). The NFL league seeds its

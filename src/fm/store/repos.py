@@ -409,6 +409,30 @@ class ProjectionRepo(Repository[ProjectionRow]):
             order="scoring_period_id, source",
         )
 
+    def delete(
+        self,
+        sport: Sport,
+        season: int,
+        scoring_period_id: int,
+        source: str,
+        espn_ids: Iterable[int],
+        *,
+        kind: ProjectionKind = "projected",
+    ) -> int:
+        """Delete one source's stat lines for these players in one period (a blended row no source feeds any more),
+        in one transaction. Returns the number of rows deleted; ids without a row are skipped."""
+        ids = sorted(set(espn_ids))
+        deleted = 0
+        with self.db.transaction():
+            for chunk in _chunks(ids):
+                cursor = self.db.execute(
+                    "DELETE FROM projections WHERE sport = ? AND season = ? AND scoring_period_id = ? AND source = ? "
+                    f"AND kind = ? AND espn_id IN ({_marks(len(chunk))})",
+                    (sport, season, scoring_period_id, source, kind, *chunk),
+                )
+                deleted += cursor.rowcount
+        return deleted
+
 
 class AvailabilityRepo(Repository[AvailabilityRow]):
     table = "availability"

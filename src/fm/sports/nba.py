@@ -19,10 +19,11 @@ first confirmed tip must sit at the matching offset; otherwise the plugin raises
 lineup belongs to.
 
 **Locks and adds.** Lineups lock per game (the base class) or, under ``FIRSTGAME_SCORINGPERIOD``, for everyone at the
-day's first tip; the lock type is the league's (``LeagueSettings.lineup_lock_type``), passed in by the caller. A weekly
-lock spans several daily periods and needs the league's matchup periods, which a pro schedule does not carry, so it
-is refused like ``UNKNOWN``. Adds, drops and trades for a day close at its first tip even though lineups lock per game
-(DESIGN section 9.3): :meth:`NbaPlugin.transaction_cutoff`.
+day's first tip; the lock type is the league's (``LeagueSettings.lineup_lock_type``), passed in by the caller. ESPN's
+weekly lock types (``FIRSTGAME_WEEKLY``, ``INDIVIDUAL_FIRSTGAME_WEEKLY``) span several daily periods and need the
+league's matchup periods, which a pro schedule does not carry: they parse as ``UNKNOWN``, which the base class refuses.
+Adds, drops and trades for a day close at its first tip even though lineups lock per game (DESIGN section 9.3):
+:meth:`NbaPlugin.transaction_cutoff`.
 """
 
 from __future__ import annotations
@@ -35,8 +36,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from fm.espn.ids import FBA, Game
-from fm.espn.settings import LockType
-from fm.sports.base import LineupLock, PeriodKind, ScheduleLike, SportPlugin, first_start, is_provisional
+from fm.sports.base import PeriodKind, ScheduleLike, SportPlugin, first_start, is_provisional
 
 EASTERN: Final = ZoneInfo("America/New_York")
 """ESPN's fantasy basketball day is the US Eastern calendar day."""
@@ -44,9 +44,6 @@ EASTERN: Final = ZoneInfo("America/New_York")
 NBA_GAME_DURATION: Final = timedelta(hours=3)
 """How long after tip an NBA game is assumed to run (about 2 h 15 min typical, longer with overtime); only used for
 ``PeriodWindow.end``."""
-
-WEEKLY_LOCK_TYPES: Final = frozenset({LockType.FIRST_GAME_OF_WEEK})
-"""Lock types that span a matchup week. A day is the NBA scoring period, so these cannot be computed per period."""
 
 _SLOT_POSITIONS_BY_LABEL: Mapping[str, frozenset[str]] = {
     "PG": frozenset({"PG"}),
@@ -180,50 +177,6 @@ class NbaPlugin(SportPlugin):
         must be added before it to play that day. ``None`` for a day without games. A placeholder start (an
         unscheduled game) counts, which errs early, like the lock times."""
         return first_start(schedule, period)
-
-    # --- lock times
-
-    def lock_time(
-        self,
-        team_id: int,
-        period: int,
-        schedule: ScheduleLike,
-        *,
-        lock_type: LockType = LockType.INDIVIDUAL_GAME,
-    ) -> datetime | None:
-        """As :meth:`SportPlugin.lock_time`, refusing a weekly lock type (see the module docstring)."""
-        self._require_daily_lock(lock_type)
-        return super().lock_time(team_id, period, schedule, lock_type=lock_type)
-
-    def lock_windows(
-        self,
-        period: int,
-        schedule: ScheduleLike,
-        *,
-        lock_type: LockType = LockType.INDIVIDUAL_GAME,
-    ) -> tuple[datetime, ...]:
-        """As :meth:`SportPlugin.lock_windows`, refusing a weekly lock type."""
-        self._require_daily_lock(lock_type)
-        return super().lock_windows(period, schedule, lock_type=lock_type)
-
-    def locks(
-        self,
-        period: int,
-        schedule: ScheduleLike,
-        *,
-        lock_type: LockType = LockType.INDIVIDUAL_GAME,
-    ) -> tuple[LineupLock, ...]:
-        """As :meth:`SportPlugin.locks`, refusing a weekly lock type."""
-        self._require_daily_lock(lock_type)
-        return super().locks(period, schedule, lock_type=lock_type)
-
-    def _require_daily_lock(self, lock_type: LockType) -> None:
-        if lock_type in WEEKLY_LOCK_TYPES:
-            raise ValueError(
-                f"lineup lock type {lock_type.value} locks a whole matchup week, but an {self.game.value} scoring "
-                "period is one day; a weekly lock needs the league's matchup periods, which the pro schedule does "
-                "not carry, so it is not computed per day"
-            )
 
 
 NBA: Final = NbaPlugin()

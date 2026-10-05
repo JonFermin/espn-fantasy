@@ -530,8 +530,8 @@ def test_player_cards_ask_for_the_season_and_period_stat_lines(client: EspnClien
         "players": {
             "filterIds": {"value": [GIBBS, CHASE]},
             "filterStatsForTopScoringPeriodIds": {
-                "value": 4,
-                "additionalValue": ["002026", "102026", "1120264", "0120264"],
+                "value": 4,  # the actual week lines: ESPN keys them by pro game id, so "0120264" would return nothing
+                "additionalValue": ["002026", "102026", "1120264"],
             },
         }
     }
@@ -645,15 +645,54 @@ def test_pending_transactions_view(client: EspnClient, espn: FakeEspn) -> None:
 
 
 def test_pending_offers_merge_both_candidate_views(client: EspnClient, espn: FakeEspn) -> None:
-    offers = client.pending_offers()
+    earlier = T0 - timedelta(hours=1)
+    offers = client.pending_offers(now=earlier)
     assert [offer.id for offer in offers] == [T_TRADE, T_TRADE_IN, T_CLAIM]  # oldest first, each once
     assert all(offer.pending for offer in offers)
     assert len(espn.requests["mPendingTransactions"]) == 1 and len(espn.requests["mTransactions2"]) == 1
     assert espn.filter_of("mTransactions2") == {"transactions": {"filterType": {"value": ["WAIVER", "TRADE_PROPOSAL"]}}}
 
+    # At the client's clock team 2's offer has reached its expirationDate: still PENDING at ESPN, no longer open.
+    assert [offer.id for offer in client.pending_offers()] == [T_TRADE_IN, T_CLAIM]
+
     espn.queue("mPendingTransactions", httpx.Response(200, json={"id": LEAGUE_ID, "pendingTransactions": []}))
-    assert [offer.id for offer in client.pending_offers(4)] == [T_TRADE, T_CLAIM]
+    assert [offer.id for offer in client.pending_offers(4, now=earlier)] == [T_TRADE, T_CLAIM]
     assert espn.last("mPendingTransactions").url.params["scoringPeriodId"] == "4"
+
+
+def test_a_cancel_record_closes_the_offer_it_names(client: EspnClient, espn: FakeEspn) -> None:
+    """ESPN records a cancelled or expired offer as a separate CANCEL record that still says isPending (ROADMAP #14):
+    neither it nor the offer it names is open, whatever their flags say."""
+    earlier = T0 - timedelta(hours=1)
+    body = json.loads(fixture("ffl_transactions_week4.json"))
+    offer = next(record for record in body["transactions"] if record["id"] == T_TRADE)
+    cancel = {
+        **offer,
+        "id": "3b6b7b9e-0000-4000-8000-0000000000e1",
+        "status": "CANCELED",
+        "executionType": "CANCEL",
+        "isPending": True,
+        "relatedTransactionId": T_TRADE,
+    }
+    body["transactions"].append(cancel)
+    espn.queue("mTransactions2", httpx.Response(200, json=body))
+    espn.queue("mPendingTransactions", httpx.Response(200, json={"id": LEAGUE_ID, "pendingTransactions": []}))
+    assert [offer.id for offer in client.pending_offers(now=earlier)] == [T_CLAIM]
+
+    view = TransactionsView.model_validate(body)
+    closing = view.transactions[-1]
+    assert closing.is_cancellation and not closing.pending and closing.is_pending
+    assert T_TRADE in {t.id for t in view.pending()} and T_TRADE not in {t.id for t in view.open(earlier)}
+    assert [t.id for t in view.open(earlier)] == [T_CLAIM]
+
+
+def test_a_status_less_record_counts_as_pending_only_in_the_pending_view(client: EspnClient, espn: FakeEspn) -> None:
+    claim = {"id": 41, "type": "WAIVER", "teamId": 1, "items": []}
+    espn.queue("mPendingTransactions", httpx.Response(200, json={"id": LEAGUE_ID, "pendingTransactions": [claim]}))
+    espn.queue("mTransactions2", httpx.Response(200, json={"id": LEAGUE_ID, "transactions": []}))
+    assert [offer.id for offer in client.pending_offers()] == ["41"]
+    loose = TransactionsView.model_validate({"transactions": [claim]})
+    assert loose.pending() == () and loose.open(T0) == ()
 
 
 # --- pro schedules ----------------------------------------------------------------------------------------------------
@@ -725,7 +764,11 @@ def test_nba_category_scoreboard(nba: EspnClient, espn: FakeEspn) -> None:
     jokic = roster.entry(JOKIC)
     assert jokic.lineup_slot_id == FBA.slot_id("C") and jokic.lineup_locked
     day = jokic.player.actual(NBA_SEASON, 1)
-    assert day is not None and day.stats[FBA.stat_id("REB")] == 14.0 and day.id == "0120271"
+    assert day is not None and day.stats[FBA.stat_id("REB")] == 14.0 and day.id == "05401800002"
+    assert day.stat_split_type_id == 5 and day.is_single_period  # fba's "Game" split, keyed by pro game id
+    assert (
+        jokic.player.actual(NBA_SEASON, 1, game="fba") is day and jokic.player.actual(NBA_SEASON, 1, game="ffl") is None
+    )
     season = jokic.player.actual(NBA_SEASON, 0)
     assert season is not None and season.is_season and jokic.player.projection(NBA_SEASON, 1) is None
 

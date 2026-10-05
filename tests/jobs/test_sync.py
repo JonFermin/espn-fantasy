@@ -1,11 +1,12 @@
-"""The sync job and ``fm sync`` over fixture-backed ESPN, nflverse and Sleeper (respx and a patched nflreadpy
-download; no network, no browser).
+"""The sync job and ``fm sync`` over fixture-backed ESPN, nflverse, Sleeper, stats.nba.com and DARKO (respx, a
+patched nflreadpy download and a recorded stats.nba.com transport; no network, no browser).
 
 ESPN views come from tests/fixtures/espn (NFL league 1234567 in week 4 of 2026; the NBA 9-cat league 3456789 on its
 opening day, with a one-team roster built from the scoreboard fixture). Player cards are assembled from the roster,
 free-agent and player-card fixtures so a card request answers exactly the ids it asked for. The nflverse ID map is the
 recorded ff_playerids file plus synthetic rows for the fixture's other rostered players, so the gate passes, and
-leaving one out makes it fail.
+leaving one out makes it fail. The NBA crosswalk matches Jokic through the recorded stats.nba.com splits
+(tests/fixtures/sources/nba_stats), DARKO's talent export (tests/fixtures/sources/darko) and nba_api's bundled table.
 
 Containment: ``fm sync`` harvests the ESPN session from the browser profile and writes the state DB, so a test that
 lost the isolation tests/conftest.py sets up would sync a real league. :func:`_contained` refuses to run a test unless
@@ -18,8 +19,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -40,10 +42,13 @@ from fm.espn import client as espn_client
 from fm.espn.auth import EspnSession
 from fm.espn.client import FILTER_HEADER, READS_HOST, ClientOptions, EspnHttpError
 from fm.jobs import sync as sync_job
-from fm.jobs.sync import ESPN_SOURCE, SourceSync, SyncError, SyncReport, select_leagues, sync
+from fm.jobs.sync import ESPN_SOURCE, KEPT_CROSSWALK, SourceSync, SyncError, SyncReport, select_leagues, sync
 from fm.model.ids import GSIS, SLEEPER, Crosswalk, CrosswalkError, UnmappedPlayer, check_rostered
+from fm.model.ids_nba import NBA_SOURCE, NbaCrosswalk, UnmappedNbaPlayersError, check_nba_rostered
 from fm.proposals.policy import stored_settings
-from fm.sources.base import RateLimiter
+from fm.sources.base import RateLimiter, SourceError
+from fm.sources.darko import TALENT_URL, DarkoSource
+from fm.sources.nba_stats import NbaStatsSource, NbaStatsTransport
 from fm.sources.nflverse import NflreadLoader, NflverseSource
 from fm.sources.sleeper import SleeperSource
 from fm.store import Store
@@ -90,6 +95,9 @@ NFL_VIEWS = {
     "mRoster": "ffl_rosters_week4.json",
 }
 SLEEPER_LINES = 10  # stat lines in projections_2026_4.json once ADP-only placeholders are dropped
+NBA_SPLITS = FIXTURES / "sources" / "nba_stats" / "leaguedashplayerstats_Base_2025-26.json"  # Jokic, SGA, Wembanyama
+DARKO_TALENT = FIXTURES / "sources" / "darko" / "talent.csv"
+JOKIC_NBA_ID = 203999
 
 runner = CliRunner()
 
@@ -218,6 +226,22 @@ class FakeLoader:
         raise AssertionError(f"unexpected loader call {name}")
 
 
+class SplitsTransport:
+    """stats.nba.com's ``leaguedashplayerstats`` from the recorded payload, for whichever season is asked; anything
+    else is a test failure. ``fail_with`` makes every call raise instead."""
+
+    def __init__(self) -> None:
+        self.seasons: list[str] = []
+        self.fail_with: Exception | None = None
+
+    def get(self, endpoint: str, parameters: Mapping[str, object]) -> bytes:
+        assert endpoint == "leaguedashplayerstats" and parameters["MeasureType"] == "Base"
+        self.seasons.append(str(parameters["Season"]))
+        if self.fail_with is not None:
+            raise self.fail_with
+        return NBA_SPLITS.read_bytes()
+
+
 def sleeper_ok(name: str) -> httpx.Response:
     return httpx.Response(
         200,
@@ -242,6 +266,9 @@ class Routes:
         ).mock(side_effect=self._league)
         self.sleeper = router.get(host="api.sleeper.com", path=f"/projections/nfl/{NFL_SEASON}/{WEEK}").mock(
             return_value=sleeper_ok("projections_2026_4.json")
+        )
+        self.darko = router.get(TALENT_URL).mock(
+            return_value=httpx.Response(200, content=DARKO_TALENT.read_bytes(), headers={"content-type": "text/csv"})
         )
 
     def _league(self, request: httpx.Request, game: str) -> httpx.Response:
@@ -321,6 +348,22 @@ def sleeper(clock: FakeClock) -> Iterator[SleeperSource]:
         yield source
 
 
+@pytest.fixture
+def splits() -> SplitsTransport:
+    return SplitsTransport()
+
+
+@pytest.fixture
+def nba_stats(splits: SplitsTransport, clock: FakeClock) -> NbaStatsSource:
+    return NbaStatsSource(transport=cast(NbaStatsTransport, splits), limiter=RateLimiter(0), clock=clock)
+
+
+@pytest.fixture
+def darko(clock: FakeClock) -> Iterator[DarkoSource]:
+    with DarkoSource(limiter=RateLimiter(0), clock=clock, sleep=lambda _: None) as source:
+        yield source
+
+
 class Runner:
     """``sync`` with every seam injected; ``run(leagues=...)`` syncs the NFL league by default."""
 
@@ -330,12 +373,16 @@ class Runner:
         config: Config,
         nflverse: NflverseSource,
         sleeper: SleeperSource,
+        nba_stats: NbaStatsSource,
+        darko: DarkoSource,
         espn_options: ClientOptions,
     ) -> None:
         self.store = store
         self.config = config
         self.nflverse = nflverse
         self.sleeper = sleeper
+        self.nba_stats = nba_stats
+        self.darko = darko
         self.espn_options = espn_options
 
     def run(self, leagues: Iterable[str] | str | None = ("nfl",), **options: Any) -> SyncReport:
@@ -346,6 +393,8 @@ class Runner:
             leagues=leagues,
             nflverse=self.nflverse,
             sleeper=self.sleeper,
+            nba_stats=self.nba_stats,
+            darko=self.darko,
             espn_options=self.espn_options,
             **options,
         )
@@ -358,9 +407,11 @@ def job(
     config: Config,
     nflverse: NflverseSource,
     sleeper: SleeperSource,
+    nba_stats: NbaStatsSource,
+    darko: DarkoSource,
     espn_options: ClientOptions,
 ) -> Runner:
-    return Runner(store, config, nflverse, sleeper, espn_options)
+    return Runner(store, config, nflverse, sleeper, nba_stats, darko, espn_options)
 
 
 def rostered_ids() -> set[int]:
@@ -457,7 +508,8 @@ def test_players_are_decoded_and_projections_are_abbreviation_keyed_stat_lines(j
     davis = store.projections.get("nfl", DAVIS, ESPN_SOURCE, NFL_SEASON, WEEK)  # a free agent's line
     assert davis is not None and davis.stats["RY"] == 27.0
     assert store.projections.get("nfl", ALLEN, ESPN_SOURCE, NFL_SEASON, WEEK) is None  # no line in the fixture
-    assert len(store.projections.for_period("nfl", NFL_SEASON, WEEK)) == 9
+    assert len(store.projections.for_period("nfl", NFL_SEASON, WEEK, source=ESPN_SOURCE)) == 9
+    assert len(store.projections.for_period("nfl", NFL_SEASON, WEEK, source=SLEEPER)) == SLEEPER_LINES
     assert len(store.projections.for_period("nfl", NFL_SEASON, 0, source=ESPN_SOURCE)) == 9
 
 
@@ -532,9 +584,12 @@ def test_crosswalk_is_saved_and_the_gate_passes(job: Runner, store: Store) -> No
         f"nflverse/ff_playerids[all]: as of 2026-10-04 15:00 UTC, fresh; {len(walk)} id mappings saved"
     )
     assert (projections.source, projections.dataset, projections.key) == ("sleeper", "projections", "regular_2026_w4")
-    assert projections.fresh and projections.detail == f"{SLEEPER_LINES} stat lines" and projections.warnings == ()
-    assert projections.stored == 0  # the conversion to ESPN ids and stats is the projection blend's (ROADMAP #15)
-    assert store.projections.for_period("nfl", NFL_SEASON, WEEK, source="sleeper") == []
+    assert projections.fresh and projections.detail == f"{SLEEPER_LINES} stat lines, {SLEEPER_LINES} stored"
+    assert projections.warnings == () and projections.stored == SLEEPER_LINES  # every line maps through the crosswalk
+    stored = store.projections.for_period("nfl", NFL_SEASON, WEEK, source=SLEEPER)
+    assert len(stored) == SLEEPER_LINES and all(row.as_of == T0 for row in stored)
+    allen = store.projections.get("nfl", ALLEN, SLEEPER, NFL_SEASON, WEEK)
+    assert allen is not None and allen.stats["PY"] > 0  # keyed by ESPN id and ESPN abbreviation, never points
     assert report.warnings == crosswalk.warnings
 
 
@@ -561,21 +616,29 @@ def test_gate_fails_naming_the_unmapped_rostered_player(job: Runner, store: Stor
 def test_the_gate_is_picked_by_the_stored_league_sport(
     job: Runner, store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    checked: list[int] = []
-    real_gate = sync_job.check_rostered
+    checked: dict[str, list[int]] = {"nfl": [], "nba": []}
+    real_nfl, real_nba = sync_job.check_rostered, sync_job.check_nba_rostered
 
-    def recording(store: Store, league_id: int, **options: Any) -> set[int]:
-        checked.append(league_id)
-        return real_gate(store, league_id, **options)
+    def recording_nfl(store: Store, league_id: int, **options: Any) -> set[int]:
+        checked["nfl"].append(league_id)
+        return real_nfl(store, league_id, **options)
 
-    monkeypatch.setattr(sync_job, "check_rostered", recording)
+    def recording_nba(store: Store, league_id: int, **options: Any) -> set[int]:
+        checked["nba"].append(league_id)
+        return real_nba(store, league_id, **options)
+
+    monkeypatch.setattr(sync_job, "check_rostered", recording_nfl)
+    monkeypatch.setattr(sync_job, "check_nba_rostered", recording_nba)
     report = job.run(leagues=None)
     nfl, nba = report.leagues
-    assert checked == [nfl.league_id]  # the NFL gate never sees the NBA league
+    assert checked == {"nfl": [nfl.league_id], "nba": [nba.league_id]}  # each gate sees its own sport only
+    assert nfl.gate is not None and nfl.gate.passed and nba.gate is not None and nba.gate.passed
     row = store.leagues.get(nba.league_id)
-    assert row is not None and (row.sport, nba.sport, nba.gate) == ("nba", "nba", None)
-    with pytest.raises(CrosswalkError, match="is an nba league"):  # what the dispatch keeps it away from
+    assert row is not None and (row.sport, nba.sport) == ("nba", "nba")
+    with pytest.raises(CrosswalkError, match="is an nba league"):  # what the dispatch keeps each gate away from
         check_rostered(store, nba.league_id)
+    with pytest.raises(CrosswalkError, match="is an nfl league"):
+        check_nba_rostered(store, nfl.league_id)
 
 
 def test_a_broken_overrides_file_fails_naming_its_line(job: Runner, store: Store, tmp_path: Path) -> None:
@@ -596,7 +659,7 @@ def test_sleeper_degradation_and_staleness_are_surfaced(job: Runner, routes: Rou
     routes.sleeper.mock(return_value=sleeper_ok("projections_legacy_junk.json"))  # a 200 full of ADP junk
     degraded = job.run().sources[1]
     assert isinstance(degraded, SourceSync) and degraded.degraded and not degraded.stale
-    assert degraded.detail == "0 stat lines" and "expected a JSON list" in degraded.warnings[0]
+    assert degraded.detail == "0 stat lines, 0 stored" and "expected a JSON list" in degraded.warnings[0]
     assert degraded.state.startswith("DEGRADED") and "DEGRADED" in degraded.describe()
 
     routes.sleeper.mock(return_value=sleeper_ok("projections_2026_4.json"))
@@ -607,7 +670,8 @@ def test_sleeper_degradation_and_staleness_are_surfaced(job: Runner, routes: Rou
     report = job.run()
     stale = report.sources[1]
     assert (stale.stale, stale.cached, stale.degraded, stale.as_of) == (True, True, False, T0)
-    assert stale.detail == f"{SLEEPER_LINES} stat lines" and "did not parse" in stale.warnings[0]
+    assert stale.detail == f"{SLEEPER_LINES} stat lines, {SLEEPER_LINES} stored"  # the last good copy
+    assert "did not parse" in stale.warnings[0]
     assert stale.state.startswith("STALE") and stale.describe().startswith(
         "sleeper/projections[regular_2026_w4]: as of 2026-10-04 15:00 UTC, STALE"
     )
@@ -706,11 +770,20 @@ def test_the_pool_is_paged_up_to_the_requested_size(job: Runner, routes: Routes,
     assert [(page["limit"], page["offset"]) for page in routes.filters("kona_player_info")] == [(50, 0)]
 
 
-def test_nba_league_syncs_espn_state_without_a_gate(job: Runner, store: Store) -> None:
+def test_nba_league_syncs_espn_state_and_gates_through_the_nba_crosswalk(
+    job: Runner, store: Store, splits: SplitsTransport, routes: Routes
+) -> None:
     report = job.run(leagues=["nba"])
-    assert report.ok and report.sources == ()
+    assert report.ok
     (league,) = report.leagues
-    assert (league.sport, league.espn_league_id, league.scoring_period_id, league.gate) == ("nba", NBA_LEAGUE, 1, None)
+    assert (league.sport, league.espn_league_id, league.scoring_period_id) == ("nba", NBA_LEAGUE, 1)
+    assert league.gate is not None and league.gate.passed and league.gate.checked == 1
+    (crosswalk,) = report.sources
+    assert (crosswalk.source, crosswalk.dataset, crosswalk.key) == ("nba_stats+darko", "crosswalk", "2026-27+2025-26")
+    assert crosswalk.fresh and crosswalk.stored == 1 and crosswalk.detail == "1 id mappings saved"
+    assert splits.seasons == ["2026-27", "2025-26"] and routes.darko.call_count == 1  # this season and last
+    assert NbaCrosswalk.from_store(store).nba_id(JOKIC) == JOKIC_NBA_ID
+    assert [row.source for row in store.player_ids.for_player("nba", JOKIC)] == [NBA_SOURCE]
     assert (league.teams, league.rosters, league.rostered, league.players, league.projections) == (1, 1, 1, 1, 2)
     assert league.name == "Fixture League (NBA 9-cat)" and league.warnings == ()
     row = store.leagues.by_key("nba")
@@ -724,13 +797,58 @@ def test_nba_league_syncs_espn_state_without_a_gate(job: Runner, store: Store) -
     assert store.projections.get("nba", JOKIC, ESPN_SOURCE, NBA_SEASON, 0, kind="actual") is not None
     assert store.projections.get("nba", JOKIC, ESPN_SOURCE, NBA_SEASON, 1) is None  # no projection in the fixture
     assert len(store.rosters.team(row.row_id, 1, NBA_TEAM)) == 1
-    assert sync_cmd.render(report)[-1] == "gate nba: not checked; there is no nba id crosswalk yet"
+    assert sync_cmd.render(report)[-1] == "gate nba: 1 rostered players mapped"
+
+
+def test_nba_gate_fails_naming_the_unmapped_rostered_player(job: Runner, store: Store, tmp_path: Path) -> None:
+    overrides = tmp_path / "id_overrides_nba.csv"
+    overrides.write_text(f"espn_id,source,source_id,name,note\n{JOKIC},nba,,Nikola Jokic,held back\n", "utf-8")
+    report = job.run(leagues=["nba"], nba_overrides=overrides)
+    assert not report.ok
+    (league,) = report.leagues
+    assert report.failed == (league,) and league.gate is not None and not league.gate.passed
+    (error,) = report.gate_errors
+    assert isinstance(error, UnmappedNbaPlayersError) and [player.espn_id for player in error.unmapped] == [JOKIC]
+    assert "add rows to id_overrides_nba.csv" in str(error) and "keeps him unmapped" in str(error)
+    assert store.players.get("nba", JOKIC) is not None  # the ESPN state is kept; the fix is an override line
+
+
+def test_a_degraded_nba_crosswalk_keeps_the_one_an_earlier_sync_saved(
+    job: Runner, store: Store, splits: SplitsTransport, routes: Routes, clock: FakeClock
+) -> None:
+    first = job.run(leagues=["nba"])
+    saved = NbaCrosswalk.from_store(store).rows
+    assert first.ok and len(saved) == 1 and saved[0].as_of == T0
+
+    clock.advance(hours=25)
+    for source in ("nba_stats", "darko"):  # no cached copy left to serve stale
+        shutil.rmtree(paths.cache_dir() / "sources" / source)
+    splits.fail_with = SourceError("Akamai read timeout")
+    routes.darko.mock(return_value=httpx.Response(500))
+    report = job.run(leagues=["nba"])
+    (crosswalk,) = report.sources
+    assert crosswalk.degraded and (crosswalk.stored, crosswalk.detail) == (0, KEPT_CROSSWALK)
+    assert any("unavailable, matching without it" in warning for warning in crosswalk.warnings)
+    assert NbaCrosswalk.from_store(store).rows == saved  # not replaced by the degraded build
+    assert report.ok and report.leagues[0].gate is not None and report.leagues[0].gate.passed
+
+
+def test_a_degraded_nba_crosswalk_is_saved_when_none_was(
+    job: Runner, store: Store, splits: SplitsTransport, routes: Routes
+) -> None:
+    splits.fail_with = SourceError("Akamai read timeout")
+    routes.darko.mock(return_value=httpx.Response(500))
+    report = job.run(leagues=["nba"])
+    (crosswalk,) = report.sources
+    assert crosswalk.degraded and crosswalk.stored == 1 and crosswalk.detail == "1 id mappings saved"
+    assert NbaCrosswalk.from_store(store).nba_id(JOKIC) == JOKIC_NBA_ID  # nba_api's bundled table still knows him
+    assert report.ok
 
 
 def test_every_league_by_default_and_unknown_keys_fail(job: Runner, config: Config) -> None:
     report = job.run(leagues=None)
     assert [league.key for league in report.leagues] == ["nfl", "nba"] and report.ok
-    assert [source.source for source in report.sources] == ["nflverse", "sleeper"]  # NFL sources once
+    assert [source.source for source in report.sources] == ["nflverse", "sleeper", "nba_stats+darko"]  # once each
     assert [league.key for league in job.run(leagues=["nfl", "nfl"]).leagues] == ["nfl"]
     assert [league.key for league in job.run(leagues="nba").leagues] == ["nba"]  # a bare key is one key
     with pytest.raises(SyncError, match="no league 'mlb' in config.toml; known: nfl, nba"):
@@ -834,7 +952,7 @@ def test_cli_syncs_and_reports(routes: Routes, recorded: RecordedIdMap, logged_i
     assert lines[2].endswith(" id mappings saved")
     assert lines[3] == f"  warning: {no_espn_id_warning()}"
     assert lines[4].startswith("sleeper/projections[regular_2026_w4]: as of ")
-    assert lines[4].endswith(f", fresh; {SLEEPER_LINES} stat lines")
+    assert lines[4].endswith(f", fresh; {SLEEPER_LINES} stat lines, {SLEEPER_LINES} stored")
     assert lines[5] == f"gate nfl: {ROSTERED} rostered players mapped" and len(lines) == 6
     assert result.stderr == "" and recorded.urls and routes.sleeper.call_count == 1
     with Store.open() as store:
@@ -866,7 +984,7 @@ def test_cli_surfaces_a_degraded_source(routes: Routes, recorded: RecordedIdMap,
     routes.sleeper.mock(return_value=sleeper_ok("projections_legacy_junk.json"))  # HTTP 200, junk body
     lines = run_cli().stdout.strip().splitlines()  # a degraded source is reported, not a failure
     (sleeper_line,) = [line for line in lines if line.startswith("sleeper/projections[")]
-    assert sleeper_line.endswith(", DEGRADED (nothing usable; see warnings); 0 stat lines")
+    assert sleeper_line.endswith(", DEGRADED (nothing usable; see warnings); 0 stat lines, 0 stored")
     warning = lines[lines.index(sleeper_line) + 1]
     assert warning.startswith("  warning: sleeper/projections[regular_2026_w4]: payload did not parse")
 

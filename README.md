@@ -13,7 +13,12 @@ SQLite store and v1 schema, ESPN ID maps and the league-settings parser, a persi
 for the manual ESPN sign-in, cached source adapters (nflverse, Sleeper, stats.nba.com, the NBA schedule CDN, ESPN
 injuries, DARKO, FantasyCalc and ESPN ownership, the ESPN scoreboard, Open-Meteo and The Odds API), the sport plugin
 interface with the NFL plugin and decision registry, the proposal queue with policy guardrails and `fm proposals` /
-`fm pause` / `fm resume`, the ESPN read client, and the NFL player ID crosswalk. Nothing writes to ESPN yet.
+`fm pause` / `fm resume`, the ESPN read client, and the NFL player ID crosswalk. Phase 4 is done except the guarded
+capture of ESPN's write requests from the web UI (#14, which needs a manual web sign-in): scrubbed real-league read
+fixtures and `docs/espn-api.md`, league scoring and the ESPN + Sleeper projection blend, `fm sync` (league state,
+projections and the NFL and NBA id-crosswalk gates), the NBA plugin and crosswalk, phone approvals over Telegram or
+ntfy (`fm notify`, `fm bot`), and the executor framework behind `fm execute --dry-run`. No executor flow is
+registered yet, so nothing writes to ESPN.
 
 - [`docs/DESIGN.md`](docs/DESIGN.md): architecture, data sources, safety rules, phase plan
 - [`ROADMAP.md`](ROADMAP.md): 47 dependency-ordered build tasks

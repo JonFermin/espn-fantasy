@@ -69,7 +69,7 @@ from fm.model.scoring import Scorer, ScoringError
 from fm.sources.base import Fetched, FetchOptions, RateLimiter
 from fm.sources.sleeper import SleeperSource, SleeperStatLine, parse_stat_lines
 from fm.sports.base import StatSchema
-from fm.store import PlayerRow, ProjectionRow, Store, utc_now
+from fm.store import PlayerRow, ProjectionRow, Store
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 POOL = FIXTURES / "model" / "espn_ffl_pool_week4.json"
@@ -776,7 +776,7 @@ def test_blend_period_runs_on_espn_alone_when_sleeper_breaks(store: Store, tmp_p
     assert result.retired == ()  # nothing was blended for the period before
 
 
-def test_blend_period_empties_blended_rows_no_source_projects_any_more(
+def test_blend_period_deletes_blended_rows_no_source_projects_any_more(
     store: Store, tmp_path: Path, equal: BlendWeights
 ) -> None:
     seed(store)
@@ -785,23 +785,22 @@ def test_blend_period_empties_blended_rows_no_source_projects_any_more(
     assert first.retired == () and {row.espn_id for row in first.rows} == {*BOTH, *ESPN_ONLY, *SLEEPER_ONLY}
 
     broken = nfl_registry(SleeperLoader(SleeperServer(tmp_path / "down", status=500).source))
-    before = utc_now()
     second = blend_period(store, "nfl", SEASON, WEEK, weights=equal, sources=broken)
     assert set(second.retired) == set(SLEEPER_ONLY)  # Sleeper was their only source, and it failed this time
     assert second.warnings[-1] == (
         "nfl: 5 players with a blended row from an earlier run have no weighted source now; their blended rows were "
-        "emptied"
+        "deleted"
     )
-    assert second.saved == len(second.rows) + len(SLEEPER_ONLY)
+    assert second.saved == len(second.rows)
     stored = by_id(store.projections.for_period("nfl", SEASON, WEEK, source=BLEND))
-    assert set(stored) == {*BOTH, *ESPN_ONLY, *SLEEPER_ONLY}  # the repository cannot delete: emptied instead
-    for espn_id in SLEEPER_ONLY:
-        assert stored[espn_id].stats == {} and stored[espn_id].as_of >= before  # a projection of zero, as of now
+    assert set(stored) == {*BOTH, *ESPN_ONLY}  # no row rather than an empty line a reader would take as zero
     assert stored[ALLEN].stats == by_id(espn_rows())[ALLEN].stats  # ESPN's line alone this time
+    for espn_id in SLEEPER_ONLY:  # Sleeper's own rows from the first run stay: they are that run's inputs
+        assert store.projections.get("nfl", espn_id, SLEEPER, SEASON, WEEK) is not None
 
     third = blend_period(store, "nfl", SEASON, WEEK, weights=equal, sources=broken)
-    assert third.retired == () and third.saved == len(third.rows)  # already empty: left alone, not reported again
-    assert not any("emptied" in warning for warning in third.warnings)
+    assert third.retired == () and third.saved == len(third.rows)  # already gone: nothing to report again
+    assert not any("deleted" in warning for warning in third.warnings)
 
 
 def test_sleeper_loader_uses_the_crosswalk_saved_in_the_store(store: Store, tmp_path: Path) -> None:

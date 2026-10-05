@@ -46,7 +46,6 @@ from fm.sports.nba import (
     NBA_GAME_DURATION,
     NBA_SLOT_POSITIONS,
     PLUGIN,
-    WEEKLY_LOCK_TYPES,
     NbaPlugin,
     eastern_day,
 )
@@ -472,22 +471,22 @@ def test_first_game_lock_locks_everyone_at_the_first_tip(schedule: ScheduleLike)
     assert by_team[team("LAL")].game_id is None and by_team[team("SAS")].game_id == OKC_AT_SAS
 
 
-def test_weekly_and_unknown_lock_types_are_refused(schedule: ScheduleLike) -> None:
-    # A day is the period, so a lock "at the first game of the week" is not the day's first tip.
-    assert WEEKLY_LOCK_TYPES == {LockType.FIRST_GAME_OF_WEEK}
-    weekly = LockType.FIRST_GAME_OF_WEEK
-    with pytest.raises(ValueError, match="locks a whole matchup week"):
-        NBA.lock_time(team("SAS"), 1, schedule, lock_type=weekly)
-    with pytest.raises(ValueError, match="locks a whole matchup week"):
-        NBA.is_locked(team("SAS"), 1, DAY1_LAST, schedule, lock_type=weekly)
-    with pytest.raises(ValueError, match="locks a whole matchup week"):
-        NBA.lock_windows(1, schedule, lock_type=weekly)
-    with pytest.raises(ValueError, match="locks a whole matchup week"):
-        NBA.locks(1, schedule, lock_type=weekly)
+@pytest.mark.parametrize("weekly", ["FIRSTGAME_WEEKLY", "INDIVIDUAL_FIRSTGAME_WEEKLY"])
+def test_weekly_and_unknown_lock_types_are_refused(schedule: ScheduleLike, weekly: str) -> None:
+    # A day is the period, so a lock "at the first game of the week" is not the day's first tip: ESPN's weekly lock
+    # types parse as UNKNOWN, which no plugin computes a lock for.
+    view = json.loads(FBA_POINTS.read_text(encoding="utf-8"))
+    view["settings"]["rosterSettings"]["lineupLocktimeType"] = weekly
+    lock_type = parse_league_settings(view).lineup_lock_type
+    assert lock_type is LockType.UNKNOWN
     with pytest.raises(ValueError, match="UNKNOWN"):
-        NBA.locks(1, schedule, lock_type=LockType.UNKNOWN)
+        NBA.lock_time(team("SAS"), 1, schedule, lock_type=lock_type)
     with pytest.raises(ValueError, match="UNKNOWN"):
-        NBA.lock_time(team("SAS"), 1, schedule, lock_type=LockType.UNKNOWN)
+        NBA.is_locked(team("SAS"), 1, DAY1_LAST, schedule, lock_type=lock_type)
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        NBA.lock_windows(1, schedule, lock_type=lock_type)
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        NBA.locks(1, schedule, lock_type=lock_type)
 
 
 def test_lock_type_comes_from_league_settings(schedule: ScheduleLike, fba_points: LeagueSettings) -> None:

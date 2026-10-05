@@ -4,7 +4,12 @@ Unit tests run offline against recorded fixtures (CLAUDE.md). The network guard 
 non-loopback address so an accidental live call fails loudly instead of hitting ESPN or an API. Loopback keeps
 working because asyncio on Windows uses a loopback socketpair for its self-pipe and local test servers need it. The
 guard covers Python's socket layer and asyncio's ``sock_connect`` (the Windows proactor loop connects through
-``ConnectEx``, bypassing ``socket.connect``); clients implemented in Rust or C bypass it.
+``ConnectEx``, bypassing ``socket.connect``); clients implemented in Rust or C bypass it. No unit test starts a real
+browser either: every launch goes through ``fm.browser.session.sync_playwright``, which is replaced with a refusal.
+
+The isolation fixtures patch through their own ``pytest.MonkeyPatch`` rather than the shared ``monkeypatch`` fixture,
+so a test that calls ``monkeypatch.undo()`` drops only its own patches and never the private dirs, the network guard
+or the browser guard (that is how a test once reached a real config, browser profile, state DB and ESPN).
 """
 
 from __future__ import annotations
@@ -13,9 +18,9 @@ import ipaddress
 import socket
 from asyncio.proactor_events import BaseProactorEventLoop
 from asyncio.selector_events import BaseSelectorEventLoop
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -37,12 +42,14 @@ class NetworkDisabledError(RuntimeError):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated_dirs(tmp_path: Path) -> Iterator[None]:
     """Point FM_CONFIG_DIR / FM_CACHE_DIR at per-test temp dirs and drop inherited secrets."""
-    monkeypatch.setenv("FM_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.setenv("FM_CACHE_DIR", str(tmp_path / "cache"))
-    for key in SECRET_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("FM_CONFIG_DIR", str(tmp_path / "config"))
+        patch.setenv("FM_CACHE_DIR", str(tmp_path / "cache"))
+        for key in SECRET_ENV_KEYS:
+            patch.delenv(key, raising=False)
+        yield
 
 
 def _is_loopback(address: object) -> bool:
@@ -73,7 +80,7 @@ def _check_outbound(address: object) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_network() -> Iterator[None]:
     """Block socket connects (sync and asyncio) to anything but loopback."""
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
@@ -86,11 +93,12 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         _check_outbound(address)
         return real_connect_ex(self, address)
 
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
-
-    for loop_cls in (BaseSelectorEventLoop, BaseProactorEventLoop):
-        monkeypatch.setattr(loop_cls, "sock_connect", _guarded_sock_connect(loop_cls.sock_connect))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(socket.socket, "connect", connect)
+        patch.setattr(socket.socket, "connect_ex", connect_ex)
+        for loop_cls in (BaseSelectorEventLoop, BaseProactorEventLoop):
+            patch.setattr(loop_cls, "sock_connect", _guarded_sock_connect(loop_cls.sock_connect))
+        yield
 
 
 def _guarded_sock_connect(real: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
@@ -99,3 +107,21 @@ def _guarded_sock_connect(real: Callable[..., Awaitable[None]]) -> Callable[...,
         await real(self, sock, address)
 
     return sock_connect
+
+
+def _refuse_browser(*_: object, **__: object) -> NoReturn:
+    raise AssertionError("real browser launch in a unit test; stub open_browser or sync_playwright instead")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser() -> Iterator[None]:
+    """Turn a real browser launch into a test failure, in every test. A test that drives the browser code replaces
+    ``sync_playwright`` with its own fake, which wins because it is applied later."""
+    with pytest.MonkeyPatch.context() as patch:
+        try:
+            from fm.browser import session as browser_session
+        except Exception:  # a broken fm.browser fails its own tests; it must not take the whole harness down
+            yield
+            return
+        patch.setattr(browser_session, "sync_playwright", _refuse_browser)
+        yield

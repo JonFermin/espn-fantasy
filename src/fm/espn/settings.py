@@ -79,17 +79,17 @@ _SCORING_KINDS: Mapping[ScoringType, ScoringKind] = {
 
 
 class LockType(_TolerantEnum):
-    """When a lineup slot locks: at each player's own game, or for everyone at the period's first game.
+    """When a lineup slot locks: at each player's own game, or for everyone at the scoring period's first game.
 
-    ``FIRSTGAME_SCORINGPERIOD`` is the value ESPN's own ``settings.typeNames.locktimeTypes`` lists next to
-    ``INDIVIDUAL_GAME`` (the ``proTeamSchedules_wl`` capture under ``tests/fixtures/sports/``); ``FIRST_GAME_OF_WEEK``
-    is the earlier guess, kept until a league capture (ROADMAP #14) settles which one ``lineupLocktimeType`` carries.
-    The sport plugins treat every member but ``INDIVIDUAL_GAME`` and ``UNKNOWN`` as a first-game lock.
+    These are ESPN's own names (``settings.typeNames.locktimeTypes``). Both real leagues carry ``INDIVIDUAL_GAME`` in
+    ``rosterSettings.lineupLocktimeType`` and the NBA one ``FIRSTGAME_SCORINGPERIOD`` in ``rosterLocktimeType``
+    (ROADMAP #14, ``tests/fixtures/espn/real/*/mSettings.json``). ESPN also lists ``FIRSTGAME_WEEKLY`` and
+    ``INDIVIDUAL_FIRSTGAME_WEEKLY`` for ``fba``; a weekly lock spans several daily periods and needs the league's
+    matchup periods, so those parse as ``UNKNOWN``, which every sport plugin refuses rather than guess a lock time.
     """
 
     INDIVIDUAL_GAME = "INDIVIDUAL_GAME"
     FIRSTGAME_SCORINGPERIOD = "FIRSTGAME_SCORINGPERIOD"
-    FIRST_GAME_OF_WEEK = "FIRST_GAME_OF_WEEK"
     UNKNOWN = "UNKNOWN"
 
 

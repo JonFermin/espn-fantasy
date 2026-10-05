@@ -13,16 +13,19 @@ Conventions shared by every model:
 - Maps keyed by stat, slot, position or scoring-period id are serialized with string keys by ESPN and are ``dict[int,
   ...]`` here; non-numeric keys are dropped.
 - A player's ``stats`` entries are stat lines, never points: ``stat_source_id`` 0 is actual and 1 projected,
-  ``stat_split_type_id`` 0 is the season and 1 a single scoring period, and ``applied_total`` is ESPN's own points
-  under the league's scoring (kept for reference only; league points are computed from the scoring items).
+  ``stat_split_type_id`` 0 is the season, a single scoring period's line is the game's "Game" split
+  (:data:`STAT_SPLIT_GAME`: 1 in ``ffl``, 5 in ``fba``, whose splits 1-3 are rolling windows with ``scoring_period_id``
+  0), and ``applied_total`` is ESPN's own points under the league's scoring (kept for reference only; league points
+  are computed from the scoring items).
 - ``*View`` models are whole responses: a :class:`LeagueEnvelope` (league id, season, current scoring period,
   ``status``) plus the requested view's block.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
@@ -32,6 +35,12 @@ STAT_SOURCE_ACTUAL = 0
 STAT_SOURCE_PROJECTED = 1
 STAT_SPLIT_SEASON = 0
 STAT_SPLIT_SCORING_PERIOD = 1
+"""The single-period split of ``ffl`` (its "Game" split), which period projections are keyed by (``"1120264"``)."""
+STAT_SPLIT_GAME: Mapping[str, int] = MappingProxyType({"ffl": 1, "fba": 5})
+"""Each game's "Game" split (``gameSplit: true`` in the web client's stat settings,
+``tests/fixtures/espn/real/webclient.json``): the split of a single scoring period's line, a week in ``ffl`` and a day
+in ``fba``. ESPN keys the actual ones by pro game id (``"01401872969"``, ``"05401811041"``), not by period
+(ROADMAP #14, ``docs/espn-api.md`` section 1 #10-#11)."""
 
 # ``playerPoolEntry.status`` values.
 POOL_FREE_AGENT = "FREEAGENT"
@@ -62,6 +71,10 @@ TRANSACTION_CANCELED = "CANCELED"
 FAILED_STATUS_PREFIX = "FAILED"
 """Failed waiver claims keep their ``bidAmount`` (``FAILED_INVALIDPLAYERSOURCE`` is an outbid claim), which is what
 the FAAB bid model learns from."""
+EXECUTION_CANCEL = "CANCEL"
+"""``executionType`` of a record that cancels the transaction its ``relatedTransactionId`` names: a cancelled claim or
+offer, and ESPN's record of an offer's expiry. Such a record carries ``isPending: true`` like the offer it closes
+(ROADMAP #14, ``docs/espn-api.md`` section 1 #2)."""
 
 # ``items[].type`` values.
 ITEM_ADD = "ADD"
@@ -292,7 +305,9 @@ class PlayerStats(EspnModel):
 
     ``stats`` is keyed by ESPN stat id (:mod:`fm.espn.ids`) and is the input to league scoring; ``applied_stats`` /
     ``applied_total`` are ESPN's points for it under this league's rules, kept for cross-checks only. ``id`` is ESPN's
-    composite key ``{source}{split}{season}[{period}]`` (``"1120264"`` = projected, single period, 2026, week 4).
+    composite key ``{source}{split}{season}[{period}]`` (``"1120264"`` = projected, single period, 2026, week 4), except
+    that actual single-period lines are keyed ``{source}{split}{pro game id}`` (``"01401872969"``): match entries on
+    their fields, never on ``id``.
     """
 
     id: IdStr | None = None
@@ -321,7 +336,9 @@ class PlayerStats(EspnModel):
 
     @property
     def is_single_period(self) -> bool:
-        return self.stat_split_type_id == STAT_SPLIT_SCORING_PERIOD
+        """One scoring period's line (a week in ``ffl``, a day in ``fba``): it carries the period, whatever the game's
+        split number; season lines and ``fba``'s rolling windows carry ``scoring_period_id`` 0."""
+        return self.scoring_period_id > 0 and self.stat_split_type_id != STAT_SPLIT_SEASON
 
 
 class Player(EspnModel):
@@ -344,30 +361,35 @@ class Player(EspnModel):
     ownership: Ownership | None = None
     stats: TupleOf[PlayerStats] = ()
 
-    def stat_entry(self, *, season: int, scoring_period: int = 0, projected: bool = False) -> PlayerStats | None:
+    def stat_entry(
+        self, *, season: int, scoring_period: int = 0, projected: bool = False, game: str | None = None
+    ) -> PlayerStats | None:
         """The season (``scoring_period=0``) or single-period stat line of one source, or ``None`` when absent.
 
-        Rolling-window splits (last 7/15/30 days in ``fba``) are never returned.
+        Entries are matched on their fields (season, period, source, split), never on ``id``. A single period's line
+        is the game's "Game" split (:data:`STAT_SPLIT_GAME`); pass ``game`` (``ffl``/``fba``) to require exactly that
+        split. Without it any split but the season's matches, which is the same line: rolling windows (last 7/15/30
+        days in ``fba``) carry period 0 and are never returned.
         """
         source = STAT_SOURCE_PROJECTED if projected else STAT_SOURCE_ACTUAL
-        split = STAT_SPLIT_SEASON if scoring_period == 0 else STAT_SPLIT_SCORING_PERIOD
+        exact = STAT_SPLIT_SEASON if scoring_period == 0 else (STAT_SPLIT_GAME[game] if game is not None else None)
         for entry in self.stats:
-            if (
-                entry.season_id == season
-                and entry.scoring_period_id == scoring_period
-                and entry.stat_source_id == source
-                and entry.stat_split_type_id == split
-            ):
+            if entry.season_id != season or entry.scoring_period_id != scoring_period:
+                continue
+            if entry.stat_source_id != source:
+                continue
+            split = entry.stat_split_type_id
+            if split == exact or (exact is None and split != STAT_SPLIT_SEASON):
                 return entry
         return None
 
-    def projection(self, season: int, scoring_period: int) -> PlayerStats | None:
-        """ESPN's projected stat line for one scoring period (``0`` for the full season)."""
-        return self.stat_entry(season=season, scoring_period=scoring_period, projected=True)
+    def projection(self, season: int, scoring_period: int, *, game: str | None = None) -> PlayerStats | None:
+        """ESPN's projected stat line for one scoring period (``0`` for the full season); see :meth:`stat_entry`."""
+        return self.stat_entry(season=season, scoring_period=scoring_period, projected=True, game=game)
 
-    def actual(self, season: int, scoring_period: int) -> PlayerStats | None:
-        """The actual stat line for one scoring period (``0`` for the season to date)."""
-        return self.stat_entry(season=season, scoring_period=scoring_period, projected=False)
+    def actual(self, season: int, scoring_period: int, *, game: str | None = None) -> PlayerStats | None:
+        """The actual stat line for one scoring period (``0`` for the season to date); see :meth:`stat_entry`."""
+        return self.stat_entry(season=season, scoring_period=scoring_period, projected=False, game=game)
 
 
 class PoolEntry(EspnModel):
@@ -663,7 +685,21 @@ class Transaction(EspnModel):
 
     @property
     def pending(self) -> bool:
-        return self.status == TRANSACTION_PENDING or bool(self.is_pending)
+        """``status`` is ``PENDING`` and the record is not itself a cancellation. Pending is not open: ESPN leaves an
+        expired offer ``PENDING`` and records the expiry as a separate ``CANCEL`` record, so use :func:`open_only` (or
+        :meth:`TransactionsView.open`) for what can still be answered or cancelled. ``isPending`` is not read: the
+        ``CANCEL`` records carry it too."""
+        return self.status == TRANSACTION_PENDING and not self.is_cancellation
+
+    @property
+    def is_cancellation(self) -> bool:
+        """A record that cancels another (``relatedTransactionId``): see :data:`EXECUTION_CANCEL`."""
+        return self.execution_type == EXECUTION_CANCEL
+
+    def expired(self, now: datetime) -> bool:
+        """Past its ``expirationDate`` at ``now`` (trade offers expire 48 hours after they are proposed). A record
+        without one, such as a waiver claim, never expires."""
+        return self.expiration_date is not None and self.expiration_date <= now
 
     @property
     def executed(self) -> bool:
@@ -721,7 +757,12 @@ class TransactionsView(LeagueEnvelope):
         return data
 
     def pending(self) -> tuple[Transaction, ...]:
+        """Records whose ``status`` is ``PENDING`` (not cancellations), expired offers included; see :meth:`open`."""
         return tuple(transaction for transaction in self.transactions if transaction.pending)
+
+    def open(self, now: datetime) -> tuple[Transaction, ...]:
+        """The offers and claims still open at ``now``, in order: :func:`open_only` over this view's records."""
+        return open_only(self.transactions, now)
 
     def of_type(self, *types: str) -> tuple[Transaction, ...]:
         return tuple(transaction for transaction in self.transactions if transaction.type in types)
@@ -729,6 +770,31 @@ class TransactionsView(LeagueEnvelope):
     def with_bids(self) -> tuple[Transaction, ...]:
         """Transactions that report a ``bidAmount``: waiver claims won or lost (free-agent adds report ``0``)."""
         return tuple(transaction for transaction in self.transactions if transaction.bid_amount is not None)
+
+
+def open_only(
+    transactions: Iterable[Transaction], now: datetime, *, listed_pending: Iterable[str] = ()
+) -> tuple[Transaction, ...]:
+    """The transactions still open at ``now``, in the order given: pending, not expired, and not cancelled.
+
+    An offer is open only while its ``status`` is ``PENDING``, it is not itself a ``CANCEL`` record, its
+    ``expirationDate`` is in the future, and no ``CANCEL`` record among ``transactions`` names it in
+    ``relatedTransactionId``: in the real NBA league six records said pending and none was open (three expired offers
+    and the three records of their expiry; ROADMAP #14, ``docs/espn-api.md`` section 1 #2). So pass the cancellations
+    with the offers: read every status, not ``PENDING`` alone. ``listed_pending`` are ids of records a pending view
+    listed; one of those without a ``status`` counts as pending.
+    """
+    records = tuple(transactions)
+    listed = set(listed_pending)
+    cancelled = {t.related_transaction_id for t in records if t.is_cancellation and t.related_transaction_id}
+    return tuple(
+        transaction
+        for transaction in records
+        if (transaction.pending or (transaction.status is None and transaction.id in listed))
+        and not transaction.is_cancellation
+        and not transaction.expired(now)
+        and transaction.id not in cancelled
+    )
 
 
 # --- pro schedule (proTeamSchedules_wl) -------------------------------------------------------------------------------

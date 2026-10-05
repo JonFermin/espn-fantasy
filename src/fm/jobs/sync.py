@@ -26,11 +26,19 @@ Then the sources and the unmapped-rostered-player gate, dispatched on each store
   recorded on the league's :class:`LeagueSync` (``gate.error``) rather than raised, so the rest of the report still
   comes out; :attr:`SyncReport.ok` is ``False`` and ``fm sync`` exits 1 naming the players. The ESPN state stays
   stored, because it is correct: the fix is a row in ``data/id_overrides.csv`` and another sync. Sleeper's projections
-  for each NFL league's current week are refreshed through the adapter's cache too. Their lines are not written to
-  ``projections``: the store keys stat lines by ESPN id and ESPN abbreviation, and mapping Sleeper's keys onto those is
-  the projection-source registry's job (ROADMAP #15), not this job's.
-- NBA: the ESPN state is synced, and the league's gate is ``None`` (reported as not checked) until the NBA crosswalk
-  (ROADMAP #17) brings its own gate. The NFL gate refuses a league of another sport, which is why the dispatch exists.
+  for each NFL league's current week are refreshed through the adapter's cache and written to ``projections`` as
+  ``sleeper`` stat lines (ESPN ids through the crosswalk, ESPN abbreviations through
+  :func:`fm.model.projections.sleeper_rows`), the inputs :func:`fm.model.projections.blend_period` blends with ESPN's.
+- NBA: the NBA crosswalk (:func:`fm.model.ids_nba.fetch_nba_crosswalk` over stats.nba.com's player splits for this
+  season and last, DARKO's talent sheet and ``nba_api``'s bundled table, plus ``data/id_overrides_nba.csv``) matches
+  every NBA player this sync wrote, is saved to ``player_ids``, and :func:`fm.model.ids_nba.check_nba_rostered` runs
+  for every NBA league, its failure recorded the same way. Each gate refuses a league of the other sport, which is why
+  the dispatch exists.
+
+The NBA crosswalk's sources degrade rather than fail: one that is down with no cached copy is a warning and makes
+the build ``degraded``. A degraded build does not replace the crosswalk an earlier sync saved, and the gate then
+checks the saved one; with none saved yet, it is saved, as the best there is. (The nflverse ID map has no such mode:
+with nothing cached a failed download raises.)
 
 Every source result is reported as a :class:`SourceSync` carrying the adapter's ``as_of``, ``cached``, ``stale`` and
 ``degraded`` flags and its ``warnings`` (for the crosswalk: the adapter's, then the build's). This is deliberate:
@@ -54,7 +62,11 @@ from fm.espn.ids import IdMaps, ids_for
 from fm.espn.models import Player, PlayersView, RostersView, Team, TeamsView
 from fm.espn.settings import LeagueSettings
 from fm.model.ids import Crosswalk, UnmappedPlayer, UnmappedPlayersError, check_rostered, fetch_crosswalk
+from fm.model.ids_nba import NBA_SPORT, NbaCrosswalk, check_nba_rostered, fetch_nba_crosswalk
+from fm.model.projections import sleeper_rows
 from fm.sources.base import Fetched, FetchOptions
+from fm.sources.darko import DarkoSource
+from fm.sources.nba_stats import NbaStatsSource, nba_season
 from fm.sources.nflverse import NflverseSource
 from fm.sources.sleeper import SleeperSource
 from fm.sports.base import StatSchema
@@ -74,7 +86,8 @@ ESPN_SOURCE = "espn"
 """``source`` of the rows this job writes from ESPN: ``projections`` stat lines and ``raw_snapshots``."""
 DEFAULT_POOL_SIZE = 100
 """Free agents (and players on waivers) kept per league, most-owned first; paged ``DEFAULT_POOL_LIMIT`` at a time."""
-NFL: Sport = "nfl"
+NFL_SPORT: Sport = "nfl"
+KEPT_CROSSWALK = "degraded, so the crosswalk an earlier sync saved was kept"
 
 
 class SyncError(RuntimeError):
@@ -123,7 +136,10 @@ class LeagueSync:
     snapshots: int
     warnings: tuple[str, ...] = ()
     gate: GateResult | None = None
-    """``None`` while the league's sport has no crosswalk gate (NBA until ROADMAP #17)."""
+    """The league's unmapped-rostered-player gate: ``None`` until :func:`sync` runs it (:func:`sync_league` alone
+    does not)."""
+    player_ids: tuple[int, ...] = ()
+    """ESPN ids of every ``players`` row written (rostered, then the pool): who the sport's crosswalk must cover."""
 
     @property
     def ok(self) -> bool:
@@ -157,7 +173,10 @@ class SourceSync:
     """What the dataset held, for the report (``60 id mappings saved``)."""
 
     @classmethod
-    def from_fetched(cls, fetched: Fetched[Any], *, stored: int = 0, detail: str = "") -> SourceSync:
+    def from_fetched(
+        cls, fetched: Fetched[Any], *, stored: int = 0, detail: str = "", warnings: Iterable[str] = ()
+    ) -> SourceSync:
+        """``warnings`` (what storing the data found) follow the adapter's own."""
         return cls(
             source=fetched.source,
             dataset=fetched.dataset,
@@ -166,7 +185,7 @@ class SourceSync:
             cached=fetched.cached,
             stale=fetched.stale,
             degraded=fetched.degraded,
-            warnings=fetched.warnings,
+            warnings=(*fetched.warnings, *warnings),
             stored=stored,
             detail=detail,
         )
@@ -371,6 +390,7 @@ def _write_league(store: Store, league: League, reads: _LeagueReads) -> LeagueSy
         projections=projections,
         snapshots=snapshots,
         warnings=tuple(warnings),
+        player_ids=tuple(players),
     )
 
 
@@ -441,13 +461,16 @@ def _projection_rows(
 ) -> list[ProjectionRow]:
     """ESPN's projected and actual lines for the period and the season (``0``), as abbreviation-keyed stat lines.
 
-    A line ESPN sends empty is kept (a bye projects zero); a line it does not send is absent.
+    A line ESPN sends empty is kept (a bye projects zero); a line it does not send is absent. A period's line is the
+    game's "Game" split (:data:`fm.espn.models.STAT_SPLIT_GAME`: 1 in ``ffl``, 5 in ``fba``).
     """
     rows: list[ProjectionRow] = []
     kinds: tuple[tuple[ProjectionKind, bool], ...] = (("projected", True), ("actual", False))
     for kind, projected in kinds:
         for scoring_period in (period, 0):
-            line = player.stat_entry(season=season, scoring_period=scoring_period, projected=projected)
+            line = player.stat_entry(
+                season=season, scoring_period=scoring_period, projected=projected, game=schema.game
+            )
             if line is None:
                 continue
             rows.append(
@@ -481,16 +504,20 @@ def sync(
     leagues: Iterable[str] | None = None,
     nflverse: NflverseSource | None = None,
     sleeper: SleeperSource | None = None,
+    nba_stats: NbaStatsSource | None = None,
+    darko: DarkoSource | None = None,
     espn_options: ClientOptions | None = None,
     pool_size: int = DEFAULT_POOL_SIZE,
     overrides: Path | None = None,
+    nba_overrides: Path | None = None,
     **fetch: Unpack[FetchOptions],
 ) -> SyncReport:
     """Sync every configured league (or the ``leagues`` keys given), then the sources and the gate for each sport.
 
-    ``session`` carries the ESPN cookies (``None`` reads public leagues only). ``nflverse`` and ``sleeper`` default to
-    fresh adapters over the cache dir; ``espn_options`` are passed to each :class:`EspnClient`; ``overrides`` is the
-    crosswalk overrides file (``data/id_overrides.csv`` by default); ``fetch`` (``force``, ``max_age``,
+    ``session`` carries the ESPN cookies (``None`` reads public leagues only). ``nflverse``, ``sleeper``,
+    ``nba_stats`` and ``darko`` default to fresh adapters over the cache dir; ``espn_options`` are passed to each
+    :class:`EspnClient`; ``overrides`` and ``nba_overrides`` are the crosswalk overrides files
+    (``data/id_overrides.csv`` and ``data/id_overrides_nba.csv`` by default); ``fetch`` (``force``, ``max_age``,
     ``fresh_since``) goes to every source. ESPN, crosswalk and source failures raise (a league already synced stays
     synced); a failed gate is recorded in the report, whose ``ok`` is then ``False``.
     """
@@ -504,9 +531,12 @@ def sync(
             synced.append(sync_league(store, league, client, pool_size=pool_size))
 
     sources: list[SourceSync] = []
-    if any(item.sport == NFL for item in synced):
+    if any(item.sport == NFL_SPORT for item in synced):
         synced, nfl_sources = _sync_nfl_sources(store, synced, nflverse, sleeper, overrides, fetch)
         sources.extend(nfl_sources)
+    if any(item.sport == NBA_SPORT for item in synced):
+        synced, nba_sources = _sync_nba_sources(store, synced, nba_stats, darko, nba_overrides, fetch)
+        sources.extend(nba_sources)
     return SyncReport(tuple(synced), tuple(sources))
 
 
@@ -534,19 +564,23 @@ def _sync_nfl_sources(
     overrides: Path | None,
     fetch: FetchOptions,
 ) -> tuple[list[LeagueSync], list[SourceSync]]:
-    """The NFL crosswalk (saved, then the gate for each NFL league) and Sleeper's projections for each current week."""
+    """The NFL crosswalk (saved, then the gate for each NFL league) and Sleeper's projections for each current week,
+    stored as ``sleeper`` stat lines."""
     sources: list[SourceSync] = []
     crosswalk = fetch_crosswalk(nflverse if nflverse is not None else NflverseSource(), overrides=overrides, **fetch)
     stored = crosswalk.data.save(store)
     sources.append(SourceSync.from_fetched(crosswalk, stored=stored, detail=f"{stored} id mappings saved"))
-    gated = [_gate_nfl(store, item, crosswalk.data) if item.sport == NFL else item for item in synced]
+    gated = [_gate_nfl(store, item, crosswalk.data) if item.sport == NFL_SPORT else item for item in synced]
 
-    weeks = sorted({(item.season, item.scoring_period_id) for item in synced if item.sport == NFL})
+    weeks = sorted({(item.season, item.scoring_period_id) for item in synced if item.sport == NFL_SPORT})
     source = sleeper if sleeper is not None else SleeperSource()
     try:
         for season, week in weeks:
             lines = source.projections(season, week, **fetch)
-            sources.append(SourceSync.from_fetched(lines, detail=f"{len(lines.data)} stat lines"))
+            converted = sleeper_rows(lines.data, crosswalk.data, as_of=lines.as_of)
+            saved = store.projections.upsert_many(converted.rows)
+            detail = f"{len(lines.data)} stat lines, {saved} stored"
+            sources.append(SourceSync.from_fetched(lines, stored=saved, detail=detail, warnings=converted.warnings))
     finally:
         if sleeper is None:
             source.close()
@@ -560,3 +594,57 @@ def _gate_nfl(store: Store, item: LeagueSync, crosswalk: Crosswalk) -> LeagueSyn
     except UnmappedPlayersError as exc:
         return replace(item, gate=GateResult(checked=item.rostered, error=exc))
     return replace(item, gate=GateResult(checked=len(checked)))
+
+
+def _sync_nba_sources(
+    store: Store,
+    synced: Sequence[LeagueSync],
+    nba_stats: NbaStatsSource | None,
+    darko: DarkoSource | None,
+    overrides: Path | None,
+    fetch: FetchOptions,
+) -> tuple[list[LeagueSync], list[SourceSync]]:
+    """The NBA crosswalk over every NBA player this sync wrote (saved), then the gate for each NBA league.
+
+    The persons come from stats.nba.com's splits for the latest NBA league's season and the one before (before opening
+    night the current season is empty), DARKO's talent sheet and ``nba_api``'s bundled table. With no NBA player
+    written there is nothing to match, and the gates check the saved crosswalk.
+    """
+    leagues = [item for item in synced if item.sport == NBA_SPORT]
+    players = store.players.many(NBA_SPORT, {espn_id for item in leagues for espn_id in item.player_ids})
+    sources: list[SourceSync] = []
+    walk: NbaCrosswalk | None = None
+    if players:
+        season = max(item.season for item in leagues)
+        stats = nba_stats if nba_stats is not None else NbaStatsSource()
+        talent = darko if darko is not None else DarkoSource()
+        try:
+            seasons = (nba_season(season), nba_season(season - 1))
+            crosswalk = fetch_nba_crosswalk(players, stats, seasons, darko=talent, overrides=overrides, **fetch)
+        finally:
+            if darko is None:
+                talent.close()
+        kept = _keeps_saved_crosswalk(store, NBA_SPORT, crosswalk)
+        stored = 0 if kept else crosswalk.data.save(store)
+        detail = KEPT_CROSSWALK if kept else f"{stored} id mappings saved"
+        sources.append(SourceSync.from_fetched(crosswalk, stored=stored, detail=detail))
+        walk = None if kept else crosswalk.data
+    gated = [_gate_nba(store, item, walk) if item.sport == NBA_SPORT else item for item in synced]
+    return gated, sources
+
+
+def _gate_nba(store: Store, item: LeagueSync, crosswalk: NbaCrosswalk | None) -> LeagueSync:
+    """:func:`fm.model.ids_nba.check_nba_rostered` for an NBA league (against ``crosswalk``, else the saved one), its
+    failure recorded on the result rather than raised."""
+    try:
+        checked = check_nba_rostered(
+            store, item.league_id, crosswalk=crosswalk, scoring_period_id=item.scoring_period_id
+        )
+    except UnmappedPlayersError as exc:
+        return replace(item, gate=GateResult(checked=item.rostered, error=exc))
+    return replace(item, gate=GateResult(checked=len(checked)))
+
+
+def _keeps_saved_crosswalk(store: Store, sport: Sport, crosswalk: Fetched[Any]) -> bool:
+    """A degraded build (a source down with no cached copy) leaves the crosswalk an earlier sync saved in place."""
+    return crosswalk.degraded and bool(store.player_ids.for_sport(sport))

@@ -416,6 +416,13 @@ def test_projection_round_trip(store: Store) -> None:
     assert store.projections.get("nfl", 1, "espn", 2026, 4) == revised
     assert count(store, "projections") == 4
 
+    # A delete is keyed by sport, season, period, source and kind: only the sleeper projection goes.
+    assert store.projections.delete("nfl", 2026, 4, "sleeper", [1, 2]) == 1
+    assert store.projections.for_period("nfl", 2026, 4) == [revised]
+    assert store.projections.delete("nfl", 2026, 4, "espn", [1], kind="actual") == 1
+    assert store.projections.delete("nfl", 2026, 4, "espn", []) == 0 and count(store, "projections") == 2
+    assert store.projections.for_player("nfl", 1, 2026) == [season, revised]
+
 
 def test_availability_round_trip(store: Store) -> None:
     row = AvailabilityRow(

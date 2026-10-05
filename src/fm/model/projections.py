@@ -32,7 +32,7 @@ bye, a projection of zero, so it pulls every stat of the blend toward zero. Deri
 ESPN's, and where both sources project a league's scored stats the blend scores as the weighted mean of their scores.
 Brackets keep ESPN's probabilities, and percentages are recomputed from the blended makes and attempts. Blended rows
 go under the reserved source name :data:`BLEND`, stamped with the oldest input's ``as_of``; :func:`blend_period`
-writes them and empties an earlier run's row for a player nothing projects any more.
+writes them and deletes an earlier run's row for a player nothing projects any more.
 
 **Uncertainty.** A projection's standard deviation in league points is ``max(floor, cv * points)`` with the
 coefficient of variation by position from the same file (:class:`SdModel`, :meth:`BlendWeights.projection_sd`), the
@@ -891,7 +891,7 @@ def blend(
 class PeriodBlend:
     """What :func:`blend_period` did: the :class:`Blend`, each source's load with its provenance (``as_of``,
     ``stale``, ``degraded``) for the output, how many rows it wrote, every warning in one place, and ``retired``: the
-    ESPN ids whose blended row from an earlier run it emptied, since nothing projects them now."""
+    ESPN ids whose blended row from an earlier run it deleted, since nothing projects them now."""
 
     blend: Blend
     loads: tuple[Fetched[tuple[ProjectionRow, ...]], ...]
@@ -941,10 +941,9 @@ def blend_period(
     transaction, replacing each player's previous blended row.
 
     A stored blended row this run does not replace belongs to a player no weighted source projects now: a loader
-    failed or dropped him, the weights changed, or the crosswalk moved his id. The repository cannot delete, so the
-    row is overwritten with an empty line stamped with the run's time, a projection of zero, rather than left for a
-    reader of ``projections`` to take as current; ``retired`` lists those players and a warning counts them. A row
-    that is already empty is left alone.
+    failed or dropped him, the weights changed, or the crosswalk moved his id. It is deleted in the same transaction
+    rather than left for a reader of ``projections`` to take as current (an empty line would read as a projection of
+    zero); ``retired`` lists those players and a warning counts them.
     """
     normalized = _sport(sport)
     weighted = set(weights.sources(normalized))
@@ -975,24 +974,24 @@ def blend_period(
     players = store.players.many(normalized, {row.espn_id for row in rows})
     result = blend(rows, weights=weights, positions={player.espn_id: player.position for player in players})
     saved = 0
-    retired: list[ProjectionRow] = []
+    retired: list[int] = []
     if save:
         current = {row.espn_id for row in result.rows}
         with store.db.transaction():
-            emptied_at = utc_now()
             retired = [
-                row.model_copy(update={"stats": {}, "as_of": emptied_at})
+                row.espn_id
                 for row in store.projections.for_period(normalized, season, scoring_period, source=BLEND)
-                if row.espn_id not in current and not _is_zero_line(row.stats)
+                if row.espn_id not in current
             ]
-            saved = store.projections.upsert_many([*fetched_rows, *result.rows, *retired])
+            store.projections.delete(normalized, season, scoring_period, BLEND, retired)
+            saved = store.projections.upsert_many([*fetched_rows, *result.rows])
     warnings = [*(warning for fetched in loads for warning in fetched.warnings), *notes, *result.warnings]
     if retired:
         warnings.append(
             f"{normalized}: {len(retired)} players with a blended row from an earlier run have no weighted source "
-            "now; their blended rows were emptied"
+            "now; their blended rows were deleted"
         )
-    return PeriodBlend(result, tuple(loads), saved, tuple(warnings), retired=tuple(row.espn_id for row in retired))
+    return PeriodBlend(result, tuple(loads), saved, tuple(warnings), retired=tuple(retired))
 
 
 # --- projections with points and uncertainty --------------------------------------------------------------------------

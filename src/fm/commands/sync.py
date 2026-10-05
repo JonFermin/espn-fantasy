@@ -70,7 +70,7 @@ def render(report: SyncReport) -> list[str]:
     for league in report.leagues:
         gate = league.gate
         if gate is None:
-            lines.append(f"gate {league.key}: not checked; there is no {league.sport} id crosswalk yet")
+            lines.append(f"gate {league.key}: not checked")
         elif gate.passed:
             lines.append(f"gate {league.key}: {gate.checked} rostered players mapped")
         else:

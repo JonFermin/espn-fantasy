@@ -1,14 +1,16 @@
-"""Public names mean one thing across ``fm.config``, ``fm.store``, ``fm.espn``, ``fm.sports``, ``fm.decide`` and
-``fm.proposals``.
+"""Public names mean one thing across ``fm.config``, ``fm.store``, ``fm.espn``, ``fm.sports``, ``fm.decide``,
+``fm.proposals``, ``fm.model``, ``fm.jobs``, ``fm.notify``, ``fm.browser.flows`` and ``fm.executor``.
 
 Store rows carry a ``Row`` suffix (``LeagueRow``) so they never shadow ``fm.config.League`` or a parsed ESPN model,
 and a name two modules both expose must be one object (a re-export such as ``Sport``), never two definitions. A module
-can then import from all three packages without aliasing.
+can then import from all of them without aliasing. Two names are per-module by convention and exempt: each sport
+module's ``PLUGIN`` (what :func:`fm.sports.base.plugin_for` looks up) and a module's ``logger``.
 """
 
 from __future__ import annotations
 
 import importlib
+import logging
 import types
 
 import fm.config
@@ -35,14 +37,41 @@ MODULES = (
     "fm.proposals.policy",
     "fm.proposals.queue",
     "fm.proposals.pause",
+    "fm.sports.nba",
+    "fm.model.ids",
+    "fm.model.ids_nba",
+    "fm.model.scoring",
+    "fm.model.projections",
+    "fm.model.availability",
+    "fm.jobs.sync",
+    "fm.notify",
+    "fm.notify.base",
+    "fm.notify.messages",
+    "fm.notify.nonces",
+    "fm.notify.telegram",
+    "fm.notify.ntfy",
+    "fm.notify.send",
+    "fm.notify.bot",
+    "fm.browser.flows",
+    "fm.executor",
+    "fm.executor.audit",
+    "fm.executor.run",
+    "fm.executor.runtime",
+    "fm.executor.transport",
+    "fm.executor.ui",
+    "fm.executor.verify",
 )
+PER_MODULE = frozenset({"PLUGIN"})
+"""Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
 
 
 def public_names(module: types.ModuleType) -> dict[str, object]:
     return {
         name: value
         for name, value in vars(module).items()
-        if not name.startswith("_") and not isinstance(value, types.ModuleType)
+        if not name.startswith("_")
+        and not isinstance(value, types.ModuleType | logging.Logger)
+        and name not in PER_MODULE
     }
 
 

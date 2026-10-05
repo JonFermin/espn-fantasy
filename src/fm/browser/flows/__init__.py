@@ -85,7 +85,8 @@ MAX_TEXT_CHARS = 4000
 """How much of a response body that is not JSON an execution row keeps (the audit file keeps all of it)."""
 CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "authorization", "proxy-authorization"})
 """Headers a write request may not set (lower case): the browser session supplies the cookies."""
-REDACTED = "<redacted>"
+MASKED = "<redacted>"
+"""What a saved request shows in place of a credential header's value."""
 
 _ERROR_CODE = re.compile(r"\b(?:TRAN|FAILED|AUTH|GENERAL)_[A-Z0-9_]+\b")
 BUSINESS_CODE_PREFIXES: tuple[str, ...] = ("TRAN_", "FAILED_")
@@ -209,7 +210,7 @@ class WriteRequest:
     def to_json(self) -> dict[str, Any]:
         """The request as the audit folder and ``executions.request`` keep it, credential headers masked."""
         headers = {
-            name: REDACTED if name.lower() in CREDENTIAL_HEADERS else value for name, value in self.headers.items()
+            name: MASKED if name.lower() in CREDENTIAL_HEADERS else value for name, value in self.headers.items()
         }
         return {"method": self.method, "url": self.url, "headers": headers, "body": jsonable(self.body)}
 

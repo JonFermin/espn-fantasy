@@ -32,7 +32,7 @@ files describe the 9-cat league `3456789` on its opening day (scoring period 1 o
 | `ffl_transactions_week4.json` | `mTransactions2` (`scoringPeriodId=4`) | An executed waiver claim ($17), the losing bid for the same player (`FAILED_INVALIDPLAYERSOURCE`, $9 kept), a free-agent add/drop, a pending trade proposal from team 2 and our pending $12 claim |
 | `ffl_pending_transactions.json` | `mPendingTransactions` | The two pending rows above plus an incoming trade offer from team 6, under a `pendingTransactions` key (unconfirmed; the parser also reads `transactions`) |
 | `ffl_pro_schedule_2026.json` | `proTeamSchedules_wl` (season level) | 14 NFL teams plus the free-agent pseudo team, weeks 4 and 5 (Thursday through Monday night), PIT/SF on bye in week 4 and ATL/PHI in week 5; both teams list each game |
-| `fba_scoreboard_9cat_day1.json` | `mMatchupScore` + `mScoreboard` | One category matchup with `cumulativeScore.scoreByStat` for the nine categories (WIN/LOSS/TIE) and two-player lineups with day and season stat lines |
+| `fba_scoreboard_9cat_day1.json` | `mMatchupScore` + `mScoreboard` | One category matchup with `cumulativeScore.scoreByStat` for the nine categories (WIN/LOSS/TIE) and two-player lineups with day and season stat lines (the day lines in `fba`'s "Game" split 5, keyed by pro game id as ESPN keys them) |
 | `fba_pro_schedule_2027.json` | `proTeamSchedules_wl` (season level) | Six NBA teams over the first two days of 2026-27; the 7:30 p.m. ET tip on day 1 is the add/drop cutoff the tests check |
 
 Timestamps are epoch milliseconds computed from US Eastern wall-clock times (waiver run 3 a.m. ET, kickoffs and

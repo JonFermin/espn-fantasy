@@ -492,8 +492,8 @@ def test_is_locked_follows_the_clock(schedule: ScheduleLike) -> None:
         NFL.is_locked(team("PHI"), 4, datetime(2026, 10, 4, 18, 0), schedule)
 
 
-@pytest.mark.parametrize("first", [LockType.FIRSTGAME_SCORINGPERIOD, LockType.FIRST_GAME_OF_WEEK])
-def test_first_game_lock_locks_everyone_at_the_opener(schedule: ScheduleLike, first: LockType) -> None:
+def test_first_game_lock_locks_everyone_at_the_opener(schedule: ScheduleLike) -> None:
+    first = LockType.FIRSTGAME_SCORINGPERIOD
     assert NFL.lock_time(team("CAR"), 5, schedule, lock_type=first) == TNF_WEEK_5  # bye team locks too
     assert NFL.lock_time(team("BUF"), 5, schedule, lock_type=first) == TNF_WEEK_5  # not at its Monday kickoff
     assert NFL.lock_time(team("PHI"), 99, schedule, lock_type=first) is None
@@ -546,23 +546,25 @@ def test_tbd_games_make_their_locks_provisional() -> None:
     provisional = {lock.team_id for lock in NFL.locks(5, schedule) if lock.provisional}
     assert provisional == {team("BUF"), team("LAR")}
     # Under a first-game lock only the opener's own status matters.
-    assert not any(lock.provisional for lock in NFL.locks(5, schedule, lock_type=LockType.FIRST_GAME_OF_WEEK))
+    assert not any(lock.provisional for lock in NFL.locks(5, schedule, lock_type=LockType.FIRSTGAME_SCORINGPERIOD))
     _set_game(view, TNF_WEEK_5_GAME, startTimeTBD=True)
     opener_tbd = load_schedule(view)
-    assert all(lock.provisional for lock in NFL.locks(5, opener_tbd, lock_type=LockType.FIRST_GAME_OF_WEEK))
+    assert all(lock.provisional for lock in NFL.locks(5, opener_tbd, lock_type=LockType.FIRSTGAME_SCORINGPERIOD))
 
 
 def test_lock_type_comes_from_league_settings(schedule: ScheduleLike, ffl_ppr: LeagueSettings) -> None:
     assert ffl_ppr.lineup_lock_type is LockType.INDIVIDUAL_GAME
     assert NFL.lock_time(team("ATL"), 4, schedule, lock_type=ffl_ppr.lineup_lock_type) == MNF_WEEK_4
     view = _view(FFL_PPR)
-    view["settings"]["rosterSettings"]["lineupLocktimeType"] = "FIRST_GAME_OF_WEEK"
-    whole_week = parse_league_settings(view)
-    assert NFL.lock_time(team("ATL"), 4, schedule, lock_type=whole_week.lineup_lock_type) == TNF_WEEK_4
     view["settings"]["rosterSettings"]["lineupLocktimeType"] = "FIRSTGAME_SCORINGPERIOD"  # ESPN's own name for it
     espn_named = parse_league_settings(view)
     assert espn_named.lineup_lock_type is LockType.FIRSTGAME_SCORINGPERIOD
     assert NFL.lock_time(team("ATL"), 4, schedule, lock_type=espn_named.lineup_lock_type) == TNF_WEEK_4
+    view["settings"]["rosterSettings"]["lineupLocktimeType"] = "FIRST_GAME_OF_WEEK"  # the old guess: no league has it
+    guessed = parse_league_settings(view)
+    assert guessed.lineup_lock_type is LockType.UNKNOWN
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        NFL.lock_time(team("ATL"), 4, schedule, lock_type=guessed.lineup_lock_type)
 
 
 # --- scoring periods --------------------------------------------------------------------------------------------------

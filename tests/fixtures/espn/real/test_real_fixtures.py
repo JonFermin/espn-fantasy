@@ -156,7 +156,7 @@ def test_lock_type_keys(game: str, roster_lock: LockType) -> None:
     parsed = settings(game)
     assert parsed.lineup_lock_type is LockType.INDIVIDUAL_GAME
     assert parsed.roster_lock_type_raw == roster_lock.value
-    # The literal, not the LockType member: the #4 guess no league carries is due to be dropped from the enum.
+    # The literal: the #4 guess no league carries is no longer a LockType member (it parses as UNKNOWN).
     assert "FIRST_GAME_OF_WEEK" not in json.dumps(load(f"{game}/mSettings.json"))
 
 
@@ -268,6 +268,11 @@ def test_no_offer_was_open_although_six_records_say_pending() -> None:
     assert len(flagged) == 6  # the three expired offers and their three CANCEL records all carry isPending: true
     assert {(t.status, t.execution_type) for t in flagged} == {("PENDING", "EXECUTE"), ("CANCELED", "CANCEL")}
     assert open_offers(view, captured) == []
+    # The models apply the same rule: the expired offers are still PENDING, but nothing is open.
+    assert len(view.pending()) == 3 and all(t.type == "TRADE_PROPOSAL" for t in view.pending())
+    assert view.open(captured) == ()
+    before_expiry = min(t.expiration_date for t in view.pending() if t.expiration_date is not None) - timedelta(hours=1)
+    assert view.open(before_expiry) == ()  # each one is also closed by its CANCEL record
 
 
 def test_recorded_lineup_moves_list_both_sides_of_a_swap() -> None:
@@ -299,6 +304,31 @@ def test_nfl_stat_entry_ids() -> None:
     assert stat_entry_id(2026, 4) not in returned  # actual weekly lines are keyed by the pro game id instead
     actual_weeks = {k: v for k, v in returned.items() if v["statSourceId"] == 0 and v["scoringPeriodId"] > 0}
     assert actual_weeks and all(k.startswith("01") and len(k) == 11 for k in actual_weeks)
+
+
+def test_player_stat_entry_finds_each_games_single_period_lines() -> None:
+    """``Player.stat_entry`` matches on fields: each game's "Game" split (1 in ffl, 5 in fba), never the id, and never
+    one of fba's rolling windows."""
+    for game in SEASONS:
+        cards = PlayersView.model_validate(load(f"{game}/kona_playercard_stat_entries.json"))
+        lines = [
+            (entry.player, line) for entry in cards.players for line in entry.player.stats if line.scoring_period_id
+        ]
+        assert lines
+        for player, line in lines:
+            season, period, projected = line.season_id, line.scoring_period_id, line.is_projection
+            assert player.stat_entry(season=season, scoring_period=period, projected=projected, game=game) is line
+            assert player.stat_entry(season=season, scoring_period=period, projected=projected) is line
+            other = "fba" if game == "ffl" else "ffl"  # the other game's split number finds nothing
+            assert player.stat_entry(season=season, scoring_period=period, projected=projected, game=other) is None
+            assert line.is_single_period
+        if game == "fba":
+            windows = [line for entry in cards.players for line in entry.player.stats if line.stat_split_type_id < 4]
+            assert {line.stat_split_type_id for line in windows} == {0, 1, 2, 3}  # the season and the three windows
+            assert not any(line.is_single_period for line in windows)
+    banchero = PlayersView.model_validate(load("fba/kona_playercard_stat_entries.json")).players[0].player
+    assert banchero.actual(2026, 174, game="fba") is not None  # a played day of last season, split 5
+    assert banchero.actual(2027, 0) is not None and banchero.actual(2027, 0) is banchero.stat_entry(season=2027)
 
 
 def test_nba_daily_lines_use_split_five_and_windows_use_one_to_three() -> None:

@@ -423,11 +423,14 @@ def test_lock_type_variants_keep_raw_value() -> None:
     view = _view(FFL_PPR)
     roster = view["settings"]["rosterSettings"]
 
-    roster["lineupLocktimeType"] = "FIRST_GAME_OF_WEEK"
-    assert parse_league_settings(view).lineup_lock_type is LockType.FIRST_GAME_OF_WEEK
-
     roster["lineupLocktimeType"] = "FIRSTGAME_SCORINGPERIOD"  # the value ESPN's typeNames.locktimeTypes lists
     assert parse_league_settings(view).lineup_lock_type is LockType.FIRSTGAME_SCORINGPERIOD
+
+    # ESPN's two weekly values, and the earlier guess no league carries: all UNKNOWN, which no plugin computes.
+    for weekly in ("FIRSTGAME_WEEKLY", "INDIVIDUAL_FIRSTGAME_WEEKLY", "FIRST_GAME_OF_WEEK"):
+        roster["lineupLocktimeType"] = weekly
+        parsed = parse_league_settings(view)
+        assert parsed.lineup_lock_type is LockType.UNKNOWN and parsed.lineup_lock_type_raw == weekly
 
     roster["lineupLocktimeType"] = "FIRST_GAME_OF_DAY"
     unknown = parse_league_settings(view)

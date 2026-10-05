@@ -18,9 +18,10 @@ saved file.
 
 Filtered views (``kona_player_info``, ``kona_playercard``, ``mTransactions2``, ``mMatchupScore``) take their filter in
 the ``X-Fantasy-Filter`` header as compact JSON; :func:`player_filter`, :func:`transaction_filter` and
-:func:`schedule_filter` build the shapes the ESPN web app and ``cwendt94/espn-api`` send. Pending offers have two
-candidate views (``mPendingTransactions``, and ``mTransactions2`` filtered to ``PENDING``); both are exposed and
-:meth:`EspnClient.pending_offers` merges them until the real-league capture (ROADMAP #14) settles which one ESPN serves.
+:func:`schedule_filter` build the shapes the ESPN web app and ``cwendt94/espn-api`` send. Trade offers come from
+``mTransactions2``; ``mPendingTransactions`` holds the team's own pending moves (ROADMAP #14). Both are exposed, and
+:meth:`EspnClient.pending_offers` merges them and keeps only what is still open, since ESPN leaves an expired offer
+``PENDING`` and closes it with a separate ``CANCEL`` record.
 """
 
 from __future__ import annotations
@@ -51,7 +52,6 @@ from fm.espn.models import (
     STAT_SOURCE_PROJECTED,
     STAT_SPLIT_SCORING_PERIOD,
     STAT_SPLIT_SEASON,
-    TRANSACTION_PENDING,
     MatchupsView,
     PlayerStats,
     PlayersView,
@@ -60,6 +60,7 @@ from fm.espn.models import (
     TeamsView,
     Transaction,
     TransactionsView,
+    open_only,
 )
 from fm.espn.settings import LeagueSettings, SettingsParseError, parse_league_settings
 
@@ -149,7 +150,10 @@ class EspnSchemaError(EspnClientError, ValueError):
 def stat_entry_id(season: int, scoring_period: int = 0, *, projected: bool = False) -> str:
     """ESPN's composite stat-entry id: ``{source}{split}{season}[{period}]`` (``"1120264"`` = 2026 week 4 projection).
 
-    These go in ``filterStatsForTopScoringPeriodIds.additionalValue`` to ask for specific stat lines.
+    These go in ``filterStatsForTopScoringPeriodIds.additionalValue`` to ask for specific stat lines. ESPN serves
+    season lines and ``ffl`` period projections under these ids, but never a period-keyed actual line: those are keyed
+    by pro game id and come with ``filterStatsForTopScoringPeriodIds.value`` (ROADMAP #14, docs/espn-api.md section 1
+    #10), so asking for ``"0120264"`` returns nothing.
     """
     source = STAT_SOURCE_PROJECTED if projected else 0
     split = STAT_SPLIT_SEASON if scoring_period == 0 else STAT_SPLIT_SCORING_PERIOD
@@ -494,9 +498,9 @@ class EspnClient:
     ) -> EspnRead[PlayersView]:
         """``kona_playercard`` for up to :data:`PLAYER_CARD_BATCH` players: ownership, ranks and stat lines.
 
-        Asks for the season actual and projected lines, plus the actual and projected lines of ``scoring_period``
-        when given. ``top_scoring_periods`` (default: ``scoring_period``, else 1) is ESPN's "most recent N periods"
-        knob.
+        Asks for the season actual and projected lines, plus the projected line of ``scoring_period`` when given.
+        Actual single-period lines come from ``top_scoring_periods`` (default: ``scoring_period``, else 1), ESPN's
+        "most recent N periods" knob: ESPN keys them by pro game id, so they cannot be named (:func:`stat_entry_id`).
         """
         ids = _player_ids(player_ids)
         if len(ids) > PLAYER_CARD_BATCH:
@@ -504,7 +508,6 @@ class EspnClient:
         stat_ids = [stat_entry_id(self.season), stat_entry_id(self.season, projected=True)]
         if scoring_period:
             stat_ids.append(stat_entry_id(self.season, scoring_period, projected=True))
-            stat_ids.append(stat_entry_id(self.season, scoring_period))
         top = top_scoring_periods if top_scoring_periods is not None else (scoring_period or 1)
         filter = player_filter(ids=ids, top_scoring_periods=top, stat_ids=stat_ids)
         digest = hashlib.sha256(",".join(str(player_id) for player_id in ids).encode()).hexdigest()[:8]
@@ -522,7 +525,7 @@ class EspnClient:
         for start in range(0, len(ids), PLAYER_CARD_BATCH):
             batch = ids[start : start + PLAYER_CARD_BATCH]
             for entry in self.player_cards(batch, scoring_period=scoring_period).data.players:
-                line = entry.player.projection(self.season, scoring_period)
+                line = entry.player.projection(self.season, scoring_period, game=self.game)
                 if line is not None:
                     projections[entry.id] = line
         return projections
@@ -553,26 +556,31 @@ class EspnClient:
         return EspnRead(typed.data.model_copy(update={"transactions": kept}), typed.as_of, typed.capture)
 
     def pending_transactions(self, scoring_period: int | None = None) -> EspnRead[TransactionsView]:
-        """``mPendingTransactions``: the first candidate view for open offers and claims (unconfirmed, see #14)."""
+        """``mPendingTransactions``: the team's own pending moves (claims), under ``pendingTransactions`` (#14)."""
         read = self.get_view(
             View.PENDING_TRANSACTIONS, scoring_period=scoring_period, key=_period_key(scoring_period) or "current"
         )
         return self._typed(read, TransactionsView)
 
-    def pending_offers(self, scoring_period: int | None = None) -> tuple[Transaction, ...]:
-        """Open trade offers and waiver claims from both candidate views, once each, oldest first.
+    def pending_offers(
+        self, scoring_period: int | None = None, *, now: datetime | None = None
+    ) -> tuple[Transaction, ...]:
+        """Trade offers and waiver claims still open at ``now`` (default: the client's clock), once each, oldest first.
 
-        Reads ``mPendingTransactions`` and ``mTransactions2`` (waivers and trade proposals, ``PENDING`` only) and
-        merges them by transaction id. Both bodies are captured, so the real-league spike can compare them.
+        Reads ``mPendingTransactions`` and ``mTransactions2`` (waivers and trade proposals, every status, so the
+        ``CANCEL`` records that close an offer are seen), merges them by transaction id and keeps the open ones
+        (:func:`fm.espn.models.open_only`): ``PENDING``, not expired, not cancelled. A record the pending view lists
+        without a ``status`` counts as pending.
         """
         merged: dict[str, Transaction] = {}
-        for transaction in self.pending_transactions(scoring_period).data.transactions:
-            if transaction.pending or transaction.status is None:
-                merged.setdefault(transaction.id, transaction)
-        filtered = self.transactions(scoring_period, types=PENDING_OFFER_TYPES, statuses=(TRANSACTION_PENDING,))
-        for transaction in filtered.data.transactions:
+        listed = self.pending_transactions(scoring_period).data.transactions
+        for transaction in listed:
             merged.setdefault(transaction.id, transaction)
-        return tuple(sorted(merged.values(), key=_transaction_order))
+        for transaction in self.transactions(scoring_period, types=PENDING_OFFER_TYPES).data.transactions:
+            merged.setdefault(transaction.id, transaction)
+        at = now if now is not None else self._clock()
+        still_open = open_only(merged.values(), at, listed_pending=(transaction.id for transaction in listed))
+        return tuple(sorted(still_open, key=_transaction_order))
 
     def pro_schedule(self) -> EspnRead[ProSchedule]:
         """``proTeamSchedules_wl``: every pro team's games by scoring period (lock times, byes, first tips)."""
