@@ -26,6 +26,7 @@ from fm.sources.odds import (
     REDACTED,
     EspnScoreboardSource,
     OddsApiSource,
+    RedactApiKeyFilter,
     TeamTotals,
     implied_team_totals,
     parse_odds_events,
@@ -401,17 +402,56 @@ def test_odds_api_team_totals_one_per_book_and_team(odds_api: OddsApiSource, rou
 def test_odds_api_key_never_reaches_cache_metadata_warnings_or_logs(
     odds_api: OddsApiSource, routes: Routes, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    odds_api.events()
+    # Capture at INFO with no logger filter: httpx logs every request URL, query string included, at that level.
+    with caplog.at_level(logging.INFO):
+        odds_api.events()
     meta = (tmp_path / "cache" / "odds_api" / "events" / "nfl.meta.json").read_text(encoding="utf-8")
     assert KEY not in meta and "api.the-odds-api.com/v4/sports/americanfootball_nfl/events" in meta
+    request_lines = [record.getMessage() for record in caplog.records if record.name == "httpx"]
+    assert len(request_lines) == 1 and request_lines[0].startswith("HTTP Request: GET https://api.the-odds-api.com/")
+    assert f"/v4/sports/americanfootball_nfl/events?apiKey={REDACTED} " in request_lines[0]
+    assert KEY not in caplog.text
+    assert f"apiKey={KEY}" in str(routes.events.calls.last.request.url)  # the request itself did carry it
 
+    caplog.clear()
     routes.team_totals.mock(return_value=httpx.Response(401))
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         result = odds_api.team_totals(EVENT)
     assert result.degraded is True and result.data == []
     assert "HTTP 401" in result.warnings[0] and REDACTED in result.warnings[0] and KEY not in result.warnings[0]
     assert KEY not in caplog.text and "unavailable" in caplog.text
-    assert f"apiKey={KEY}" in str(routes.team_totals.calls.last.request.url)  # the request itself did carry it
+    assert f'&apiKey={REDACTED} "HTTP/1.1 401 Unauthorized"' in caplog.text  # logged, but redacted
+    assert f"apiKey={KEY}" in str(routes.team_totals.calls.last.request.url)
+
+
+def test_httpx_request_log_filter_redacts_only_the_api_key() -> None:
+    def record(url: str) -> logging.LogRecord:
+        # The exact shape httpx logs: the URL object is a format argument, not part of the message.
+        args = ("GET", httpx.URL(url), "HTTP/1.1", 200, "OK")
+        return logging.LogRecord("httpx", logging.INFO, "_client.py", 1, 'HTTP Request: %s %s "%s %d %s"', args, None)
+
+    redactor = RedactApiKeyFilter()
+    middle = record(f"https://api.the-odds-api.com/v4/x/odds?regions=us&apiKey={KEY}&markets=team_totals%2Ctotals")
+    assert redactor.filter(middle) is True
+    assert middle.getMessage() == (  # the %2C survives: the rewritten record is not formatted a second time
+        f"HTTP Request: GET https://api.the-odds-api.com/v4/x/odds?regions=us&apiKey={REDACTED}&markets=team_totals%2C"
+        'totals "HTTP/1.1 200 OK"'
+    )
+    last = record(f"https://api.the-odds-api.com/v4/x/events?apikey={KEY}")
+    redactor.filter(last)
+    assert (
+        last.getMessage()
+        == f'HTTP Request: GET https://api.the-odds-api.com/v4/x/events?apikey={REDACTED} "HTTP/1.1 200 OK"'
+    )
+
+    untouched = record("https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?week=4&dates=100%25")
+    assert redactor.filter(untouched) is True
+    assert untouched.args is not None and len(untouched.args) == 5  # left for the handler to format as usual
+    assert untouched.getMessage().endswith('scoreboard?week=4&dates=100%25 "HTTP/1.1 200 OK"')
+
+    for _ in range(3):  # idempotent: one filter per logger however many sources are built
+        OddsApiSource(KEY)
+    assert sum(isinstance(f, RedactApiKeyFilter) for f in logging.getLogger("httpx").filters) == 1
 
 
 def test_odds_api_rejects_the_wrong_shapes() -> None:

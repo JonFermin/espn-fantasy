@@ -11,7 +11,8 @@ turns (spread, over/under) into a projected score per side::
 The Odds API (``the-odds-api.com``; optional, needs ``ODDS_API_KEY``) adds the sportsbooks' *posted* team totals, one
 event per call. The free tier is 500 credits a month: the ``events`` list is free and a ``team_totals`` call costs one
 credit per region, hence the long TTLs. The key travels as a query parameter, so this adapter strips it from error
-messages and never records it in cache metadata (httpx still logs request URLs at INFO; keep that logger quieter).
+messages, never records it in cache metadata, and installs :class:`RedactApiKeyFilter` on the ``httpx`` logger, which
+otherwise prints every request URL, key included, at INFO.
 
 Both adapters degrade instead of raising: an upstream failure yields the last good copy as ``stale`` or an empty
 ``degraded`` result with the reason in ``warnings``. Team environment is an enrichment and must never block a decision.
@@ -20,6 +21,7 @@ Both adapters degrade instead of raising: an upstream failure yields the last go
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -517,8 +519,35 @@ def parse_team_totals(payload: bytes) -> list[PostedTeamTotal]:
         raise SourceSchemaError(f"odds api event: {exc}") from exc
 
 
+_API_KEY_PARAM = re.compile(r"(apiKey=)[^&\s]*", re.IGNORECASE)
+
+
+class RedactApiKeyFilter(logging.Filter):
+    """Rewrites ``apiKey=<value>`` to ``apiKey=***`` in httpx's ``HTTP Request:`` lines, which carry the full URL.
+
+    httpx logs every request URL at INFO through ``logging.getLogger("httpx")``, and The Odds API accepts the key only
+    as a query parameter, so that line would otherwise hold the secret. The record is rewritten in place before any
+    handler sees it; records without the parameter pass through untouched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = _API_KEY_PARAM.sub(rf"\g<1>{REDACTED}", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()  # already formatted; a ``%`` left in the URL must not be interpolated again
+        return True
+
+
+_REDACT_API_KEY = RedactApiKeyFilter()
+"""One shared instance, so ``addFilter`` (which skips a filter already present) installs it once per process."""
+
+
 class OddsApiSource(HttpSource):
-    """The Odds API v4, optional. Without a key every method returns an empty ``degraded`` result and sends nothing."""
+    """The Odds API v4, optional. Without a key every method returns an empty ``degraded`` result and sends nothing.
+
+    Building one installs :class:`RedactApiKeyFilter` on the ``httpx`` logger, before any request can be logged.
+    """
 
     name: ClassVar[str] = "odds_api"
     BASE_URL: ClassVar[str] = "https://api.the-odds-api.com/v4"
@@ -540,6 +569,7 @@ class OddsApiSource(HttpSource):
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
         super().__init__(client=client, sleep=sleep, cache_root=cache_root, limiter=limiter, clock=clock)
+        logging.getLogger("httpx").addFilter(_REDACT_API_KEY)
         secret = api_key if isinstance(api_key, SecretStr) or api_key is None else SecretStr(api_key)
         self._api_key = secret if secret is not None and secret.get_secret_value().strip() else None
         self.regions = regions
