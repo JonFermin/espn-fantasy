@@ -51,6 +51,7 @@ NO_ESPN_ID_WARNING = "ff_playerids: 1 of 15 rows have no ESPN id (Trinidad Chamb
 ALLEN, MAHOMES, GIBBS = 3918298, 3139477, 4429795
 NOBODY = 999999  # an ESPN id no ID map knows
 EAGLES_DST = -16021  # ESPN pro team 21
+JOKIC = 3112335  # an NBA player's ESPN id
 
 
 def ff_playerids() -> pl.DataFrame:
@@ -425,6 +426,30 @@ def test_gate_is_a_no_op_before_the_first_roster_snapshot(store: Store) -> None:
         LeagueRow(key="nfl", sport="nfl", espn_league_id=1, season=2026, team_id=1, as_of=AS_OF)
     )
     assert check_rostered(store, league.row_id) == set()
+
+
+def test_gate_refuses_a_league_of_another_sport_or_one_it_does_not_know(store: Store, walk: Crosswalk) -> None:
+    # The NFL crosswalk knows nothing of NBA players: an NBA league belongs to its own gate (the sync job dispatches on
+    # the sport), so here it is refused outright rather than reported as unmapped or passed with no roster yet.
+    nba = store.leagues.upsert(
+        LeagueRow(key="nba", sport="nba", espn_league_id=654321, season=2027, team_id=2, as_of=AS_OF)
+    )
+    refusal = rf"^league {nba.row_id} \(nba 2027\) is an nba league; the nfl crosswalk gates nfl leagues only"
+    with pytest.raises(CrosswalkError, match=refusal):
+        check_rostered(store, nba.row_id)  # no roster snapshot yet: refused, not a vacuous pass
+    store.teams.upsert(TeamRow(league_id=nba.row_id, team_id=2, name="Team 2", as_of=AS_OF))
+    entry = RosterEntryRow(
+        league_id=nba.row_id, scoring_period_id=1, team_id=2, espn_id=JOKIC, lineup_slot_id=0, as_of=AS_OF
+    )
+    store.rosters.replace(nba.row_id, 1, 2, [entry])
+    with pytest.raises(CrosswalkError, match=refusal) as info:
+        check_rostered(store, nba.row_id, crosswalk=walk)
+    assert not isinstance(info.value, UnmappedPlayersError)  # a wrong dispatch, not an unmapped player
+
+    with pytest.raises(LookupError, match="no league with id 999 in the store"):
+        check_rostered(store, 999, crosswalk=walk)
+    nfl = seed_roster(store, ALLEN)  # an NFL league beside it is still gated as before
+    assert check_rostered(store, nfl.row_id, crosswalk=walk) == {ALLEN}
 
 
 def test_unmapped_report_is_sorted_by_name_with_ids_as_fallback(walk: Crosswalk) -> None:

@@ -3,9 +3,10 @@
 Two public, no-auth APIs feed :meth:`MarketSource.market_values`:
 
 - FantasyCalc (``https://api.fantasycalc.com/values/current``): redraft trade values computed from real trades, keyed
-  by ``espnId`` (NFL only; about 10,000 for the top player, single digits at the tail). The query is the league shape,
-  and FantasyCalc only publishes 8/10/12/14 teams, 0/0.5/1 PPR and 1/2 QBs, so :func:`nearest_shape` snaps a league
-  onto that grid.
+  by ``espnId`` (NFL only; about 10,000 for the top player, single digits at the tail). The query is the league's
+  shape, read from its parsed settings by :meth:`LeagueShape.from_settings` (team count, points per reception,
+  starting slots a QB can fill) with no default shape to fall back on, since league settings are data. FantasyCalc
+  only publishes 8/10/12/14 teams, 0/0.5/1 PPR and 1/2 QBs, so :func:`nearest_shape` snaps the league onto that grid.
 - ESPN's public player pool: ``lm-api-reads.fantasy.espn.com/apis/v3/games/{game}/seasons/{season}/segments/0/
   leaguedefaults/{id}?view=kona_player_info`` with an ``X-Fantasy-Filter`` header, no cookies, both games. Each player
   carries ``ownership`` (percent owned and started, ESPN's reported change, ADP, auction value),
@@ -34,7 +35,9 @@ from typing import Any, ClassVar, Final, Unpack
 from pydantic import AliasPath, BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from fm.espn.ids import Game, IdMaps, InjuryStatus, ids_for
+from fm.espn.settings import LeagueSettings
 from fm.sources.base import Fetched, FetchOptions, HttpSource, SourceError, SourceSchemaError, parse_json
+from fm.sports.nfl import NFL
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +62,25 @@ def _snap(value: float, grid: Sequence[float]) -> float:
 
 @dataclass(frozen=True, slots=True)
 class LeagueShape:
-    """A point on FantasyCalc's grid of published redraft valuations."""
+    """A point on FantasyCalc's grid of published redraft valuations. There is no default shape: a league's comes from
+    its parsed settings (:meth:`from_settings`)."""
 
-    num_teams: int = 12
-    ppr: float = 1.0
-    num_qbs: int = 1
+    num_teams: int
+    ppr: float
+    num_qbs: int
+
+    @classmethod
+    def from_settings(cls, settings: LeagueSettings) -> LeagueShape:
+        """An NFL league's shape on the grid: its team count, its points per reception (the ``REC`` scoring item; 0 when
+        receptions do not score) and the starting slots a QB can fill (``QB`` plus the superflex ``OP``, by the NFL
+        plugin's eligibility), so a 1-QB league asks for 1 QB and a superflex or 2-QB league for 2. FantasyCalc values
+        NFL players only, so another sport's league raises ``ValueError``."""
+        if settings.game is not Game.FFL:
+            raise ValueError(
+                f"FantasyCalc values NFL leagues only; league {settings.league_id} is {settings.game.value}"
+            )
+        qb_slots = sum(settings.slot_count(slot_id) for slot_id in NFL.eligible_slots("QB", include_reserve=False))
+        return nearest_shape(settings.team_count, settings.points_for("REC"), qb_slots)
 
     @property
     def key(self) -> str:
@@ -80,7 +97,7 @@ class LeagueShape:
         }
 
 
-def nearest_shape(num_teams: int, ppr: float, num_qbs: int = 1) -> LeagueShape:
+def nearest_shape(num_teams: int, ppr: float, num_qbs: int) -> LeagueShape:
     """Snap a league onto FantasyCalc's grid; a tie goes to the larger value (9 teams -> 10, 0.25 PPR -> 0.5)."""
     return LeagueShape(
         num_teams=int(_snap(num_teams, FANTASYCALC_TEAMS)),
@@ -381,14 +398,12 @@ class MarketSource(HttpSource):
 
     def fantasycalc(
         self,
-        *,
-        num_teams: int = 12,
-        ppr: float = 1.0,
-        num_qbs: int = 1,
+        settings: LeagueSettings,
         **options: Unpack[FetchOptions],
     ) -> Fetched[list[FantasyCalcValue]]:
-        """Redraft trade values for the nearest published league shape, best first. NFL only. Degrades."""
-        shape = nearest_shape(num_teams, ppr, num_qbs)
+        """Redraft trade values for an NFL league, best first, at the league's shape on FantasyCalc's grid
+        (:meth:`LeagueShape.from_settings`). Degrades; another sport's league raises ``ValueError``."""
+        shape = LeagueShape.from_settings(settings)
         params = shape.params()
         return self._fetch_or_degrade(
             "fantasycalc",
@@ -431,30 +446,27 @@ class MarketSource(HttpSource):
 
     def market_values(
         self,
-        game: Game | str,
-        season: int,
+        settings: LeagueSettings,
         *,
-        num_teams: int = 12,
-        ppr: float = 1.0,
-        num_qbs: int = 1,
         rank_type: str = "STANDARD",
         limit: int = 300,
         **options: Unpack[FetchOptions],
     ) -> Fetched[dict[int, MarketValue]]:
         """ESPN rank and ownership for every pooled player, joined with FantasyCalc values for ffl, keyed by ESPN id.
 
-        Pass the league's ESPN rank type (ffl: ``PPR``/``STANDARD``/``SUPERFLEX``/``ELIMINATION``; fba:
-        ``STANDARD``/``ROTO``) for ``espn_rank``; every type stays available in ``espn_ranks``. The result's ``as_of``
-        is the older of the two inputs, ``cached`` only when both came from cache, and ``stale``, ``degraded`` and
-        ``warnings`` combine both. FantasyCalc is not consulted for fba, so NBA values carry no ``trade_value``.
+        The game, the season and FantasyCalc's league shape all come from the league's parsed ``settings``. Pass the
+        league's ESPN rank type (ffl: ``PPR``/``STANDARD``/``SUPERFLEX``/``ELIMINATION``; fba: ``STANDARD``/``ROTO``)
+        for ``espn_rank``; every type stays available in ``espn_ranks``. The result's ``as_of`` is the older of the two
+        inputs, ``cached`` only when both came from cache, and ``stale``, ``degraded`` and ``warnings`` combine both.
+        FantasyCalc is not consulted for fba, so NBA values carry no ``trade_value``.
         """
-        game = Game.coerce(game)
-        espn = self.espn_players(game, season, limit=limit, **options)
+        game = settings.game
+        espn = self.espn_players(game, settings.season, limit=limit, **options)
         parts: list[Fetched[Any]] = [espn]
         key = espn.key
         by_id: dict[int, FantasyCalcValue] = {}
         if game is Game.FFL:
-            calc = self.fantasycalc(num_teams=num_teams, ppr=ppr, num_qbs=num_qbs, **options)
+            calc = self.fantasycalc(settings, **options)
             parts.append(calc)
             by_id = index_by_espn_id(calc.data)
             key = f"{key}_{calc.key}"

@@ -4,13 +4,18 @@ Fixtures under tests/fixtures/sources/market were recorded on 2026-10-04 and tri
 values (12 teams, 1 QB, full PPR) and 10 NFL / 7 NBA players from ESPN's public ``kona_player_info`` pool with the stat
 arrays and outlook text removed. No cookies were sent or saved; the pool is ESPN's league-less default, so every entry
 reads ``onTeamId: 0`` and no manager appears.
+
+League shapes come from the parsed ``mSettings`` fixtures under tests/fixtures/espn: the 10-team, full-PPR, 1-QB NFL
+league (the real league's shape), with its size, reception points or slot counts edited where a test needs another.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,7 +23,8 @@ import httpx
 import pytest
 import respx
 
-from fm.espn.ids import Game, InjuryStatus
+from fm.espn.ids import FFL, Game, InjuryStatus
+from fm.espn.settings import LeagueSettings, parse_league_settings
 from fm.sources.base import RateLimiter, SourceSchemaError
 from fm.sources.market import (
     ESPN_FILTER_HEADER,
@@ -39,6 +45,7 @@ from fm.sources.market import (
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "sources" / "market"
+ESPN_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "espn"
 FC_FIXTURE = "fantasycalc_redraft_12t_1qb_ppr1.json"
 FFL_FIXTURE = "espn_ffl_kona_player_info.json"
 FBA_FIXTURE = "espn_fba_kona_player_info.json"
@@ -58,6 +65,33 @@ JOKIC = 3112335
 
 def fixture(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
+
+
+def league_settings(
+    name: str = "ffl_settings_ppr.json",
+    *,
+    teams: int | None = None,
+    rec: float | None = None,
+    slots: Mapping[str, int] | None = None,
+) -> LeagueSettings:
+    """A league's parsed ``mSettings`` fixture, optionally with its size (``settings.size``), its points per reception
+    (the ``REC`` scoring item) or lineup slot counts (by ffl slot label) edited in the raw view first."""
+    view = json.loads((ESPN_FIXTURES / name).read_text(encoding="utf-8"))
+    settings = view["settings"]
+    if teams is not None:
+        settings["size"] = teams
+    if rec is not None:
+        for item in settings["scoringSettings"]["scoringItems"]:
+            if item["statId"] == FFL.stat_id("REC"):
+                item["points"] = rec
+    for label, count in (slots or {}).items():
+        settings["rosterSettings"]["lineupSlotCounts"][str(FFL.slot_id(label))] = count
+    return parse_league_settings(view)
+
+
+NFL_LEAGUE = league_settings()  # 10 teams, full PPR, 1 QB: the shape of the real NFL league
+TWELVE_TEAMS = league_settings(teams=12)  # the shape the FantasyCalc fixture was recorded at
+NBA_LEAGUE = league_settings("fba_settings_9cat.json")  # ESPN season 2027
 
 
 def ok(name: str) -> httpx.Response:
@@ -117,7 +151,7 @@ def source(routes: Routes, clock: FakeClock, tmp_path: Path, sleeps: list[float]
 
 
 def test_fantasycalc_values_are_typed_and_keyed_by_espn_id(source: MarketSource, routes: Routes) -> None:
-    result = source.fantasycalc()
+    result = source.fantasycalc(TWELVE_TEAMS)
     values = result.data
     assert len(values) == 12 and result.degraded is False and result.key == "redraft_12t_1qb_ppr1"
     assert [value.overall_rank for value in values] == sorted(value.overall_rank for value in values)
@@ -138,24 +172,59 @@ def test_fantasycalc_values_are_typed_and_keyed_by_espn_id(source: MarketSource,
 
 def test_fantasycalc_snaps_the_league_shape_onto_its_grid(source: MarketSource, routes: Routes) -> None:
     assert (FANTASYCALC_TEAMS, FANTASYCALC_PPR, FANTASYCALC_QBS) == ((8, 10, 12, 14), (0.0, 0.5, 1.0), (1, 2))
-    assert nearest_shape(12, 1.0) == LeagueShape(12, 1.0, 1)
-    assert nearest_shape(9, 0.5) == LeagueShape(10, 0.5, 1)  # ties go up
+    assert nearest_shape(12, 1.0, 1) == LeagueShape(12, 1.0, 1)
+    assert nearest_shape(9, 0.5, 1) == LeagueShape(10, 0.5, 1)  # ties go up
     assert nearest_shape(16, 1.0, 3) == LeagueShape(14, 1.0, 2)
     assert nearest_shape(8, 0.25, 0) == LeagueShape(8, 0.5, 1)
-    assert LeagueShape(10, 0.5, 2).key == "redraft_10t_2qb_ppr0.5" and LeagueShape(8, 0.0).params()["ppr"] == "0"
+    assert LeagueShape(10, 0.5, 2).key == "redraft_10t_2qb_ppr0.5" and LeagueShape(8, 0.0, 1).params()["ppr"] == "0"
 
-    result = source.fantasycalc(num_teams=9, ppr=0.5, num_qbs=2)
+    result = source.fantasycalc(league_settings(teams=9, rec=0.5, slots={"OP": 1}))  # 9 teams, half PPR, superflex
     assert result.key == "redraft_10t_2qb_ppr0.5"
     params = dict(routes.fantasycalc.calls.last.request.url.params)
     assert params == {"isDynasty": "false", "numQbs": "2", "numTeams": "10", "ppr": "0.5"}
 
 
+def test_the_league_shape_is_read_from_the_league_settings(source: MarketSource, routes: Routes) -> None:
+    # League settings are data: the real league is 10 teams, full PPR, 1 QB, and FantasyCalc is asked for exactly that
+    # (the old 12-team default valued it as a 12-team league for any caller that left the shape out).
+    assert (NFL_LEAGUE.team_count, NFL_LEAGUE.points_for("REC"), NFL_LEAGUE.slot_count("QB")) == (10, 1.0, 1)
+    assert LeagueShape.from_settings(NFL_LEAGUE) == LeagueShape(10, 1.0, 1)
+    assert source.fantasycalc(NFL_LEAGUE).key == "redraft_10t_1qb_ppr1"
+    params = dict(routes.fantasycalc.calls.last.request.url.params)
+    assert params == {"isDynasty": "false", "numQbs": "1", "numTeams": "10", "ppr": "1"}
+    merged = source.market_values(NFL_LEAGUE, rank_type="PPR")  # game, season and shape all from the settings
+    assert merged.key == "ffl_2026_top300_redraft_10t_1qb_ppr1" and merged.data[GIBBS].trade_value == 10697
+    assert routes.espn_ffl.call_count == 1 and routes.espn_fba.call_count == 0
+
+    assert LeagueShape.from_settings(league_settings(teams=14, rec=0.0)) == LeagueShape(14, 0.0, 1)  # standard
+    assert LeagueShape.from_settings(league_settings(rec=0.5, slots={"OP": 1})) == LeagueShape(10, 0.5, 2)  # superflex
+    assert LeagueShape.from_settings(league_settings(slots={"QB": 2})) == LeagueShape(10, 1.0, 2)  # two QB slots
+    assert LeagueShape.from_settings(league_settings(slots={"FLEX": 2, "RB/WR": 1})).num_qbs == 1  # no QB starts there
+
+    with pytest.raises(ValueError, match="FantasyCalc values NFL leagues only; league 3456789 is fba"):
+        LeagueShape.from_settings(NBA_LEAGUE)
+    with pytest.raises(ValueError, match="NFL leagues only"):
+        source.fantasycalc(NBA_LEAGUE)
+    assert routes.fantasycalc.call_count == 1  # the NFL request above (market_values reused its cache), none for NBA
+
+
+def test_no_default_league_shape_to_fall_into() -> None:
+    # Every way to a FantasyCalc query needs the league: no shape field, argument or parameter has a default.
+    assert all(field.default is dataclasses.MISSING for field in dataclasses.fields(LeagueShape))
+    shape_args = inspect.signature(nearest_shape).parameters.values()
+    assert all(param.default is inspect.Parameter.empty for param in shape_args)
+    for method in (MarketSource.fantasycalc, MarketSource.market_values):
+        parameters = inspect.signature(method).parameters
+        assert parameters["settings"].default is inspect.Parameter.empty
+        assert not {"game", "season", "num_teams", "ppr", "num_qbs"} & parameters.keys()
+
+
 def test_fantasycalc_is_cached_and_captured(
     source: MarketSource, routes: Routes, clock: FakeClock, tmp_path: Path
 ) -> None:
-    first = source.fantasycalc()
+    first = source.fantasycalc(TWELVE_TEAMS)
     clock.advance(hours=11)
-    again = source.fantasycalc()
+    again = source.fantasycalc(TWELVE_TEAMS)
     assert routes.fantasycalc.call_count == 1
     assert again.cached is True and again.as_of == first.as_of == T0
     raw = tmp_path / "cache" / "market" / "fantasycalc" / "redraft_12t_1qb_ppr1.json"
@@ -163,7 +232,7 @@ def test_fantasycalc_is_cached_and_captured(
     meta = json.loads((raw.parent / "redraft_12t_1qb_ppr1.meta.json").read_text(encoding="utf-8"))
     assert meta["url"] == "https://api.fantasycalc.com/values/current" and meta["numTeams"] == "12"
     clock.advance(hours=2)
-    assert source.fantasycalc().cached is False and routes.fantasycalc.call_count == 2
+    assert source.fantasycalc(TWELVE_TEAMS).cached is False and routes.fantasycalc.call_count == 2
 
 
 def test_fantasycalc_skips_bad_entries_but_rejects_junk(caplog: pytest.LogCaptureFixture) -> None:
@@ -205,7 +274,7 @@ def test_fantasycalc_degrades_on_server_errors(
 ) -> None:
     routes.fantasycalc.mock(return_value=httpx.Response(500))
     with caplog.at_level(logging.WARNING, logger="fm.sources.market"):
-        result = source.fantasycalc()
+        result = source.fantasycalc(TWELVE_TEAMS)
     assert (result.degraded, result.stale, result.data, result.as_of) == (True, False, [], T0)
     assert "HTTP 500" in result.warnings[0] and "continuing without it" in caplog.text
     assert routes.fantasycalc.call_count == 3 and sleeps == [1.0, 2.0]  # retried, then gave up
@@ -214,10 +283,10 @@ def test_fantasycalc_degrades_on_server_errors(
 def test_fantasycalc_serves_the_last_good_copy_when_the_api_breaks(
     source: MarketSource, routes: Routes, clock: FakeClock, tmp_path: Path
 ) -> None:
-    good = source.fantasycalc()
+    good = source.fantasycalc(TWELVE_TEAMS)
     clock.advance(hours=13)
     routes.fantasycalc.mock(return_value=httpx.Response(200, content=b'{"error": "maintenance"}'))
-    stale = source.fantasycalc()
+    stale = source.fantasycalc(TWELVE_TEAMS)
     assert (stale.stale, stale.degraded, stale.cached, stale.as_of) == (True, False, True, T0)
     assert [value.espn_id for value in stale.data] == [value.espn_id for value in good.data]
     assert "did not parse" in stale.warnings[0]
@@ -349,7 +418,7 @@ def test_espn_pool_degrades_then_keeps_the_last_good_copy(
 
 
 def test_market_values_merge_fantasycalc_with_espn_for_nfl(source: MarketSource, routes: Routes) -> None:
-    result = source.market_values("ffl", 2026, rank_type="PPR")
+    result = source.market_values(TWELVE_TEAMS, rank_type="PPR")
     values = result.data
     assert (result.source, result.dataset, result.key) == ("market", "values", "ffl_2026_top300_redraft_12t_1qb_ppr1")
     assert (result.cached, result.stale, result.degraded) == (False, False, False)
@@ -379,15 +448,15 @@ def test_market_values_merge_fantasycalc_with_espn_for_nfl(source: MarketSource,
 
 
 def test_market_values_select_the_rank_type(source: MarketSource) -> None:
-    standard = source.market_values("ffl", 2026).data
+    standard = source.market_values(TWELVE_TEAMS).data
     assert (standard[ALLEN].espn_rank, standard[GIBBS].espn_rank) == (36, 1)
-    assert source.market_values("ffl", 2026, rank_type="SUPERFLEX").data[ALLEN].espn_rank == 1
-    unknown = source.market_values("ffl", 2026, rank_type="NOPE").data[ALLEN]
+    assert source.market_values(TWELVE_TEAMS, rank_type="SUPERFLEX").data[ALLEN].espn_rank == 1
+    unknown = source.market_values(TWELVE_TEAMS, rank_type="NOPE").data[ALLEN]
     assert unknown.espn_rank is None and unknown.espn_ranks["PPR"] == 26
 
 
 def test_market_values_for_nba_skip_fantasycalc(source: MarketSource, routes: Routes) -> None:
-    result = source.market_values("nba", 2027, rank_type="ROTO")
+    result = source.market_values(NBA_LEAGUE, rank_type="ROTO")
     assert routes.fantasycalc.call_count == 0 and routes.espn_fba.call_count == 1
     assert result.key == "fba_2027_top300" and len(result.data) == 7 and result.degraded is False
     jokic = result.data[JOKIC]
@@ -403,20 +472,20 @@ def test_market_values_carry_degradation_and_the_oldest_as_of(
     source.espn_players("ffl", 2026)  # ESPN cached at T0
     clock.advance(hours=2)
     routes.fantasycalc.mock(return_value=httpx.Response(500))
-    degraded = source.market_values("ffl", 2026)
+    degraded = source.market_values(TWELVE_TEAMS)
     assert (degraded.degraded, degraded.stale, degraded.cached, degraded.as_of) == (True, False, False, T0)
     assert len(degraded.data) == 10 and all(value.trade_value is None for value in degraded.data.values())
     assert degraded.data[GIBBS].percent_owned == 99.95 and "HTTP 500" in degraded.warnings[0]
 
     routes.fantasycalc.mock(return_value=ok(FC_FIXTURE))
-    fresh = source.market_values("ffl", 2026)
+    fresh = source.market_values(TWELVE_TEAMS)
     assert (fresh.degraded, fresh.cached, fresh.as_of) == (False, False, T0)  # ESPN from cache, FantasyCalc downloaded
     assert fresh.data[GIBBS].trade_value == 10697
-    assert source.market_values("ffl", 2026).cached is True
+    assert source.market_values(TWELVE_TEAMS).cached is True
 
     clock.advance(hours=13)  # both TTLs have passed; ESPN refreshes, FantasyCalc fails and serves its T0+2h copy
     routes.fantasycalc.mock(return_value=httpx.Response(500))
-    stale = source.market_values("ffl", 2026)
+    stale = source.market_values(TWELVE_TEAMS)
     assert (stale.stale, stale.degraded, stale.cached) == (True, False, False)
     assert stale.as_of == T0 + timedelta(hours=2) and stale.data[GIBBS].trade_value == 10697
     assert any("HTTP 500" in warning for warning in stale.warnings)
@@ -426,8 +495,8 @@ def test_market_values_carry_degradation_and_the_oldest_as_of(
 
 
 def test_only_public_read_hosts_are_contacted_without_cookies(source: MarketSource, routes: Routes) -> None:
-    source.market_values("ffl", 2026)
-    source.market_values("fba", 2027)
+    source.market_values(TWELVE_TEAMS)
+    source.market_values(NBA_LEAGUE)
     calls = [call for route in routes.all for call in route.calls]
     assert {call.request.url.host for call in calls} == {FANTASYCALC, ESPN_READS}
     assert all(call.request.method == "GET" for call in calls)
@@ -438,10 +507,10 @@ def test_accidental_live_calls_are_not_swallowed(source: MarketSource, routes: R
     # The harness blocks the network with a bare RuntimeError; graceful degradation must never hide one.
     routes.fantasycalc.mock(side_effect=RuntimeError("outbound network is disabled in unit tests"))
     with pytest.raises(RuntimeError, match="outbound network"):
-        source.fantasycalc()
+        source.fantasycalc(TWELVE_TEAMS)
     routes.espn_ffl.mock(side_effect=RuntimeError("outbound network is disabled in unit tests"))
     with pytest.raises(RuntimeError, match="outbound network"):
-        source.market_values("ffl", 2026)
+        source.market_values(TWELVE_TEAMS)
 
 
 def test_ttls_match_source_cadence() -> None:

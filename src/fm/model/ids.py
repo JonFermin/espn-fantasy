@@ -16,7 +16,9 @@ injuries by GSIS id, Sleeper projections and trending by Sleeper id). The crossw
 Invariants: a source id maps to one ESPN player, and a player has at most one id per source (the ``player_ids`` table
 enforces the same). :meth:`Crosswalk.unmapped` reports ESPN players with no id for a source; :func:`check_rostered`
 is the gate DESIGN asks for: sync fails loudly when any player on any roster in a managed league is unmapped, because
-a silent id mismatch is the likeliest way to make a wrong decision. The fix is one line in the overrides file.
+a silent id mismatch is the likeliest way to make a wrong decision. The fix is one line in the overrides file. The
+gate covers NFL leagues and refuses any other: the sync job dispatches on the league's sport, and an NBA league is
+checked by the NBA crosswalk's own gate (ROADMAP #17).
 
 :meth:`Crosswalk.save` replaces the sport's ``player_ids`` rows atomically and :meth:`Crosswalk.from_store` reads them
 back, so jobs that only translate ids (projection blend, availability) never touch nflverse.
@@ -504,12 +506,25 @@ def check_rostered(
     scoring_period_id: int | None = None,
     sources: Sequence[str] = SOURCES,
 ) -> set[int]:
-    """The unmapped-rostered-player gate: every player on any roster in the league must have an id in each of
-    ``sources`` it is expected in, or :class:`UnmappedPlayersError` names the offenders (with names from ``players``).
+    """The unmapped-rostered-player gate for an NFL league: every player on any roster in the league must have an id in
+    each of ``sources`` it is expected in, or :class:`UnmappedPlayersError` names the offenders (with names from
+    ``players``).
 
     Checks the latest roster snapshot unless ``scoring_period_id`` is given, against ``crosswalk`` or the one saved in
     the store. Returns the ESPN ids checked; empty before the first roster snapshot.
+
+    This is the NFL crosswalk's gate only, so callers dispatch on the league's sport: a league of another sport raises
+    :class:`CrosswalkError` (its own crosswalk checks it) and a league id the store does not know raises
+    ``LookupError``, both before any roster is read, so neither can pass vacuously.
     """
+    league = store.leagues.get(league_id)
+    if league is None:
+        raise LookupError(f"no league with id {league_id} in the store")
+    if league.sport != SPORT:
+        raise CrosswalkError(
+            f"league {league_id} ({league.key} {league.season}) is an {league.sport} league; the {SPORT} crosswalk "
+            f"gates {SPORT} leagues only, so check it with the {league.sport} crosswalk"
+        )
     period = scoring_period_id if scoring_period_id is not None else store.rosters.latest_period(league_id)
     if period is None:
         return set()
