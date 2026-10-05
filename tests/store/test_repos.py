@@ -12,24 +12,24 @@ from pydantic import ValidationError
 
 from fm.store import (
     REPOSITORIES,
-    Availability,
-    DecisionEval,
-    Execution,
-    League,
-    LeagueSettingsRecord,
-    LlmUsage,
-    MarketValue,
-    NewsItem,
-    NewsSignal,
-    Player,
-    PlayerId,
-    Projection,
-    Proposal,
-    RawSnapshot,
-    RosterEntry,
+    AvailabilityRow,
+    DecisionEvalRow,
+    ExecutionRow,
+    LeagueRow,
+    LeagueSettingsRow,
+    LlmUsageRow,
+    MarketValueRow,
+    NewsItemRow,
+    NewsSignalRow,
+    PlayerIdRow,
+    PlayerRow,
+    ProjectionRow,
+    ProposalRow,
+    RawSnapshotRow,
+    RosterEntryRow,
     Sport,
     Store,
-    Team,
+    TeamRow,
     format_timestamp,
 )
 
@@ -72,9 +72,9 @@ def count(store: Store, table: str) -> int:
 
 def seed_league(
     store: Store, *, key: str = "nfl", sport: Sport = "nfl", espn_league_id: int = 123456, season: int = 2026
-) -> League:
+) -> LeagueRow:
     return store.leagues.upsert(
-        League(
+        LeagueRow(
             key=key,
             sport=sport,
             espn_league_id=espn_league_id,
@@ -86,13 +86,13 @@ def seed_league(
     )
 
 
-def seed_team(store: Store, league: League, team_id: int = 4) -> Team:
-    return store.teams.upsert(Team(league_id=league.row_id, team_id=team_id, name=f"Team {team_id}", as_of=AS_OF))
+def seed_team(store: Store, league: LeagueRow, team_id: int = 4) -> TeamRow:
+    return store.teams.upsert(TeamRow(league_id=league.row_id, team_id=team_id, name=f"Team {team_id}", as_of=AS_OF))
 
 
-def seed_proposal(store: Store, league: League) -> Proposal:
+def seed_proposal(store: Store, league: LeagueRow) -> ProposalRow:
     return store.proposals.insert(
-        Proposal(
+        ProposalRow(
             league_id=league.row_id,
             kind="lineup",
             policy="approve",
@@ -103,9 +103,9 @@ def seed_proposal(store: Store, league: League) -> Proposal:
     )
 
 
-def seed_news(store: Store, external_id: str = "rw-1001") -> NewsItem:
+def seed_news(store: Store, external_id: str = "rw-1001") -> NewsItemRow:
     item = store.news.ingest(
-        NewsItem(
+        NewsItemRow(
             source="rotowire",
             external_id=external_id,
             sport="nfl",
@@ -151,14 +151,56 @@ def test_league_round_trip_upsert_and_lookup(store: Store) -> None:
     assert count(store, "leagues") == 3
 
 
+def test_league_upsert_treats_the_config_key_as_the_identity(store: Store) -> None:
+    """Correcting espn_league_id in config.toml updates the row in place and forgets the old league's ESPN state."""
+    league = seed_league(store)
+    record = store.settings.upsert(
+        LeagueSettingsRow(league_id=league.row_id, settings={"slots": {"0": 1}}, as_of=AS_OF)
+    )
+    team = seed_team(store, league)
+    on_roster = RosterEntryRow(
+        league_id=league.row_id, scoring_period_id=4, team_id=team.team_id, espn_id=10, lineup_slot_id=0, as_of=AS_OF
+    )
+    store.rosters.replace(league.row_id, 4, team.team_id, [on_roster])
+    raw = store.raw_snapshots.insert(
+        RawSnapshotRow(source="espn", kind="mSettings", league_id=league.row_id, path="espn/old.json", fetched_at=AS_OF)
+    )
+    proposal = seed_proposal(store, league)
+
+    corrected = store.leagues.upsert(league.model_copy(update={"id": None, "espn_league_id": 654321, "as_of": LATER}))
+    assert (corrected.id, corrected.key, corrected.espn_league_id, corrected.as_of) == (league.id, "nfl", 654321, LATER)
+    assert store.leagues.by_key("nfl") == corrected and store.leagues.all() == [corrected]
+
+    assert store.settings.get(league.row_id) is None
+    assert store.teams.for_league(league.row_id) == [] and count(store, "roster_snapshots") == 0
+    detached = store.raw_snapshots.get(raw.row_id)
+    assert detached is not None and detached.league_id is None
+    assert store.proposals.get(proposal.row_id) == proposal  # history stays with the key
+
+    # The same ESPN league again (a new name or as_of): nothing is forgotten.
+    store.settings.upsert(record.model_copy(update={"as_of": LATER}))
+    assert store.leagues.upsert(corrected.model_copy(update={"name": "Renamed"})).id == league.id
+    assert store.settings.get(league.row_id) is not None
+
+
+def test_league_upsert_takes_over_the_row_of_a_renamed_key(store: Store) -> None:
+    league = seed_league(store)
+    record = store.settings.upsert(LeagueSettingsRow(league_id=league.row_id, settings={}, as_of=AS_OF))
+    renamed = store.leagues.upsert(league.model_copy(update={"id": None, "key": "football"}))
+    assert (renamed.id, renamed.key, renamed.espn_league_id) == (league.id, "football", league.espn_league_id)
+    assert store.leagues.by_key("nfl") is None and store.leagues.by_key("football") == renamed
+    assert store.settings.get(league.row_id) == record  # the same ESPN league: nothing is forgotten
+    assert count(store, "leagues") == 1
+
+
 def test_league_settings_round_trip(store: Store) -> None:
     league = seed_league(store)
     raw = store.raw_snapshots.insert(
-        RawSnapshot(
+        RawSnapshotRow(
             source="espn", kind="mSettings", league_id=league.row_id, path="espn/mSettings.json", fetched_at=AS_OF
         )
     )
-    record = LeagueSettingsRecord(
+    record = LeagueSettingsRow(
         league_id=league.row_id,
         settings={"scoring": {"53": 1.0, "42": 0.04}, "slots": {"0": 1, "2": 2, "23": 1}, "faab": True},
         raw_snapshot_id=raw.row_id,
@@ -180,7 +222,7 @@ def test_league_settings_round_trip(store: Store) -> None:
 
 def test_team_round_trip(store: Store) -> None:
     league = seed_league(store)
-    team = Team(
+    team = TeamRow(
         league_id=league.row_id,
         team_id=4,
         name="Jon's Team",
@@ -197,7 +239,7 @@ def test_team_round_trip(store: Store) -> None:
         as_of=AS_OF,
     )
     assert store.teams.upsert(team) == team
-    rival = store.teams.upsert(Team(league_id=league.row_id, team_id=1, name="Rival", as_of=AS_OF))
+    rival = store.teams.upsert(TeamRow(league_id=league.row_id, team_id=1, name="Rival", as_of=AS_OF))
     assert store.teams.get(league.row_id, 4) == team
     assert store.teams.get(league.row_id, 99) is None
     assert store.teams.for_league(league.row_id) == [rival, team]
@@ -209,7 +251,7 @@ def test_team_round_trip(store: Store) -> None:
 
 
 def test_player_round_trip_and_bulk_lookup(store: Store) -> None:
-    player = Player(
+    player = PlayerRow(
         sport="nfl",
         espn_id=3139477,
         full_name="Patrick Mahomes",
@@ -227,7 +269,7 @@ def test_player_round_trip_and_bulk_lookup(store: Store) -> None:
     assert store.players.get("nfl", 3139477) == player
     assert store.players.get("nba", 3139477) is None
 
-    many = [Player(sport="nfl", espn_id=i, full_name=f"Player {i}", as_of=AS_OF) for i in range(1, 1202)]
+    many = [PlayerRow(sport="nfl", espn_id=i, full_name=f"Player {i}", as_of=AS_OF) for i in range(1, 1202)]
     assert store.players.upsert_many(many) == 1201
     assert [p.espn_id for p in store.players.many("nfl", range(1, 1202))] == list(range(1, 1202))
     assert store.players.many("nfl", [1, 999_999]) == [many[0]]
@@ -241,9 +283,9 @@ def test_player_round_trip_and_bulk_lookup(store: Store) -> None:
 
 def test_player_ids_crosswalk(store: Store) -> None:
     rows = [
-        PlayerId(sport="nfl", espn_id=1, source="gsis", source_id="00-0033873", origin="ff_playerids", as_of=AS_OF),
-        PlayerId(sport="nfl", espn_id=1, source="sleeper", source_id="4046", origin="ff_playerids", as_of=AS_OF),
-        PlayerId(sport="nfl", espn_id=2, source="sleeper", source_id="6794", origin="override", as_of=AS_OF),
+        PlayerIdRow(sport="nfl", espn_id=1, source="gsis", source_id="00-0033873", origin="ff_playerids", as_of=AS_OF),
+        PlayerIdRow(sport="nfl", espn_id=1, source="sleeper", source_id="4046", origin="ff_playerids", as_of=AS_OF),
+        PlayerIdRow(sport="nfl", espn_id=2, source="sleeper", source_id="6794", origin="override", as_of=AS_OF),
     ]
     assert store.player_ids.upsert_many(rows) == 3
     assert store.player_ids.for_player("nfl", 1) == [rows[0], rows[1]]
@@ -256,7 +298,7 @@ def test_player_ids_crosswalk(store: Store) -> None:
 
     with pytest.raises(sqlite3.IntegrityError):  # a source id maps to exactly one ESPN player
         store.player_ids.upsert(
-            PlayerId(sport="nfl", espn_id=3, source="sleeper", source_id="4046", origin="name_match", as_of=AS_OF)
+            PlayerIdRow(sport="nfl", espn_id=3, source="sleeper", source_id="4046", origin="name_match", as_of=AS_OF)
         )
     moved = store.player_ids.upsert(rows[1].model_copy(update={"source_id": "4047", "origin": "override"}))
     assert store.player_ids.for_player("nfl", 1) == [rows[0], moved]
@@ -267,7 +309,7 @@ def test_roster_snapshot_replace(store: Store) -> None:
     league = seed_league(store)
     team = seed_team(store, league)
 
-    def entry(espn_id: int, slot: int, **overrides: object) -> RosterEntry:
+    def entry(espn_id: int, slot: int, **overrides: object) -> RosterEntryRow:
         fields: dict[str, object] = {
             "league_id": league.row_id,
             "scoring_period_id": 4,
@@ -277,7 +319,7 @@ def test_roster_snapshot_replace(store: Store) -> None:
             "as_of": AS_OF,
         }
         fields.update(overrides)
-        return RosterEntry.model_validate(fields)
+        return RosterEntryRow.model_validate(fields)
 
     first = [
         entry(10, 0, acquisition_type="DRAFT", acquisition_date=AS_OF - timedelta(days=30)),
@@ -307,7 +349,7 @@ def test_roster_snapshot_replace(store: Store) -> None:
 
 
 def test_projection_round_trip(store: Store) -> None:
-    espn = Projection(
+    espn = ProjectionRow(
         sport="nfl",
         espn_id=1,
         source="espn",
@@ -317,7 +359,7 @@ def test_projection_round_trip(store: Store) -> None:
         as_of=AS_OF,
     )
     sleeper = espn.model_copy(update={"source": "sleeper", "stats": {"pass_yd": 270.0, "pass_td": 1.9}})
-    actual = Projection(
+    actual = ProjectionRow(
         sport="nfl",
         espn_id=1,
         source="espn",
@@ -348,7 +390,7 @@ def test_projection_round_trip(store: Store) -> None:
 
 
 def test_availability_round_trip(store: Store) -> None:
-    row = Availability(
+    row = AvailabilityRow(
         sport="nba",
         espn_id=3917376,
         season=2027,
@@ -364,7 +406,7 @@ def test_availability_round_trip(store: Store) -> None:
     assert store.availability.get("nba", 3917376, 2027, 12) == row
     assert store.availability.get("nba", 3917376, 2027, 13) is None
 
-    no_game = Availability(
+    no_game = AvailabilityRow(
         sport="nba", espn_id=1, season=2027, scoring_period_id=12, p_active=0.0, has_game=False, as_of=AS_OF
     )
     assert store.availability.upsert_many([no_game]) == 1
@@ -390,7 +432,7 @@ def test_news_ingest_dedupes_and_tracks_triage(store: Store) -> None:
     assert count(store, "news_items") == 1
 
     other = store.news.ingest(
-        NewsItem(
+        NewsItemRow(
             source="espn",
             external_id="rw-1001",
             sport="nba",
@@ -417,7 +459,7 @@ def test_news_ingest_dedupes_and_tracks_triage(store: Store) -> None:
 
 def test_news_signal_round_trip_and_cascade(store: Store) -> None:
     item = seed_news(store)
-    signal = NewsSignal(
+    signal = NewsSignalRow(
         news_item_id=item.row_id,
         sport="nfl",
         espn_id=3139477,
@@ -442,7 +484,7 @@ def test_news_signal_round_trip_and_cascade(store: Store) -> None:
     assert store.news_signals.for_item(item.row_id) == [stored, older]
 
     with pytest.raises(ValidationError):
-        NewsSignal.model_validate({**signal.model_dump(), "kind": "vibes"})
+        NewsSignalRow.model_validate({**signal.model_dump(), "kind": "vibes"})
     with pytest.raises(sqlite3.IntegrityError):
         store.news_signals.insert(signal.model_copy(update={"news_item_id": 999}))
 
@@ -451,7 +493,7 @@ def test_news_signal_round_trip_and_cascade(store: Store) -> None:
 
 
 def test_market_value_round_trip(store: Store) -> None:
-    fantasycalc = MarketValue(
+    fantasycalc = MarketValueRow(
         sport="nfl",
         espn_id=1,
         source="fantasycalc",
@@ -462,10 +504,10 @@ def test_market_value_round_trip(store: Store) -> None:
         details={"redraft": True, "numQbs": 1},
         as_of=AS_OF,
     )
-    espn = MarketValue(
+    espn = MarketValueRow(
         sport="nfl", espn_id=1, source="espn", rank=5, percent_owned=99.8, percent_started=97.1, as_of=AS_OF
     )
-    second = MarketValue(sport="nfl", espn_id=2, source="fantasycalc", value=5000.0, rank=9, as_of=AS_OF)
+    second = MarketValueRow(sport="nfl", espn_id=2, source="fantasycalc", value=5000.0, rank=9, as_of=AS_OF)
     assert store.market_values.upsert_many([fantasycalc, espn, second]) == 3
     assert store.market_values.get("nfl", 1, "fantasycalc") == fantasycalc
     assert store.market_values.get("nfl", 1, "espn") == espn
@@ -479,7 +521,7 @@ def test_market_value_round_trip(store: Store) -> None:
 
 def test_proposal_round_trip_lifecycle_and_queries(store: Store) -> None:
     league = seed_league(store)
-    proposal = Proposal(
+    proposal = ProposalRow(
         league_id=league.row_id,
         kind="lineup",
         policy="approve",
@@ -505,7 +547,7 @@ def test_proposal_round_trip_lifecycle_and_queries(store: Store) -> None:
     assert (approved.status, approved.decided_at) == ("approved", LATER)
 
     trade = store.proposals.insert(
-        Proposal(
+        ProposalRow(
             league_id=league.row_id,
             kind="trade_propose",
             policy="approve",
@@ -515,7 +557,7 @@ def test_proposal_round_trip_lifecycle_and_queries(store: Store) -> None:
         )
     )
     rejected = store.proposals.insert(
-        Proposal(
+        ProposalRow(
             league_id=league.row_id,
             kind="add_drop",
             status="rejected",
@@ -556,7 +598,7 @@ def test_proposal_round_trip_lifecycle_and_queries(store: Store) -> None:
 def test_execution_round_trip(store: Store) -> None:
     league = seed_league(store)
     proposal = seed_proposal(store, league)
-    execution = Execution(
+    execution = ExecutionRow(
         proposal_id=proposal.row_id,
         mode="api",
         started_at=AS_OF,
@@ -580,7 +622,9 @@ def test_execution_round_trip(store: Store) -> None:
     )
     assert store.executions.get(1) == done
     unknown = store.executions.insert(
-        Execution(proposal_id=proposal.row_id, mode="ui", status="unknown", started_at=LATER, error="timeout after 30s")
+        ExecutionRow(
+            proposal_id=proposal.row_id, mode="ui", status="unknown", started_at=LATER, error="timeout after 30s"
+        )
     )
     assert store.executions.for_proposal(proposal.row_id) == [done, unknown]
     assert store.executions.for_proposal(99) == []
@@ -593,7 +637,7 @@ def test_decision_eval_round_trip(store: Store) -> None:
     league = seed_league(store)
     proposal = seed_proposal(store, league)
     pending = store.decision_evals.insert(
-        DecisionEval(
+        DecisionEvalRow(
             league_id=league.row_id,
             kind="lineup",
             season=2026,
@@ -620,7 +664,7 @@ def test_decision_eval_round_trip(store: Store) -> None:
     assert store.decision_evals.unevaluated(league.row_id) == []
 
     waiver = store.decision_evals.insert(
-        DecisionEval(
+        DecisionEvalRow(
             league_id=league.row_id,
             kind="waiver",
             season=2026,
@@ -643,7 +687,7 @@ def test_decision_eval_round_trip(store: Store) -> None:
 def test_llm_usage_round_trip_and_budget(store: Store) -> None:
     league = seed_league(store)
     calls = [
-        LlmUsage(
+        LlmUsageRow(
             called_at=AS_OF - timedelta(days=1),
             worker="news_triage",
             model="claude-opus-5-5",
@@ -655,7 +699,7 @@ def test_llm_usage_round_trip_and_budget(store: Store) -> None:
             stop_reason="end_turn",
             request_id="req_1",
         ),
-        LlmUsage(
+        LlmUsageRow(
             called_at=AS_OF,
             worker="explain",
             model="claude-opus-5-5",
@@ -664,7 +708,7 @@ def test_llm_usage_round_trip_and_budget(store: Store) -> None:
             cost_usd=0.012,
             league_id=league.row_id,
         ),
-        LlmUsage(called_at=LATER, worker="close_call", model="claude-opus-5-5", cost_usd=0.5, stop_reason="refusal"),
+        LlmUsageRow(called_at=LATER, worker="close_call", model="claude-opus-5-5", cost_usd=0.5, stop_reason="refusal"),
     ]
     stored = [store.llm_usage.insert(call) for call in calls]
     assert stored == [call.model_copy(update={"id": i}) for i, call in enumerate(calls, start=1)]
@@ -676,7 +720,7 @@ def test_llm_usage_round_trip_and_budget(store: Store) -> None:
 
 def test_raw_snapshot_round_trip(store: Store) -> None:
     league = seed_league(store)
-    snapshot = RawSnapshot(
+    snapshot = RawSnapshotRow(
         source="espn",
         kind="mRoster",
         league_id=league.row_id,
@@ -695,7 +739,7 @@ def test_raw_snapshot_round_trip(store: Store) -> None:
         snapshot.model_copy(update={"path": "espn/123456/2026/mRoster-4-b.json", "fetched_at": LATER})
     )
     sleeper = store.raw_snapshots.insert(
-        RawSnapshot(source="sleeper", kind="players", path="sleeper/players.json", fetched_at=AS_OF)
+        RawSnapshotRow(source="sleeper", kind="players", path="sleeper/players.json", fetched_at=AS_OF)
     )
 
     assert store.raw_snapshots.get(1) == first
@@ -718,8 +762,8 @@ def test_writes_inside_a_caller_transaction_are_atomic(store: Store) -> None:
     league = seed_league(store)
     with pytest.raises(RuntimeError, match="abort"):
         with store.db.transaction():
-            store.teams.upsert(Team(league_id=league.row_id, team_id=1, name="A", as_of=AS_OF))
-            store.players.upsert(Player(sport="nfl", espn_id=1, full_name="P", as_of=AS_OF))
+            store.teams.upsert(TeamRow(league_id=league.row_id, team_id=1, name="A", as_of=AS_OF))
+            store.players.upsert(PlayerRow(sport="nfl", espn_id=1, full_name="P", as_of=AS_OF))
             raise RuntimeError("abort")
     assert store.teams.for_league(league.row_id) == []
     assert store.players.get("nfl", 1) is None

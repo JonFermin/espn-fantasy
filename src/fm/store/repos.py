@@ -17,26 +17,26 @@ from typing import Any, ClassVar
 from fm.store.db import Database
 from fm.store.models import (
     OPEN_PROPOSAL_STATUSES,
-    Availability,
-    DecisionEval,
-    Execution,
-    League,
-    LeagueSettingsRecord,
-    LlmUsage,
-    MarketValue,
-    NewsItem,
-    NewsSignal,
-    Player,
-    PlayerId,
-    Projection,
+    AvailabilityRow,
+    DecisionEvalRow,
+    ExecutionRow,
+    LeagueRow,
+    LeagueSettingsRow,
+    LlmUsageRow,
+    MarketValueRow,
+    NewsItemRow,
+    NewsSignalRow,
+    PlayerIdRow,
+    PlayerRow,
     ProjectionKind,
-    Proposal,
+    ProjectionRow,
+    ProposalRow,
     ProposalStatus,
-    RawSnapshot,
-    RosterEntry,
+    RawSnapshotRow,
+    RosterEntryRow,
     Row,
     Sport,
-    Team,
+    TeamRow,
     format_timestamp,
 )
 
@@ -150,78 +150,103 @@ class Repository[M: Row]:
         return rows[0] if rows else None
 
 
-class LeagueRepo(Repository[League]):
+class LeagueRepo(Repository[LeagueRow]):
+    """``leagues``: the config key is a league's identity, one row per (key, season)."""
+
     table = "leagues"
-    key = ("sport", "espn_league_id", "season")
-    model = League
+    key = ("key", "season")
+    model = LeagueRow
 
-    def upsert(self, league: League) -> League:
-        """Insert or update by (sport, espn_league_id, season). Returns the stored row; ``league.id`` is ignored."""
+    def upsert(self, league: LeagueRow) -> LeagueRow:
+        """Insert, or update the row for (key, season) in place. Returns the stored row; ``league.id`` is ignored.
+
+        Correcting ``espn_league_id`` (or ``sport``) in config.toml keeps the row and its id but points it at another
+        ESPN league, so what was read from the old one goes: ``league_settings`` and ``teams`` (with their
+        ``roster_snapshots``) are deleted and ``raw_snapshots`` are detached, and the next sync starts clean.
+        Proposals and decision history stay with the key. A row for the same ESPN league under a key that is no
+        longer in use is taken over (renamed) rather than duplicated: one ESPN league is managed under one key.
+        """
         with self.db.transaction():
-            return self._upsert(league.model_copy(update={"id": None}))
+            current = self._select_one("key = ? AND season = ?", (league.key, league.season))
+            if current is None:
+                current = self._select_one(
+                    "sport = ? AND espn_league_id = ? AND season = ?",
+                    (league.sport, league.espn_league_id, league.season),
+                )
+            if current is None:
+                return self._insert(league.model_copy(update={"id": None}))
+            if (current.sport, current.espn_league_id) != (league.sport, league.espn_league_id):
+                self._forget_espn_state(current.row_id)
+            return self._update(league.model_copy(update={"id": current.id}))
 
-    def get(self, league_id: int) -> League | None:
+    def _forget_espn_state(self, league_id: int) -> None:
+        """Drop what was read from the ESPN league this row used to point at."""
+        self.db.execute("DELETE FROM league_settings WHERE league_id = ?", (league_id,))
+        self.db.execute("DELETE FROM teams WHERE league_id = ?", (league_id,))  # cascades to roster_snapshots
+        self.db.execute("UPDATE raw_snapshots SET league_id = NULL WHERE league_id = ?", (league_id,))
+
+    def get(self, league_id: int) -> LeagueRow | None:
         return self._select_one("id = ?", (league_id,))
 
-    def by_key(self, key: str) -> League | None:
+    def by_key(self, key: str) -> LeagueRow | None:
         """The league configured under ``key`` (``nfl``, ``nba``), latest season first."""
         return self._select_one("key = ?", (key,), order="season DESC")
 
-    def all(self) -> list[League]:
+    def all(self) -> list[LeagueRow]:
         return self._select(order="season DESC, key")
 
 
-class LeagueSettingsRepo(Repository[LeagueSettingsRecord]):
+class LeagueSettingsRepo(Repository[LeagueSettingsRow]):
     table = "league_settings"
     key = ("league_id",)
-    model = LeagueSettingsRecord
+    model = LeagueSettingsRow
 
-    def upsert(self, record: LeagueSettingsRecord) -> LeagueSettingsRecord:
+    def upsert(self, record: LeagueSettingsRow) -> LeagueSettingsRow:
         with self.db.transaction():
             return self._upsert(record)
 
-    def get(self, league_id: int) -> LeagueSettingsRecord | None:
+    def get(self, league_id: int) -> LeagueSettingsRow | None:
         return self._select_one("league_id = ?", (league_id,))
 
 
-class TeamRepo(Repository[Team]):
+class TeamRepo(Repository[TeamRow]):
     table = "teams"
     key = ("league_id", "team_id")
-    model = Team
+    model = TeamRow
 
-    def upsert(self, team: Team) -> Team:
+    def upsert(self, team: TeamRow) -> TeamRow:
         with self.db.transaction():
             return self._upsert(team)
 
-    def upsert_many(self, teams: Iterable[Team]) -> int:
+    def upsert_many(self, teams: Iterable[TeamRow]) -> int:
         return self._upsert_many(teams)
 
-    def get(self, league_id: int, team_id: int) -> Team | None:
+    def get(self, league_id: int, team_id: int) -> TeamRow | None:
         return self._select_one("league_id = ? AND team_id = ?", (league_id, team_id))
 
-    def for_league(self, league_id: int) -> list[Team]:
+    def for_league(self, league_id: int) -> list[TeamRow]:
         return self._select("league_id = ?", (league_id,), order="team_id")
 
 
-class PlayerRepo(Repository[Player]):
+class PlayerRepo(Repository[PlayerRow]):
     table = "players"
     key = ("sport", "espn_id")
-    model = Player
+    model = PlayerRow
 
-    def upsert(self, player: Player) -> Player:
+    def upsert(self, player: PlayerRow) -> PlayerRow:
         with self.db.transaction():
             return self._upsert(player)
 
-    def upsert_many(self, players: Iterable[Player]) -> int:
+    def upsert_many(self, players: Iterable[PlayerRow]) -> int:
         return self._upsert_many(players)
 
-    def get(self, sport: Sport, espn_id: int) -> Player | None:
+    def get(self, sport: Sport, espn_id: int) -> PlayerRow | None:
         return self._select_one("sport = ? AND espn_id = ?", (sport, espn_id))
 
-    def many(self, sport: Sport, espn_ids: Iterable[int]) -> list[Player]:
+    def many(self, sport: Sport, espn_ids: Iterable[int]) -> list[PlayerRow]:
         """The players with these ids that are stored, ordered by ``espn_id``; missing ids are simply absent."""
         ids = sorted(set(espn_ids))
-        found: list[Player] = []
+        found: list[PlayerRow] = []
         for chunk in _chunks(ids):
             found.extend(
                 self._select(f"sport = ? AND espn_id IN ({_marks(len(chunk))})", (sport, *chunk), order="espn_id")
@@ -229,22 +254,22 @@ class PlayerRepo(Repository[Player]):
         return found
 
 
-class PlayerIdRepo(Repository[PlayerId]):
+class PlayerIdRepo(Repository[PlayerIdRow]):
     table = "player_ids"
     key = ("sport", "espn_id", "source")
-    model = PlayerId
+    model = PlayerIdRow
 
-    def upsert(self, mapping: PlayerId) -> PlayerId:
+    def upsert(self, mapping: PlayerIdRow) -> PlayerIdRow:
         with self.db.transaction():
             return self._upsert(mapping)
 
-    def upsert_many(self, mappings: Iterable[PlayerId]) -> int:
+    def upsert_many(self, mappings: Iterable[PlayerIdRow]) -> int:
         return self._upsert_many(mappings)
 
-    def for_player(self, sport: Sport, espn_id: int) -> list[PlayerId]:
+    def for_player(self, sport: Sport, espn_id: int) -> list[PlayerIdRow]:
         return self._select("sport = ? AND espn_id = ?", (sport, espn_id), order="source")
 
-    def lookup(self, sport: Sport, source: str, source_id: str) -> PlayerId | None:
+    def lookup(self, sport: Sport, source: str, source_id: str) -> PlayerIdRow | None:
         """The ESPN mapping for a source id (``sleeper`` ``"4046"`` -> espn_id ...)."""
         return self._select_one("sport = ? AND source = ? AND source_id = ?", (sport, source, source_id))
 
@@ -261,12 +286,12 @@ class PlayerIdRepo(Repository[PlayerId]):
         return wanted - mapped
 
 
-class RosterRepo(Repository[RosterEntry]):
+class RosterRepo(Repository[RosterEntryRow]):
     table = "roster_snapshots"
     key = ("league_id", "scoring_period_id", "team_id", "espn_id")
-    model = RosterEntry
+    model = RosterEntryRow
 
-    def replace(self, league_id: int, scoring_period_id: int, team_id: int, entries: Iterable[RosterEntry]) -> int:
+    def replace(self, league_id: int, scoring_period_id: int, team_id: int, entries: Iterable[RosterEntryRow]) -> int:
         """Replace one team's roster for one period with ``entries`` (each must belong to that team and period)."""
         rows = list(entries)
         for entry in rows:
@@ -284,14 +309,14 @@ class RosterRepo(Repository[RosterEntry]):
                 self._insert(entry)
         return len(rows)
 
-    def team(self, league_id: int, scoring_period_id: int, team_id: int) -> list[RosterEntry]:
+    def team(self, league_id: int, scoring_period_id: int, team_id: int) -> list[RosterEntryRow]:
         return self._select(
             "league_id = ? AND scoring_period_id = ? AND team_id = ?",
             (league_id, scoring_period_id, team_id),
             order="lineup_slot_id, espn_id",
         )
 
-    def league(self, league_id: int, scoring_period_id: int) -> list[RosterEntry]:
+    def league(self, league_id: int, scoring_period_id: int) -> list[RosterEntryRow]:
         return self._select(
             "league_id = ? AND scoring_period_id = ?", (league_id, scoring_period_id), order="team_id, lineup_slot_id"
         )
@@ -312,16 +337,16 @@ class RosterRepo(Repository[RosterEntry]):
         return None if row is None else row["period"]
 
 
-class ProjectionRepo(Repository[Projection]):
+class ProjectionRepo(Repository[ProjectionRow]):
     table = "projections"
     key = ("sport", "espn_id", "source", "kind", "season", "scoring_period_id")
-    model = Projection
+    model = ProjectionRow
 
-    def upsert(self, projection: Projection) -> Projection:
+    def upsert(self, projection: ProjectionRow) -> ProjectionRow:
         with self.db.transaction():
             return self._upsert(projection)
 
-    def upsert_many(self, projections: Iterable[Projection]) -> int:
+    def upsert_many(self, projections: Iterable[ProjectionRow]) -> int:
         return self._upsert_many(projections)
 
     def get(
@@ -332,7 +357,7 @@ class ProjectionRepo(Repository[Projection]):
         season: int,
         scoring_period_id: int,
         kind: ProjectionKind = "projected",
-    ) -> Projection | None:
+    ) -> ProjectionRow | None:
         return self._select_one(
             "sport = ? AND espn_id = ? AND source = ? AND kind = ? AND season = ? AND scoring_period_id = ?",
             (sport, espn_id, source, kind, season, scoring_period_id),
@@ -346,7 +371,7 @@ class ProjectionRepo(Repository[Projection]):
         *,
         source: str | None = None,
         kind: ProjectionKind = "projected",
-    ) -> list[Projection]:
+    ) -> list[ProjectionRow]:
         """All stat lines for a period, optionally from one source."""
         where = "sport = ? AND season = ? AND scoring_period_id = ? AND kind = ?"
         params: list[Any] = [sport, season, scoring_period_id, kind]
@@ -357,7 +382,7 @@ class ProjectionRepo(Repository[Projection]):
 
     def for_player(
         self, sport: Sport, espn_id: int, season: int, *, kind: ProjectionKind = "projected"
-    ) -> list[Projection]:
+    ) -> list[ProjectionRow]:
         return self._select(
             "sport = ? AND espn_id = ? AND season = ? AND kind = ?",
             (sport, espn_id, season, kind),
@@ -365,44 +390,44 @@ class ProjectionRepo(Repository[Projection]):
         )
 
 
-class AvailabilityRepo(Repository[Availability]):
+class AvailabilityRepo(Repository[AvailabilityRow]):
     table = "availability"
     key = ("sport", "espn_id", "season", "scoring_period_id")
-    model = Availability
+    model = AvailabilityRow
 
-    def upsert(self, availability: Availability) -> Availability:
+    def upsert(self, availability: AvailabilityRow) -> AvailabilityRow:
         with self.db.transaction():
             return self._upsert(availability)
 
-    def upsert_many(self, rows: Iterable[Availability]) -> int:
+    def upsert_many(self, rows: Iterable[AvailabilityRow]) -> int:
         return self._upsert_many(rows)
 
-    def get(self, sport: Sport, espn_id: int, season: int, scoring_period_id: int) -> Availability | None:
+    def get(self, sport: Sport, espn_id: int, season: int, scoring_period_id: int) -> AvailabilityRow | None:
         return self._select_one(
             "sport = ? AND espn_id = ? AND season = ? AND scoring_period_id = ?",
             (sport, espn_id, season, scoring_period_id),
         )
 
-    def for_period(self, sport: Sport, season: int, scoring_period_id: int) -> list[Availability]:
+    def for_period(self, sport: Sport, season: int, scoring_period_id: int) -> list[AvailabilityRow]:
         return self._select(
             "sport = ? AND season = ? AND scoring_period_id = ?", (sport, season, scoring_period_id), order="espn_id"
         )
 
 
-class NewsRepo(Repository[NewsItem]):
+class NewsRepo(Repository[NewsItemRow]):
     table = "news_items"
     key = ("source", "external_id")
-    model = NewsItem
+    model = NewsItemRow
 
-    def ingest(self, item: NewsItem) -> NewsItem | None:
+    def ingest(self, item: NewsItemRow) -> NewsItemRow | None:
         """Store a news item unless (source, external_id) is already known; returns ``None`` for a duplicate."""
         with self.db.transaction():
             return self._insert_or_ignore(item)
 
-    def get(self, news_item_id: int) -> NewsItem | None:
+    def get(self, news_item_id: int) -> NewsItemRow | None:
         return self._select_one("id = ?", (news_item_id,))
 
-    def untriaged(self, limit: int = 100) -> list[NewsItem]:
+    def untriaged(self, limit: int = 100) -> list[NewsItemRow]:
         """Items the advisor has not processed yet, oldest first."""
         return self._select("triaged_at IS NULL", order="published_at, id", limit=limit)
 
@@ -418,7 +443,7 @@ class NewsRepo(Repository[NewsItem]):
                 updated += cursor.rowcount
         return updated
 
-    def published_since(self, since: datetime, *, sport: Sport | None = None) -> list[NewsItem]:
+    def published_since(self, since: datetime, *, sport: Sport | None = None) -> list[NewsItemRow]:
         where = "published_at >= ?"
         params: list[Any] = [format_timestamp(since)]
         if sport is not None:
@@ -427,15 +452,15 @@ class NewsRepo(Repository[NewsItem]):
         return self._select(where, params, order="published_at, id")
 
 
-class NewsSignalRepo(Repository[NewsSignal]):
+class NewsSignalRepo(Repository[NewsSignalRow]):
     table = "news_signals"
-    model = NewsSignal
+    model = NewsSignalRow
 
-    def insert(self, signal: NewsSignal) -> NewsSignal:
+    def insert(self, signal: NewsSignalRow) -> NewsSignalRow:
         with self.db.transaction():
             return self._insert(signal)
 
-    def for_player(self, sport: Sport, espn_id: int, *, since: datetime | None = None) -> list[NewsSignal]:
+    def for_player(self, sport: Sport, espn_id: int, *, since: datetime | None = None) -> list[NewsSignalRow]:
         where = "sport = ? AND espn_id = ?"
         params: list[Any] = [sport, espn_id]
         if since is not None:
@@ -443,42 +468,42 @@ class NewsSignalRepo(Repository[NewsSignal]):
             params.append(format_timestamp(since))
         return self._select(where, params, order="published_at, id")
 
-    def for_item(self, news_item_id: int) -> list[NewsSignal]:
+    def for_item(self, news_item_id: int) -> list[NewsSignalRow]:
         return self._select("news_item_id = ?", (news_item_id,), order="id")
 
 
-class MarketValueRepo(Repository[MarketValue]):
+class MarketValueRepo(Repository[MarketValueRow]):
     table = "market_values"
     key = ("sport", "espn_id", "source")
-    model = MarketValue
+    model = MarketValueRow
 
-    def upsert(self, value: MarketValue) -> MarketValue:
+    def upsert(self, value: MarketValueRow) -> MarketValueRow:
         with self.db.transaction():
             return self._upsert(value)
 
-    def upsert_many(self, values: Iterable[MarketValue]) -> int:
+    def upsert_many(self, values: Iterable[MarketValueRow]) -> int:
         return self._upsert_many(values)
 
-    def get(self, sport: Sport, espn_id: int, source: str) -> MarketValue | None:
+    def get(self, sport: Sport, espn_id: int, source: str) -> MarketValueRow | None:
         return self._select_one("sport = ? AND espn_id = ? AND source = ?", (sport, espn_id, source))
 
-    def for_source(self, sport: Sport, source: str) -> list[MarketValue]:
+    def for_source(self, sport: Sport, source: str) -> list[MarketValueRow]:
         return self._select("sport = ? AND source = ?", (sport, source), order="rank, espn_id")
 
 
-class ProposalRepo(Repository[Proposal]):
+class ProposalRepo(Repository[ProposalRow]):
     table = "proposals"
-    model = Proposal
+    model = ProposalRow
 
-    def insert(self, proposal: Proposal) -> Proposal:
+    def insert(self, proposal: ProposalRow) -> ProposalRow:
         with self.db.transaction():
             return self._insert(proposal)
 
-    def update(self, proposal: Proposal) -> Proposal:
+    def update(self, proposal: ProposalRow) -> ProposalRow:
         with self.db.transaction():
             return self._update(proposal)
 
-    def get(self, proposal_id: int) -> Proposal | None:
+    def get(self, proposal_id: int) -> ProposalRow | None:
         return self._select_one("id = ?", (proposal_id,))
 
     def find(
@@ -488,7 +513,7 @@ class ProposalRepo(Repository[Proposal]):
         statuses: Iterable[ProposalStatus] | None = None,
         kinds: Iterable[str] | None = None,
         scoring_period_id: int | None = None,
-    ) -> list[Proposal]:
+    ) -> list[ProposalRow]:
         """Proposals matching every given filter, oldest first."""
         clauses: list[str] = []
         params: list[Any] = []
@@ -508,7 +533,7 @@ class ProposalRepo(Repository[Proposal]):
             params.append(scoring_period_id)
         return self._select(" AND ".join(clauses), params, order="created_at, id")
 
-    def open(self, league_id: int | None = None) -> list[Proposal]:
+    def open(self, league_id: int | None = None) -> list[ProposalRow]:
         """Proposals still in flight: proposed, approved or executing."""
         return self.find(league_id=league_id, statuses=OPEN_PROPOSAL_STATUSES)
 
@@ -524,38 +549,38 @@ class ProposalRepo(Repository[Proposal]):
             return cursor.rowcount == 1
 
 
-class ExecutionRepo(Repository[Execution]):
+class ExecutionRepo(Repository[ExecutionRow]):
     table = "executions"
-    model = Execution
+    model = ExecutionRow
 
-    def insert(self, execution: Execution) -> Execution:
+    def insert(self, execution: ExecutionRow) -> ExecutionRow:
         with self.db.transaction():
             return self._insert(execution)
 
-    def update(self, execution: Execution) -> Execution:
+    def update(self, execution: ExecutionRow) -> ExecutionRow:
         with self.db.transaction():
             return self._update(execution)
 
-    def get(self, execution_id: int) -> Execution | None:
+    def get(self, execution_id: int) -> ExecutionRow | None:
         return self._select_one("id = ?", (execution_id,))
 
-    def for_proposal(self, proposal_id: int) -> list[Execution]:
+    def for_proposal(self, proposal_id: int) -> list[ExecutionRow]:
         return self._select("proposal_id = ?", (proposal_id,), order="started_at, id")
 
 
-class DecisionEvalRepo(Repository[DecisionEval]):
+class DecisionEvalRepo(Repository[DecisionEvalRow]):
     table = "decision_evals"
-    model = DecisionEval
+    model = DecisionEvalRow
 
-    def insert(self, evaluation: DecisionEval) -> DecisionEval:
+    def insert(self, evaluation: DecisionEvalRow) -> DecisionEvalRow:
         with self.db.transaction():
             return self._insert(evaluation)
 
-    def update(self, evaluation: DecisionEval) -> DecisionEval:
+    def update(self, evaluation: DecisionEvalRow) -> DecisionEvalRow:
         with self.db.transaction():
             return self._update(evaluation)
 
-    def get(self, eval_id: int) -> DecisionEval | None:
+    def get(self, eval_id: int) -> DecisionEvalRow | None:
         return self._select_one("id = ?", (eval_id,))
 
     def find(
@@ -565,7 +590,7 @@ class DecisionEvalRepo(Repository[DecisionEval]):
         kind: str | None = None,
         season: int | None = None,
         scoring_period_id: int | None = None,
-    ) -> list[DecisionEval]:
+    ) -> list[DecisionEvalRow]:
         where = "league_id = ?"
         params: list[Any] = [league_id]
         if kind is not None:
@@ -579,16 +604,16 @@ class DecisionEvalRepo(Repository[DecisionEval]):
             params.append(scoring_period_id)
         return self._select(where, params, order="decided_at, id")
 
-    def unevaluated(self, league_id: int) -> list[DecisionEval]:
+    def unevaluated(self, league_id: int) -> list[DecisionEvalRow]:
         """Decisions whose outcome has not been recorded yet."""
         return self._select("league_id = ? AND outcome IS NULL", (league_id,), order="decided_at, id")
 
 
-class LlmUsageRepo(Repository[LlmUsage]):
+class LlmUsageRepo(Repository[LlmUsageRow]):
     table = "llm_usage"
-    model = LlmUsage
+    model = LlmUsageRow
 
-    def insert(self, usage: LlmUsage) -> LlmUsage:
+    def insert(self, usage: LlmUsageRow) -> LlmUsageRow:
         with self.db.transaction():
             return self._insert(usage)
 
@@ -599,24 +624,24 @@ class LlmUsageRepo(Repository[LlmUsage]):
         )
         return float(row["cost"]) if row is not None else 0.0
 
-    def since(self, since: datetime) -> list[LlmUsage]:
+    def since(self, since: datetime) -> list[LlmUsageRow]:
         return self._select("called_at >= ?", (format_timestamp(since),), order="called_at, id")
 
 
-class RawSnapshotRepo(Repository[RawSnapshot]):
+class RawSnapshotRepo(Repository[RawSnapshotRow]):
     table = "raw_snapshots"
-    model = RawSnapshot
+    model = RawSnapshotRow
 
-    def insert(self, snapshot: RawSnapshot) -> RawSnapshot:
+    def insert(self, snapshot: RawSnapshotRow) -> RawSnapshotRow:
         with self.db.transaction():
             return self._insert(snapshot)
 
-    def get(self, snapshot_id: int) -> RawSnapshot | None:
+    def get(self, snapshot_id: int) -> RawSnapshotRow | None:
         return self._select_one("id = ?", (snapshot_id,))
 
     def latest(
         self, source: str, kind: str, *, league_id: int | None = None, scoring_period_id: int | None = None
-    ) -> RawSnapshot | None:
+    ) -> RawSnapshotRow | None:
         """The newest snapshot of ``kind`` from ``source``, narrowed to a league and period when given."""
         where, params = self._filters(source, kind, league_id, scoring_period_id)
         return self._select_one(where, params, order="fetched_at DESC, id DESC")
@@ -628,7 +653,7 @@ class RawSnapshotRepo(Repository[RawSnapshot]):
         *,
         league_id: int | None = None,
         scoring_period_id: int | None = None,
-    ) -> list[RawSnapshot]:
+    ) -> list[RawSnapshotRow]:
         where, params = self._filters(source, kind, league_id, scoring_period_id)
         return self._select(where, params, order="fetched_at, id")
 

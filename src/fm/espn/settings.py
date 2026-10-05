@@ -12,7 +12,9 @@ Parsing is strict about the blocks a decision depends on (``scoringSettings``, `
 ``scheduleSettings``) and forgiving about enumerations: an unseen ``scoringType``, lock type or acquisition type maps
 to ``UNKNOWN`` while the raw string is kept, so a new ESPN value surfaces in output instead of crashing a sync. The
 exact lineup-lock key and value set is an open unknown that the real-league capture (ROADMAP #14) settles; this module
-reads ``rosterSettings.lineupLocktimeType`` and keeps ``rosterLocktimeType`` raw.
+reads ``rosterSettings.lineupLocktimeType`` and keeps ``rosterLocktimeType`` raw. The shape of
+``rosterSettings.lineupSlotStatLimits`` (NBA games-played caps) is another: the parser accepts the bare integer per
+slot and stat that the fixtures use and raises on anything else, because a cap dropped silently makes lineups illegal.
 
 Times: ``tradeSettings.deadlineDate`` is epoch milliseconds and becomes an aware UTC datetime. ``waiverProcessHour``
 is an hour of the day in US Eastern time, as ESPN configures it; turning it into instants is the deadline job's work.
@@ -32,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from fm.espn.ids import Game, IdMaps, ids_for
 
 VIEW = "mSettings"
+SLOT_STAT_LIMITS = "rosterSettings.lineupSlotStatLimits"
 FBA_GAMES_PLAYED_STAT = 42  # fba stat id ``GP``, the stat behind NBA games-played limits
 
 
@@ -425,13 +428,41 @@ def _parse_lineup_slots(raw_counts: Mapping[str, Any], ids: IdMaps) -> tuple[Lin
 
 
 def _parse_slot_stat_limits(raw: Any) -> dict[int, dict[int, int]]:
-    limits: dict[int, dict[int, int]] = {}
+    """``lineupSlotStatLimits``: slot id -> stat id -> season cap (the NBA games-played limits).
+
+    The only shape seen so far, in the fixtures (``espn-api`` never reads this field), is a bare integer per stat with
+    ESPN's negative-means-unlimited convention; ``null`` reads as no cap. Anything else raises instead of being
+    skipped, since a cap dropped silently would let the lineup optimizer break the league's rules. ROADMAP #14
+    confirms the shape against a real capture.
+    """
+    if raw is None:
+        return {}
     if not isinstance(raw, Mapping):
-        return limits
-    for slot_id, per_stat in _int_keyed(raw).items():
+        raise SettingsParseError(f"{SLOT_STAT_LIMITS} should be an object keyed by slot id, got {raw!r}")
+    limits: dict[int, dict[int, int]] = {}
+    for slot_key, per_stat in raw.items():
+        slot_id = _optional_int(slot_key)
+        if slot_id is None:
+            raise SettingsParseError(f"{SLOT_STAT_LIMITS} has a non-numeric slot id {slot_key!r}")
         if not isinstance(per_stat, Mapping):
-            continue
-        caps = {stat_id: int(cap) for stat_id, cap in _int_keyed(per_stat).items() if _limit(cap) is not None}
+            raise SettingsParseError(
+                f"{SLOT_STAT_LIMITS}[{slot_key}] should be an object keyed by stat id, got {per_stat!r}"
+            )
+        caps: dict[int, int] = {}
+        for stat_key, cap in per_stat.items():
+            stat_id = _optional_int(stat_key)
+            if stat_id is None:
+                raise SettingsParseError(f"{SLOT_STAT_LIMITS}[{slot_key}] has a non-numeric stat id {stat_key!r}")
+            if cap is None:
+                continue
+            limit = _optional_int(cap)
+            if limit is None:
+                raise SettingsParseError(
+                    f"{SLOT_STAT_LIMITS}[{slot_key}][{stat_key}] should be an integer cap (negative for unlimited), "
+                    f"got {cap!r}"
+                )
+            if limit >= 0:
+                caps[stat_id] = limit
         if caps:
             limits[slot_id] = caps
     return limits

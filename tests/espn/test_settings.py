@@ -305,6 +305,51 @@ def test_fba_9cat_games_played_limits(fba_9cat: LeagueSettings) -> None:
     assert fba_9cat.slot_stat_limits[5] == {42: 82}
 
 
+def test_slot_stat_limits_read_bare_integers_and_treat_negative_or_null_as_no_cap() -> None:
+    view = _view(FBA_9CAT)
+    limits = view["settings"]["rosterSettings"]["lineupSlotStatLimits"]
+    limits["0"]["42"] = -1  # ESPN's "unlimited"
+    limits["1"]["42"] = None
+    limits["2"] = {}
+    settings = parse_league_settings(view)
+    assert settings.games_played_limit(0) is None and settings.games_played_limit(1) is None
+    assert settings.games_played_limit(2) is None and settings.games_played_limit(3) == 82
+    assert set(settings.slot_stat_limits) == {3, 4, 5, 6, 11}
+
+
+@pytest.mark.parametrize(
+    ("per_stat", "where"),
+    [
+        ({"42": {"limit": 246}}, r"lineupSlotStatLimits\[11\]\[42\] should be an integer cap .* got \{'limit': 246\}"),
+        ({"42": "two hundred"}, r"lineupSlotStatLimits\[11\]\[42\] should be an integer cap"),
+        ({"42": True}, r"lineupSlotStatLimits\[11\]\[42\] should be an integer cap"),
+        ({"GP": 246}, r"lineupSlotStatLimits\[11\] has a non-numeric stat id 'GP'"),
+        (246, r"lineupSlotStatLimits\[11\] should be an object keyed by stat id"),
+        ([{"42": 246}], r"lineupSlotStatLimits\[11\] should be an object keyed by stat id"),
+    ],
+)
+def test_slot_stat_limits_of_an_unknown_shape_raise_instead_of_dropping_the_cap(per_stat: Any, where: str) -> None:
+    view = _view(FBA_9CAT)
+    view["settings"]["rosterSettings"]["lineupSlotStatLimits"]["11"] = per_stat
+    with pytest.raises(SettingsParseError, match=where):
+        parse_league_settings(view)
+
+
+def test_slot_stat_limits_container_must_be_keyed_by_slot_id() -> None:
+    view = _view(FBA_9CAT)
+    roster = view["settings"]["rosterSettings"]
+    roster["lineupSlotStatLimits"] = [{"42": 82}]
+    with pytest.raises(SettingsParseError, match=r"lineupSlotStatLimits should be an object keyed by slot id"):
+        parse_league_settings(view)
+    roster["lineupSlotStatLimits"] = {"UTIL": {"42": 246}}
+    with pytest.raises(SettingsParseError, match=r"non-numeric slot id 'UTIL'"):
+        parse_league_settings(view)
+    roster["lineupSlotStatLimits"] = None
+    assert parse_league_settings(view).slot_stat_limits == {}
+    del roster["lineupSlotStatLimits"]
+    assert parse_league_settings(view).slot_stat_limits == {}
+
+
 # --- variants and errors ----------------------------------------------------------------------------------------------
 
 

@@ -7,10 +7,12 @@ Conventions
   functions can read them. ``as_of`` is the source's freshness stamp; ``created_at`` / ``fetched_at`` are our clock.
 - JSON columns (``JsonDict``, ``StatLine``, ``IntList``, ``StrList``) are dicts and lists on the model and compact JSON
   text in the database; they parse themselves when a row is read back.
-- ``sport`` is ``"nfl"`` or ``"nba"`` (ESPN games ``ffl`` / ``fba``). ESPN ids are ints. ``scoring_period_id`` is a week
-  in NFL and a day in NBA; ``0`` means the full season.
+- ``sport`` is ``fm.config.Sport`` (``"nfl"`` or ``"nba"``; ESPN games ``ffl`` / ``fba``). ESPN ids are ints.
+  ``scoring_period_id`` is a week in NFL and a day in NBA; ``0`` means the full season.
 - Models are frozen. Change a row with ``model_copy(update=...)`` and hand it back to its repository. Rows with a
   store-assigned ``id`` (``Identified``) expose ``row_id`` for the common "I know this came from the store" case.
+- Every table row is named ``<Table>Row`` so it never shadows a config model (``fm.config.League``) or a parsed
+  ESPN model; a module may import ``fm.config``, ``fm.store`` and ``fm.espn`` together without aliasing.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from pydantic import (
     Field,
     PlainSerializer,
 )
+
+from fm.config import Sport
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -62,9 +66,8 @@ type StatLine = Annotated[dict[str, float], BeforeValidator(_parse_json)]
 type IntList = Annotated[list[int], BeforeValidator(_parse_json)]
 type StrList = Annotated[list[str], BeforeValidator(_parse_json)]
 
-type Sport = Literal["nfl", "nba"]
 type ProjectionKind = Literal["projected", "actual"]
-type Policy = Literal["off", "approve", "auto"]
+type ProposalPolicy = Literal["off", "approve", "auto"]  # the approval policy a proposal was made under
 type ProposalStatus = Literal["proposed", "approved", "rejected", "expired", "executing", "verified", "failed"]
 type ExecutionMode = Literal["api", "ui"]
 type ExecutionStatus = Literal["running", "verified", "failed", "unknown", "dry_run"]
@@ -93,9 +96,10 @@ class Identified(Row):
         return self.id
 
 
-class League(Identified):
-    """A configured league for one season (``leagues``). ``key`` is the config key (``nfl``, ``nba``); ``team_id`` is
-    our team. The natural key is (sport, espn_league_id, season)."""
+class LeagueRow(Identified):
+    """A configured league for one season (``leagues``). ``key`` is the config key (``nfl``, ``nba``) and, with
+    ``season``, the league's identity: correcting ``espn_league_id`` in config.toml updates the row in place.
+    ``team_id`` is our team. (sport, espn_league_id, season) is unique as well."""
 
     key: str
     sport: Sport
@@ -106,7 +110,7 @@ class League(Identified):
     as_of: UtcDatetime
 
 
-class LeagueSettingsRecord(Row):
+class LeagueSettingsRow(Row):
     """Parsed ESPN ``mSettings`` for a league (``league_settings``): scoring items, slot counts, lock type, waiver and
     acquisition rules, trade deadline, playoff weeks. ``settings`` is the parser's output as a dict, so the store does
     not depend on the parser's model; ``raw_snapshot_id`` points at the response it was parsed from."""
@@ -117,7 +121,7 @@ class LeagueSettingsRecord(Row):
     as_of: UtcDatetime
 
 
-class Team(Row):
+class TeamRow(Row):
     """An ESPN team in a league with its standings and FAAB state (``teams``)."""
 
     league_id: int
@@ -136,7 +140,7 @@ class Team(Row):
     as_of: UtcDatetime
 
 
-class Player(Row):
+class PlayerRow(Row):
     """The canonical player row, keyed by ESPN id per sport (``players``). ``position`` / ``pro_team`` are the decoded
     names of ``default_position_id`` / ``pro_team_id``; ``eligible_slot_ids`` are ESPN lineup slot ids."""
 
@@ -154,7 +158,7 @@ class Player(Row):
     as_of: UtcDatetime
 
 
-class PlayerId(Row):
+class PlayerIdRow(Row):
     """One crosswalk entry: the player's id in another source (``player_ids``). ``source`` names the id system
     (``gsis``, ``sleeper``, ``nba``, ...); ``origin`` says where the mapping came from (``ff_playerids``, ``override``,
     ``name_match``). A source id maps to one ESPN player."""
@@ -167,7 +171,7 @@ class PlayerId(Row):
     as_of: UtcDatetime
 
 
-class RosterEntry(Row):
+class RosterEntryRow(Row):
     """One player on one team's roster for one scoring period (``roster_snapshots``). A team's rows for a period are
     replaced together, so they always describe the latest read of that roster."""
 
@@ -182,7 +186,7 @@ class RosterEntry(Row):
     as_of: UtcDatetime
 
 
-class Projection(Row):
+class ProjectionRow(Row):
     """A stat line for one player, period and source (``projections``), never points: each league turns stats into
     points with its own scoring items. ``kind`` separates projections from actuals; period ``0`` is the season."""
 
@@ -196,7 +200,7 @@ class Projection(Row):
     as_of: UtcDatetime
 
 
-class Availability(Row):
+class AvailabilityRow(Row):
     """Probability a player is active in a scoring period (``availability``), with the designation and the inputs
     behind the number (practice trend, injury report, applied news signals) so the decision is replayable."""
 
@@ -212,7 +216,7 @@ class Availability(Row):
     as_of: UtcDatetime
 
 
-class NewsItem(Identified):
+class NewsItemRow(Identified):
     """A deduplicated news item (``news_items``): (source, external_id) is unique. ``triaged_at`` is set once the
     advisor has processed it."""
 
@@ -228,7 +232,7 @@ class NewsItem(Identified):
     triaged_at: UtcDatetime | None = None
 
 
-class NewsSignal(Identified):
+class NewsSignalRow(Identified):
     """The advisor's structured reading of a news item for one player (``news_signals``, DESIGN section 10).
     ``p_active_delta`` is the proposed adjustment; the availability model clamps and logs what it applies."""
 
@@ -246,7 +250,7 @@ class NewsSignal(Identified):
     created_at: UtcDatetime
 
 
-class MarketValue(Row):
+class MarketValueRow(Row):
     """What league-mates believe a player is worth (``market_values``): redraft trade value, ranks and ownership
     trends per source. Used only to model trade acceptance."""
 
@@ -263,7 +267,7 @@ class MarketValue(Row):
     as_of: UtcDatetime
 
 
-class Proposal(Identified):
+class ProposalRow(Identified):
     """A proposed move (``proposals``, DESIGN section 11): ``proposed -> approved | rejected | expired -> executing ->
     verified | failed``. ``execution_token`` is issued on approval and consumed exactly once; ``dedupe_key`` lets a
     decision module recognise a move it already proposed."""
@@ -271,7 +275,7 @@ class Proposal(Identified):
     league_id: int
     kind: str
     status: ProposalStatus = "proposed"
-    policy: Policy
+    policy: ProposalPolicy
     scoring_period_id: int | None = None
     payload: JsonDict
     engine_numbers: JsonDict = Field(default_factory=dict)
@@ -286,7 +290,7 @@ class Proposal(Identified):
     dedupe_key: str | None = None
 
 
-class Execution(Identified):
+class ExecutionRow(Identified):
     """One attempt to carry out a proposal (``executions``): the request and response, the API re-read that verified
     it, and audit artifact paths. ``unknown`` means a timeout; state must be re-read before anything else happens."""
 
@@ -303,7 +307,7 @@ class Execution(Identified):
     espn_transaction_id: str | None = None
 
 
-class DecisionEval(Identified):
+class DecisionEvalRow(Identified):
     """A replayable decision (``decision_evals``): its inputs with their ``as_of`` stamps, what was decided, and, once
     results are in, the outcome and metrics (lineup efficiency, regret, pickup value)."""
 
@@ -320,7 +324,7 @@ class DecisionEval(Identified):
     evaluated_at: UtcDatetime | None = None
 
 
-class LlmUsage(Identified):
+class LlmUsageRow(Identified):
     """One Claude API call (``llm_usage``), for the daily budget cap and cost reporting."""
 
     called_at: UtcDatetime
@@ -337,7 +341,7 @@ class LlmUsage(Identified):
     league_id: int | None = None
 
 
-class RawSnapshot(Identified):
+class RawSnapshotRow(Identified):
     """Index entry for a raw response saved under the cache dir (``raw_snapshots``). ``path`` is relative to
     ``paths.cache_dir()``; ``params`` holds the query and filters, never cookies or tokens."""
 

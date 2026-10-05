@@ -122,3 +122,51 @@ def test_public_module_without_register_hook_is_a_startup_error(
     package = _make_package(tmp_path, "fake_cmds_bad", {"broken": NO_HOOK}, monkeypatch)
     with pytest.raises(RuntimeError, match=r"fake_cmds_bad\.broken has no register\(root\) hook"):
         build_app(package)
+
+
+DERIVED_NAME_HELLO = """
+import typer
+
+
+def hello() -> None:
+    typer.echo("hello again")
+
+
+def register(root: typer.Typer) -> None:
+    root.command()(hello)  # no explicit name: typer derives "hello" from the function
+"""
+
+GROUP_NAMED_HELLO = """
+import typer
+
+app = typer.Typer(help="A group whose name is an earlier module's command.", no_args_is_help=True)
+
+
+@app.command("ping")
+def ping() -> None:
+    typer.echo("pong")
+
+
+def register(root: typer.Typer) -> None:
+    root.add_typer(app, name="hello")
+"""
+
+
+def test_two_modules_registering_one_command_name_is_a_startup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _make_package(tmp_path, "fake_cmds_dup", {"alpha": GOOD, "beta": DERIVED_NAME_HELLO}, monkeypatch)
+    with pytest.raises(
+        RuntimeError, match=r"'hello' is registered twice, by fake_cmds_dup\.alpha and by fake_cmds_dup\.beta"
+    ):
+        build_app(package)
+
+
+def test_a_group_named_like_an_earlier_command_is_a_startup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _make_package(tmp_path, "fake_cmds_dup_grp", {"alpha": GOOD, "beta": GROUP_NAMED_HELLO}, monkeypatch)
+    with pytest.raises(
+        RuntimeError, match=r"'hello' is registered twice, by fake_cmds_dup_grp\.alpha and by fake_cmds_dup_grp\.beta"
+    ):
+        build_app(package)

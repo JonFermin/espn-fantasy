@@ -8,11 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from fm.store.models import (
-    Availability,
-    League,
-    NewsSignal,
-    Projection,
-    Proposal,
+    AvailabilityRow,
+    LeagueRow,
+    NewsSignalRow,
+    ProjectionRow,
+    ProposalRow,
     format_timestamp,
     utc_now,
 )
@@ -21,7 +21,7 @@ EDT = timezone(timedelta(hours=-4))
 AS_OF = datetime(2026, 10, 4, 9, 30, 15, 123456, tzinfo=EDT)
 
 
-def league(**overrides: object) -> League:
+def league(**overrides: object) -> LeagueRow:
     fields: dict[str, object] = {
         "key": "nfl",
         "sport": "nfl",
@@ -31,7 +31,7 @@ def league(**overrides: object) -> League:
         "as_of": AS_OF,
     }
     fields.update(overrides)
-    return League.model_validate(fields)
+    return LeagueRow.model_validate(fields)
 
 
 def test_aware_datetimes_are_normalised_to_utc() -> None:
@@ -58,7 +58,7 @@ def test_format_timestamp_is_fixed_width_utc_and_sorts_chronologically() -> None
 
 
 def test_json_mode_dump_matches_the_database_encoding() -> None:
-    proposal = Proposal(
+    proposal = ProposalRow(
         league_id=1, kind="lineup", policy="approve", payload={"moves": [1, 2]}, created_by="t", created_at=AS_OF
     )
     dumped = proposal.model_dump(mode="json")
@@ -69,7 +69,7 @@ def test_json_mode_dump_matches_the_database_encoding() -> None:
 
 
 def test_json_columns_parse_database_text() -> None:
-    proposal = Proposal.model_validate(
+    proposal = ProposalRow.model_validate(
         {
             "id": 7,
             "league_id": 1,
@@ -93,7 +93,7 @@ def test_json_columns_parse_database_text() -> None:
     assert proposal.payload == {"moves": [1, 2]}
     assert proposal.engine_numbers == {}
     assert proposal.created_at == AS_OF
-    projection = Projection.model_validate(
+    projection = ProjectionRow.model_validate(
         {
             "sport": "nfl",
             "espn_id": 1,
@@ -109,9 +109,9 @@ def test_json_columns_parse_database_text() -> None:
 
 def test_probabilities_are_bounded() -> None:
     with pytest.raises(ValidationError):
-        Availability(sport="nfl", espn_id=1, season=2026, scoring_period_id=4, p_active=1.2, as_of=AS_OF)
+        AvailabilityRow(sport="nfl", espn_id=1, season=2026, scoring_period_id=4, p_active=1.2, as_of=AS_OF)
     with pytest.raises(ValidationError):
-        NewsSignal(
+        NewsSignalRow(
             news_item_id=1,
             sport="nfl",
             espn_id=1,
@@ -135,9 +135,9 @@ def test_literal_columns_are_checked() -> None:
         "created_at": AS_OF,
     }
     with pytest.raises(ValidationError):
-        Proposal.model_validate({**proposal, "policy": "maybe"})
+        ProposalRow.model_validate({**proposal, "policy": "maybe"})
     with pytest.raises(ValidationError):
-        Proposal.model_validate({**proposal, "status": "done"})
+        ProposalRow.model_validate({**proposal, "status": "done"})
 
 
 def test_rows_are_frozen_and_reject_unknown_fields() -> None:
