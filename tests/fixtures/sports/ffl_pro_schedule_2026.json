@@ -1,0 +1,134 @@
+{
+ "display": true,
+ "settings": {
+  "proTeams": [
+   {"abbrev": "FA", "byeWeek": 0, "id": 0, "location": "", "name": "FA", "universeId": 0, "proGamesByScoringPeriod": {}},
+   {"abbrev": "ATL", "byeWeek": 11, "id": 1, "location": "Atlanta", "name": "Falcons", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 1, "date": 1791245700000, "homeProTeamId": 18, "id": 401872979, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}],
+     "5": [{"awayProTeamId": 33, "date": 1791764400000, "homeProTeamId": 1, "id": 401872993, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "BUF", "byeWeek": 7, "id": 2, "location": "Buffalo", "name": "Bills", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 17, "date": 1791133200000, "homeProTeamId": 2, "id": 401872971, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 2, "date": 1791850500000, "homeProTeamId": 14, "id": 401872994, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "CHI", "byeWeek": 10, "id": 3, "location": "Chicago", "name": "Bears", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 20, "date": 1791133200000, "homeProTeamId": 3, "id": 401872972, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 3, "date": 1791738000000, "homeProTeamId": 9, "id": 401872990, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "CIN", "byeWeek": 6, "id": 4, "location": "Cincinnati", "name": "Bengals", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 30, "date": 1791133200000, "homeProTeamId": 4, "id": 401872969, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 4, "date": 1791738000000, "homeProTeamId": 15, "id": 401872982, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "CLE", "byeWeek": 11, "id": 5, "location": "Cleveland", "name": "Browns", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 23, "date": 1790900100000, "homeProTeamId": 5, "id": 401872964, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 5, "date": 1791738000000, "homeProTeamId": 20, "id": 401872983, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "DAL", "byeWeek": 14, "id": 6, "location": "Dallas", "name": "Cowboys", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 6, "date": 1791133200000, "homeProTeamId": 34, "id": 401872967, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 27, "date": 1791504900000, "homeProTeamId": 6, "id": 401872980, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "DEN", "byeWeek": 10, "id": 7, "location": "Denver", "name": "Broncos", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 7, "date": 1791145500000, "homeProTeamId": 25, "id": 401872975, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 7, "date": 1791749100000, "homeProTeamId": 24, "id": 401872989, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "DET", "byeWeek": 6, "id": 8, "location": "Detroit", "name": "Lions", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 8, "date": 1791159600000, "homeProTeamId": 29, "id": 401872978, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}],
+     "5": [{"awayProTeamId": 8, "date": 1791750300000, "homeProTeamId": 22, "id": 401872991, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "GB", "byeWeek": 11, "id": 9, "location": "Green Bay", "name": "Packers", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 9, "date": 1791133200000, "homeProTeamId": 27, "id": 401872968, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 3, "date": 1791738000000, "homeProTeamId": 9, "id": 401872990, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "TEN", "byeWeek": 9, "id": 10, "location": "Tennessee", "name": "Titans", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 10, "date": 1791133200000, "homeProTeamId": 33, "id": 401872973, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 34, "date": 1791738000000, "homeProTeamId": 10, "id": 401872984, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "IND", "byeWeek": 13, "id": 11, "location": "Indianapolis", "name": "Colts", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 11, "date": 1791120600000, "homeProTeamId": 28, "id": 401872965, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 11, "date": 1791738000000, "homeProTeamId": 23, "id": 401872985, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "KC", "byeWeek": 5, "id": 12, "location": "Kansas City", "name": "Chiefs", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 12, "date": 1791145500000, "homeProTeamId": 13, "id": 401872976, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}]
+    }},
+   {"abbrev": "LV", "byeWeek": 13, "id": 13, "location": "Las Vegas", "name": "Raiders", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 12, "date": 1791145500000, "homeProTeamId": 13, "id": 401872976, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 13, "date": 1791738000000, "homeProTeamId": 17, "id": 401872986, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "LAR", "byeWeek": 11, "id": 14, "location": "Los Angeles", "name": "Rams", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 14, "date": 1791133200000, "homeProTeamId": 21, "id": 401872970, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 2, "date": 1791850500000, "homeProTeamId": 14, "id": 401872994, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "MIA", "byeWeek": 6, "id": 15, "location": "Miami", "name": "Dolphins", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 15, "date": 1791144300000, "homeProTeamId": 16, "id": 401872974, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 4, "date": 1791738000000, "homeProTeamId": 15, "id": 401872982, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "MIN", "byeWeek": 6, "id": 16, "location": "Minnesota", "name": "Vikings", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 15, "date": 1791144300000, "homeProTeamId": 16, "id": 401872974, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 16, "date": 1791738000000, "homeProTeamId": 18, "id": 401872987, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "NE", "byeWeek": 11, "id": 17, "location": "New England", "name": "Patriots", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 17, "date": 1791133200000, "homeProTeamId": 2, "id": 401872971, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 13, "date": 1791738000000, "homeProTeamId": 17, "id": 401872986, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "NO", "byeWeek": 8, "id": 18, "location": "New Orleans", "name": "Saints", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 1, "date": 1791245700000, "homeProTeamId": 18, "id": 401872979, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}],
+     "5": [{"awayProTeamId": 16, "date": 1791738000000, "homeProTeamId": 18, "id": 401872987, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "NYG", "byeWeek": 8, "id": 19, "location": "New York", "name": "Giants", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 22, "date": 1791133200000, "homeProTeamId": 19, "id": 401872966, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 19, "date": 1791738000000, "homeProTeamId": 28, "id": 401872988, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "NYJ", "byeWeek": 13, "id": 20, "location": "New York", "name": "Jets", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 20, "date": 1791133200000, "homeProTeamId": 3, "id": 401872972, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 5, "date": 1791738000000, "homeProTeamId": 20, "id": 401872983, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "PHI", "byeWeek": 10, "id": 21, "location": "Philadelphia", "name": "Eagles", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 14, "date": 1791133200000, "homeProTeamId": 21, "id": 401872970, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 21, "date": 1791725400000, "homeProTeamId": 30, "id": 401872981, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "ARI", "byeWeek": 14, "id": 22, "location": "Arizona", "name": "Cardinals", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 22, "date": 1791133200000, "homeProTeamId": 19, "id": 401872966, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 8, "date": 1791750300000, "homeProTeamId": 22, "id": 401872991, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "PIT", "byeWeek": 9, "id": 23, "location": "Pittsburgh", "name": "Steelers", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 23, "date": 1790900100000, "homeProTeamId": 5, "id": 401872964, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 11, "date": 1791738000000, "homeProTeamId": 23, "id": 401872985, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "LAC", "byeWeek": 7, "id": 24, "location": "Los Angeles", "name": "Chargers", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 24, "date": 1791145500000, "homeProTeamId": 26, "id": 401872977, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 7, "date": 1791749100000, "homeProTeamId": 24, "id": 401872989, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "SF", "byeWeek": 8, "id": 25, "location": "San Francisco", "name": "49ers", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 7, "date": 1791145500000, "homeProTeamId": 25, "id": 401872975, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 25, "date": 1791750300000, "homeProTeamId": 26, "id": 401872992, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "SEA", "byeWeek": 11, "id": 26, "location": "Seattle", "name": "Seahawks", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 24, "date": 1791145500000, "homeProTeamId": 26, "id": 401872977, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 25, "date": 1791750300000, "homeProTeamId": 26, "id": 401872992, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "TB", "byeWeek": 10, "id": 27, "location": "Tampa Bay", "name": "Buccaneers", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 9, "date": 1791133200000, "homeProTeamId": 27, "id": 401872968, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 27, "date": 1791504900000, "homeProTeamId": 6, "id": 401872980, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "WSH", "byeWeek": 7, "id": 28, "location": "Washington", "name": "Commanders", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 11, "date": 1791120600000, "homeProTeamId": 28, "id": 401872965, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 19, "date": 1791738000000, "homeProTeamId": 28, "id": 401872988, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "CAR", "byeWeek": 5, "id": 29, "location": "Carolina", "name": "Panthers", "universeId": 2, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 8, "date": 1791159600000, "homeProTeamId": 29, "id": 401872978, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "JAX", "byeWeek": 7, "id": 30, "location": "Jacksonville", "name": "Jaguars", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 30, "date": 1791133200000, "homeProTeamId": 4, "id": 401872969, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 21, "date": 1791725400000, "homeProTeamId": 30, "id": 401872981, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "BAL", "byeWeek": 13, "id": 33, "location": "Baltimore", "name": "Ravens", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 10, "date": 1791133200000, "homeProTeamId": 33, "id": 401872973, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 33, "date": 1791764400000, "homeProTeamId": 1, "id": 401872993, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }},
+   {"abbrev": "HOU", "byeWeek": 8, "id": 34, "location": "Houston", "name": "Texans", "universeId": 1, "proGamesByScoringPeriod": {
+     "4": [{"awayProTeamId": 6, "date": 1791133200000, "homeProTeamId": 34, "id": 401872967, "scoringPeriodId": 4, "startTimeTBD": false, "statsOfficial": true, "validForLocking": true}],
+     "5": [{"awayProTeamId": 34, "date": 1791738000000, "homeProTeamId": 10, "id": 401872984, "scoringPeriodId": 5, "startTimeTBD": false, "statsOfficial": false, "validForLocking": true}]
+    }}
+  ]
+ }
+}
