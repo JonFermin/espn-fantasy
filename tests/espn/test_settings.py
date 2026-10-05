@@ -250,6 +250,43 @@ def test_fba_lineup_slots(fba_points: LeagueSettings) -> None:
     assert fba_points.lineup_lock_type is LockType.INDIVIDUAL_GAME
 
 
+def _fba_with_matchup_limit(value: Any, *, per_period: bool) -> LeagueSettings:
+    raw = _view(FBA_POINTS)
+    acq = raw["settings"]["acquisitionSettings"]
+    acq["matchupAcquisitionLimit"] = value
+    acq["matchupLimitPerScoringPeriod"] = per_period
+    return parse_league_settings(raw)
+
+
+def test_per_scoring_period_matchup_limit_keeps_the_fractional_rate() -> None:
+    # A real NBA league's "3 adds per weekly matchup" arrives as 3/7 per day; truncating it to int gave 0.
+    acq = _fba_with_matchup_limit(0.42857142857142855, per_period=True).acquisition
+    assert acq.matchup_limit_per_scoring_period
+    assert acq.matchup_limit is None
+    assert acq.matchup_limit_rate == pytest.approx(3 / 7)
+    assert acq.matchup_limit_for(7) == 3
+    assert acq.matchup_limit_for(14) == 6
+    assert acq.matchup_limit_for(13) == 5
+
+
+@pytest.mark.parametrize("value", [-1, -1.0, None])
+def test_per_scoring_period_matchup_limit_unlimited(value: Any) -> None:
+    acq = _fba_with_matchup_limit(value, per_period=True).acquisition
+    assert acq.matchup_limit_rate is None and acq.matchup_limit is None
+    assert acq.matchup_limit_for(7) is None
+
+
+def test_per_scoring_period_matchup_limit_rejects_non_numbers() -> None:
+    with pytest.raises(SettingsParseError, match="matchupAcquisitionLimit"):
+        _fba_with_matchup_limit("three", per_period=True)
+
+
+def test_fixed_matchup_limit_ignores_matchup_length(fba_points: LeagueSettings) -> None:
+    acq = fba_points.acquisition
+    assert acq.matchup_limit_rate is None
+    assert acq.matchup_limit_for(7) == acq.matchup_limit_for(14) == 4
+
+
 def test_fba_acquisition_limits_without_faab(fba_points: LeagueSettings) -> None:
     acq = fba_points.acquisition
     assert acq.type is AcquisitionType.WAIVERS_TRADITIONAL

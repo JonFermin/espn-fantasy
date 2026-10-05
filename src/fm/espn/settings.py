@@ -23,6 +23,7 @@ is an hour of the day in US Eastern time, as ESPN configures it; turning it into
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -141,13 +142,21 @@ class AcquisitionSettings(BaseModel):
     budget: int | None  # FAAB dollars per season; None when the league does not use FAAB
     minimum_bid: int
     season_limit: int | None  # acquisitionLimit
-    matchup_limit: int | None  # matchupAcquisitionLimit (NBA streaming cap)
+    matchup_limit: int | None  # matchupAcquisitionLimit as a fixed per-matchup cap; None when unlimited or per-period
     matchup_limit_per_scoring_period: bool
     waiver_hours: int | None  # how long a dropped player sits on waivers
     waiver_process_days: tuple[str, ...]  # e.g. ("WEDNESDAY",)
     waiver_process_hour: int | None  # hour of day, US Eastern
     waiver_order_reset: bool | None
     transaction_locking_enabled: bool | None
+    # With matchupLimitPerScoringPeriod, ESPN sends a per-period rate (NBA: 3 per weekly matchup arrives as 3/7).
+    matchup_limit_rate: float | None = None
+
+    def matchup_limit_for(self, scoring_periods: int) -> int | None:
+        """Acquisitions allowed in a matchup spanning ``scoring_periods`` scoring periods; ``None`` means unlimited."""
+        if self.matchup_limit_rate is not None:
+            return math.floor(round(self.matchup_limit_rate * scoring_periods, 6))
+        return self.matchup_limit
 
 
 class TradeSettings(BaseModel):
@@ -471,6 +480,7 @@ def _parse_slot_stat_limits(raw: Any) -> dict[int, dict[int, int]]:
 def _parse_acquisition(raw: Mapping[str, Any]) -> AcquisitionSettings:
     type_raw = _optional_str(raw.get("acquisitionType"))
     uses_faab = bool(raw.get("isUsingAcquisitionBudget", False))
+    per_period = bool(raw.get("matchupLimitPerScoringPeriod", False))
     return AcquisitionSettings(
         type=AcquisitionType(type_raw) if type_raw else AcquisitionType.UNKNOWN,
         type_raw=type_raw,
@@ -478,8 +488,9 @@ def _parse_acquisition(raw: Mapping[str, Any]) -> AcquisitionSettings:
         budget=_optional_int(raw.get("acquisitionBudget")) if uses_faab else None,
         minimum_bid=_optional_int(raw.get("minimumBid")) or 0,
         season_limit=_limit(raw.get("acquisitionLimit")),
-        matchup_limit=_limit(raw.get("matchupAcquisitionLimit")),
-        matchup_limit_per_scoring_period=bool(raw.get("matchupLimitPerScoringPeriod", False)),
+        matchup_limit=None if per_period else _limit(raw.get("matchupAcquisitionLimit")),
+        matchup_limit_per_scoring_period=per_period,
+        matchup_limit_rate=_rate(raw.get("matchupAcquisitionLimit")) if per_period else None,
         waiver_hours=_optional_int(raw.get("waiverHours")),
         waiver_process_days=tuple(str(day).upper() for day in raw.get("waiverProcessDays") or ()),
         waiver_process_hour=_optional_int(raw.get("waiverProcessHour")),
@@ -565,3 +576,14 @@ def _limit(value: Any) -> int | None:
     """ESPN encodes "unlimited" as a negative number; return ``None`` for it and for a missing value."""
     limit = _optional_int(value)
     return None if limit is None or limit < 0 else limit
+
+
+def _rate(value: Any) -> float | None:
+    """A per-scoring-period acquisition rate, kept fractional; negative or missing means unlimited."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        rate = float(value)
+    except (TypeError, ValueError) as exc:
+        raise SettingsParseError(f"acquisitionSettings.matchupAcquisitionLimit is not a number: {value!r}") from exc
+    return None if rate < 0 else rate
