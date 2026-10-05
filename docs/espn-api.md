@@ -1,0 +1,339 @@
+# ESPN fantasy API: what the real leagues show
+
+> ROADMAP #14 spike, captured 2026-10-05 from the two configured leagues: NFL (`ffl`, season 2026, week 4, Monday)
+> and NBA (`fba`, season 2027, preseason, scoring period 1). Read views come from real responses, scrubbed into
+> `tests/fixtures/espn/real/` (`index.json` names the view and request behind each file). Write payloads come from
+> ESPN's own web client (the `kona` build `35f16ade75be-1.504`, shared `commons/main` bundle), whose transaction code
+> is saved verbatim in `tests/fixtures/espn/real/webclient.json` and pinned by the fixture tests, plus the transactions
+> both leagues have on record. **The guarded route-and-abort capture of the UI flows is still pending** (section 4): it
+> needs a web sign-in by hand. `scripts/capture/README.md` explains how to reproduce all of it.
+>
+> Claims marked *inferred* rest on reasoning or on less data than a fixture; everything else cites a fixture.
+
+## 1. Resolved unknowns
+
+| # | Question (DESIGN §6.1/§6.2/§6.3/§9.3, ROADMAP #9) | Answer from real data | Evidence |
+|---|---|---|---|
+| 1 | NBA matchup → days | `scheduleSettings.matchupPeriods` lists period ids of the type named by `scheduleSettings.periodTypeId` (2 = weeks in this league). Weeks come from the web client's calendar, not from any read view. Matchup 1 = days 1–6 (Tue Oct 20 – Sun Oct 25), matchups 2–17 = 7-day Monday–Sunday weeks, matchup 18 = days 119–132 (14 days, the All-Star break), matchups 19–21 (playoffs) = days 133–153. Total 6 + 16×7 + 14 + 3×7 = 153 = `status.finalScoringPeriod`. **DESIGN §9.3's "days 1–13" inference is wrong.** | `fba/calendar.json`, `fba/mSettings.json`; every one of 1,200 NBA games starts inside its day's window |
+| 2 | Pending-offer view | Trade offers come from `mTransactions2` (types `TRADE_PROPOSAL` …), not `mPendingTransactions`. `mPendingTransactions` holds the viewing team's own pending moves (the web client reorders waiver claims by `subOrder` and edits their `bidAmount` through it); it listed none of the NBA league's offers. **An expired offer keeps `status: PENDING` and `isPending: true`, and so does the CANCEL record of its expiry:** ESPN records the expiry as a separate `TRADE_PROPOSAL` with `status: CANCELED`, `executionType: CANCEL`, `isPending: true` and `relatedTransactionId` = the offer. Offers expired 48 h after `proposedDate`. "Open" therefore means PENDING, `expirationDate` in the future, and no CANCEL record pointing at it: six records said pending, none was open. | `fba/mTransactions2_waiver_trade.json` (three expired offers, three CANCEL records; `test_no_offer_was_open_although_six_records_say_pending`), `*/mPendingTransactions.json` |
+| 3 | `mPendingTransactions` list key | `pendingTransactions` (also what the web client reads). With nothing pending, `ffl` sent `"pendingTransactions": []` and `fba` sent no key at all. | `ffl/` and `fba/mPendingTransactions.json` |
+| 4 | Lineup-lock key and values | `rosterSettings.lineupLocktimeType` = `INDIVIDUAL_GAME` in both leagues. `rosterSettings.rosterLocktimeType` = `INDIVIDUAL_GAME` (`ffl`) and `FIRSTGAME_SCORINGPERIOD` (`fba`): NBA adds, drops and trades lock at the day's first tip while lineups lock per game. No league carries `FIRST_GAME_OF_WEEK`. | `*/mSettings.json` |
+| 5 | `espn_s2` expiry | The cookie was set at the sign-in (2026-10-05 00:50 UTC) and expires 2027-11-09: exactly 400 days, which is Chromium's cap on cookie lifetime, so ESPN asks for at least that. It is not `HttpOnly`. *Inferred:* page visits and API reads do not refresh it; that rests on about 20 hours of observation (no `Set-Cookie` on any API response, the expiry unchanged), not on a renewal cycle. Revocation (logout, password reset) still shows up as a 401. The web UI's OneID login is separate: its `ESPN-ONESITE.WEB-PROD.api` cookie lasts 1 day, and this profile holds no OneID token in any cookie or storage key (section 4). | profile cookie store, read-only (names, flags and expiry dates, never values); `reads.json` request log |
+| 6 | 429 behavior | None seen in 104 scripted reads at ≥ 1.0 s spacing (two read passes of 42, a snapshot and two verifications of 6 each, 2 smoke reads) or in 15 guarded page loads. Everything answered 200 except the intentional `top0` probes (400). ESPN sends no `RateLimit`/`Retry-After` headers. The threshold stays unmeasured: the spike's protocol forbade faster probing. Keep `DEFAULT_MIN_INTERVAL_S` (0.25 s): the web app itself fires about four league reads at once on every page load, a sync is gentler than that, and the client already honors `Retry-After`. | `reads.json` (`min_start_gap_s: 1.0`, statuses) |
+| 7 | `lineupSlotStatLimits` (NBA games-played caps) | `{}` in both leagues: no caps, so the shape of a real cap is still unseen. The parser's bare-integer reading stays an assumption. | `*/mSettings.json` |
+| 8 | `acquisitionSettings.waiverHours` | Present, `24` in both leagues. `waiverProcessHour` is **not** an ET hour: it is 11 (`ffl`) and 8 (`fba`), but claims processed at 03:47 ET (NFL, Wed Sep 30) and 03:50 ET (NBA, Mon Oct 5). Use `status.waiverLastExecutionDate` and `waiverProcessStatus` (run time → count) for timing. | `*/mSettings.json`, `*/mTransactions2.json` `processDate` |
+| 9 | `filterStatsForTopScoringPeriodIds` | `value` must be > 0: 0 returns HTTP 400 `FILTER_INVALID_VALUE: Filter: Value is invalid, must be > 0`. `value: N` returns each player's actual lines for the last N scoring periods he played; `additionalValue` adds named entries. | `*/probes.json`, `*/kona_playercard_top2.json` |
+| 10 | Composite stat-entry ids | `{source}{split}{season}` for season lines (`002026`, `102026`) and `{source}{split}{season}{period}` for period **projections** (`1120264`). **Actual single-period lines are keyed by the pro game id** with the game's "Game" split (#11): `01` + game id in `ffl` (`01401872969`), `05` + game id in `fba` (`05401811041`). In `ffl`, asking for `0120264` (week 4, partly played) returned nothing while week 4's game-keyed lines came back. In `fba` the fixtures alone leave it *inferred*: their `0120271` probe asked for a day not yet played. A one-off run of the new `played_period` probe (2026-10-05, not in the fixtures yet; the next `capture.py reads` records it in `probes.json`) asked for a played day, 2026 day 174, as `012026174` and `052026174`: neither came back, only `05401811043`. Match entries on `seasonId`/`scoringPeriodId`/`statSourceId`/`statSplitTypeId`, never on `id`. `ffl` also sends `122026`: projected, split 2, which ESPN labels "Rest Of Season". Its totals do not fit that label: for the first free agent `122026` covers 16 games and `102026` 12 (`appliedTotal / appliedAverage`), so which line is rest-of-season is unsettled. | `*/kona_playercard_stat_entries.json`, `*/probes.json`, `ffl/kona_player_info.json` (first player: every stat line), `webclient.json` |
+| 11 | `statSplitTypeId` | ESPN's web client labels the splits per game (`webclient.json` `statSettings`): basketball 0 Season, 1/2/3 Last 7/15/30 Days, 4 Average, **5 Game**; football 0 Season, **1 Game**, 2 Rest Of Season. The "Game" split (`gameSplit: true`) is the single-period actual line: `scoringPeriodId` = the week in `ffl`, the day in `fba`. The real `fba` window entries (`012027`, `022027`, `032027`, `scoringPeriodId: 0`) are preseason and empty, so the labels, not the data, carry their meaning. `Player.stat_entry` matches split 1 for a period: right for `ffl`, but in `fba` it finds nothing; a daily line needs split 5. | `webclient.json`, `fba/probes.json` |
+| 12 | NBA daily projections | ESPN publishes none: `kona_game_state` says `hasGameStatProjections: false, showSeasonProjections: true` for `fba` (`true/false` for `ffl`), and `1120271` returns nothing. A day's projection is the season projection's per-game rate. | `*/kona_game_state.json` |
+| 13 | `kona_player_info` without `filterSlotIds` | Fine: omitted and `[]` returned the same 50 players in the same order, in both games. | `*/probes.json` |
+| 14 | `fba` writes (DESIGN §6.3: "unverified") | One code path serves every game: the transaction model, serializer, item builders and the service that picks a type per flow live in the shared bundle with no per-game branch, and the request path takes the game from `config.uri_nextgen_api`, so only `games/{ffl\|fba}` in the URL differs. Real NBA records match: `ROSTER` for day 1, `FUTURE_ROSTER` for days 2–3. Not yet seen: a UI capture of either game (section 4). | section 4; `webclient.json`; `fba/mTransactions2.json` |
+| 15 | Re-reads right after a write | Not cached: every league-scoped view answered `cache-control: must-revalidate` and `x-cache: Miss from cloudfront`. Only the season-level views (`proTeamSchedules_wl`, `kona_game_state`) are cached, `max-age=300` (hits up to 297 s old). | `reads.json` request log |
+
+DESIGN §9.3's other "facts from the real leagues" hold: NBA scoring periods are days, day 1 is Tue Oct 20 2026 and day
+153 is Sun Mar 21 2027, NBA games in `proTeamSchedules_wl` are keyed by day, `matchupAcquisitionLimit` arrives as
+`0.42857142857142855` (3/7) with `matchupLimitPerScoringPeriod: true`, both leagues are H2H points with traditional
+waivers and no FAAB, and the NFL league seeds its 4-team playoff by `TOTAL_POINTS_SCORED`. How ESPN rounds the NBA
+acquisition limit for the 6-day and 14-day matchups (2.57 and 6 adds) is not visible until matchup 1 is played.
+
+## 2. Hosts, auth and transport
+
+- **Reads:** `GET https://lm-api-reads.fantasy.espn.com/apis/v3/games/{ffl|fba}/seasons/{season}/segments/0/leagues/{id}?view=…`
+  (repeat `view=` for several). Season-level data drops `/segments/0/leagues/{id}`. Filters travel in the
+  `X-Fantasy-Filter` header as JSON.
+- **Writes:** `https://lm-api-writes.fantasy.espn.com/apis/v3/…`, the web client's `HOST_TYPE_FANTASY_WRITE_API`
+  (section 4).
+- **Auth:** the `espn_s2` and `SWID` cookies, for reads and writes alike. The web client sends requests with
+  `withCredentials: true` and no bearer token, so the API needs nothing from the OneID web login.
+- **Headers the web client adds:** `Accept: application/json`, `X-Fantasy-Source: kona`,
+  `X-Fantasy-Platform: espn-fantasy-web`, a `platformVersion=<build sha>` query parameter, `Content-Type:
+  application/json` on writes, and a 50 s timeout. Our reads send only `Accept` (and our own `User-Agent`) and work.
+- **Response headers worth reading:** `x-fantasy-filter-player-count`, `x-fantasy-filter-transaction-count` and
+  `x-fantasy-filter-schedule-count` give the total behind a filtered page, which is what paging needs: 889 (`ffl`) and
+  964 (`fba`) free agents and waiver players stood behind a 50-player `kona_player_info` page. Unfiltered views report
+  the whole player universe (1,051 and 1,095). `x-fantasy-server-time` is the server clock in epoch ms.
+  `x-fantasy-role` was `NONE` on every read.
+- **CDN:** CloudFront (`via`, `x-amz-cf-pop`). League views are never served from cache; season views are cached for
+  5 minutes. Headers arrived in 18–110 ms.
+- **Errors:** `{"details": [{"type": "…", "message": "…", "metaData": {"teamid": …}, "resolution": "…"}]}`, which
+  `fm.espn.client._error_detail` already reads.
+
+## 3. Read views
+
+Each subsection covers both games. Fixture paths are under `tests/fixtures/espn/real/`; the test command loads every
+one (`tests/fixtures/espn/real/test_real_fixtures.py`).
+
+### `mSettings` → `fm.espn.settings.LeagueSettings`
+
+- `settings.scoringSettings`: `H2H_POINTS` in both leagues; 46 scoring items (`ffl`), 11 (`fba`, ESPN's default NBA
+  points). `matchupTieRule` and `playoffMatchupTieRule` are `NONE`.
+- `settings.rosterSettings`: `lineupSlotCounts` (`ffl`: QB 1, RB 2, WR 2, TE 1, FLEX 1, D/ST 1, K 1, BE 7, IR 1;
+  `fba`: PG, SG, SF, PF, C, G, F 1 each, UTIL 3, BE 3, IR 3), `positionLimits` (−1 = none), the two lock types (§1
+  #4), `lineupSlotStatLimits: {}`, `isBenchUnlimited: true`, `isUsingUndroppableList: true`, `moveLimit: -1`.
+- `settings.acquisitionSettings`: `WAIVERS_TRADITIONAL`, `isUsingAcquisitionBudget: false` (budget 100 unused),
+  `waiverHours: 24`, `waiverProcessDays` (`ffl`: every day but Tuesday; `fba`: Sunday), `waiverProcessHour` (§1 #8),
+  `matchupAcquisitionLimit` (`ffl`: −1; `fba`: 3/7 per day), `transactionLockingEnabled: false`.
+- `settings.scheduleSettings`: `periodTypeId` (1 in `ffl`, 2 in `fba`), `matchupPeriodCount` (13 and 18 regular-season
+  matchups), `matchupPeriods`, `playoffTeamCount` (4 and 6), `playoffMatchupPeriodLength` (2 weeks and 1 week),
+  `playoffSeedingRule` (`TOTAL_POINTS_SCORED`, `H2H_RECORD`). NFL playoffs: matchup 14 = weeks 14–15, 15 = weeks 16–17.
+- `settings.tradeSettings`: deadline Wed Dec 2 2026 noon ET (`ffl`) and Fri Feb 26 2027 noon ET (`fba`),
+  `revisionHours: 24`, `vetoVotesRequired` 4 and 3, `max: -1`.
+- `status`: `currentMatchupPeriod`, `latestScoringPeriod`, `firstScoringPeriod`, `finalScoringPeriod` (17 and 153),
+  `transactionScoringPeriod`, `waiverLastExecutionDate`, `waiverProcessStatus`.
+- Fixtures: `ffl/mSettings.json`, `fba/mSettings.json` (whole responses). They are meant to replace the hand-built
+  `tests/fixtures/espn/*_settings_*.json` stand-ins, and `LockType.FIRST_GAME_OF_WEEK` (no league carries it) is due to
+  be dropped; both changes belong to `src/fm/espn/settings.py` and `tests/espn/`, outside this spike, and are left as a
+  carry-over.
+
+### `mTeam` + `mStandings` → `TeamsView`
+
+- `teams[]`: `id`, `name`, `abbrev`, `logo`, `owners`/`primaryOwner` (SWIDs), `record` (overall/home/away/division),
+  `points`, `playoffSeed`, `waiverRank`, `transactionCounter` (acquisitions, drops, `matchupAcquisitionTotals` by
+  matchup period), `valuesByStat`, `tradeBlock`, `isTransactionLocked`.
+- `members[]`: `id` (SWID), `displayName`, `firstName`, `lastName`, `notificationSettings`. The response also carries
+  the whole season `schedule` (home/away team ids per matchup period).
+- **Team ids are not contiguous:** the NBA league's ten teams have ids 1–16 with gaps (the fixture keeps that shape).
+- Fixtures: `*/mTeam+mStandings.json` (notification settings emptied, schedule cut to matchup 1).
+
+### `mRoster` → `RostersView`
+
+- `teams[].roster.entries[]`: `playerId`, `lineupSlotId`, `acquisitionType`, `acquisitionDate`, `injuryStatus`,
+  `status`, `pendingTransactionIds`, and `playerPoolEntry` with `lineupLocked`/`rosterLocked`/`tradeLocked`, `onTeamId`,
+  `ratings` and the full `player` (eligibility, injury, ownership, stat lines). `roster.tradeReservedEntries` lists
+  players held by a pending trade.
+- `scoringPeriodId` picks the period; the NFL league's untrimmed response is 2.5 MB (every player's season, period and
+  per-game lines), so sync code should not request it per period without need.
+- Fixtures: `*/mRoster.json` (our whole roster, 3 opponent players, one stat line each).
+
+### `mMatchup` → `MatchupsView`
+
+- `schedule[]`: `id`, `matchupPeriodId`, `winner`, `home`/`away` with `teamId`, `totalPoints`, `pointsByScoringPeriod`,
+  `cumulativeScore` (`scoreByStat` is filled even in points leagues). Current-period entries also carry
+  `rosterForCurrentScoringPeriod`/`rosterForMatchupPeriod`, and the response includes `teams` with rosters: 2.3 MB for
+  the NFL league.
+- Playoff matchups are not scheduled yet (the last scheduled period is 13 in `ffl`).
+- Fixtures: `*/mMatchup.json` (our matchups in the first, current and last periods plus one other).
+
+### `mMatchupScore` + `mScoreboard` → `MatchupsView`
+
+- One matchup period (`filterMatchupPeriodIds`; the web app uses `filterCurrentMatchupPeriod: true`) with live and
+  projected totals (`totalPointsLive`, `totalProjectedPointsLive`, `winProbability`) and each side's lineups.
+- Fixtures: `*/mMatchupScore+mScoreboard.json` (our matchup; our lineup whole, 4 opponent players).
+
+### `kona_player_info` → `PlayersView` (free agents and waivers)
+
+- `players[]` are pool entries: `status` `FREEAGENT`/`WAIVERS`, `waiverProcessDate`, `onTeamId: 0`, `draftAuctionValue`,
+  `keeperValue`, `droppedByEliminatedTeam`, `ratings` and `player`.
+- `x-fantasy-filter-player-count` gives the pool size: 889 free agents and waiver players in `ffl`, 964 in `fba`. On
+  that Monday 496 of the NFL ones were on waivers (a player whose game has started stays on waivers until the next
+  run); the NBA league had nobody on waivers (`{"players": []}`). `filterSlotIds` may be omitted (§1 #13).
+- Fixtures: `*/kona_player_info.json` (4 players; the first keeps every stat line, the others 3),
+  `*/kona_player_info_waivers.json`.
+
+### `kona_playercard` → `PlayersView` (player detail and stat lines)
+
+- `filterIds` + `filterStatsForTopScoringPeriodIds` (`value` > 0, plus `additionalValue` ids). Stat ids and splits:
+  §1 #9–#12.
+- Fixtures: `*/kona_playercard.json`, `*/kona_playercard_stat_entries.json` and `*/kona_playercard_top2.json` (one card
+  with every entry; the probes behind §1 #9–#11).
+
+### `mTransactions2` → `TransactionsView`
+
+- `filterType` picks types. Records carry `id`, `type`, `status`, `executionType` (`EXECUTE` for user moves, `PROCESS`
+  for waiver runs, `CANCEL`), `teamId`, `memberId`, `scoringPeriodId`, `bidAmount` (0 without FAAB),
+  `proposedDate`/`processDate`/`expirationDate`, `relatedTransactionId`, `isPending`, `isActingAsTeamOwner`,
+  `isLeagueManager`, `rating`, `teamActions` (trades: `{"<teamId>": "ACCEPTED"}`) and `items[]` with `type`,
+  `playerId`, `fromTeamId`/`toTeamId` (0 = free agency) and `fromLineupSlotId`/`toLineupSlotId` (−1 = none).
+- On record: `ROSTER` (lineup swaps list both sides), `FUTURE_ROSTER` (NBA moves for later days), `FREEAGENT` (`ffl`:
+  ADD into the bench slot plus DROP from it), `WAIVER` `EXECUTED`/`FAILED_ROSTERLIMIT`/`FAILED_PLAYERALREADYDROPPED`
+  (`executionType: PROCESS`), `TRADE_PROPOSAL` `PENDING`/`CANCELED`, `DRAFT` (130 picks in `fba`, scoring period 1).
+- Fixtures: `*/mTransactions2.json` (every type, at most 3 per type/status), `*/mTransactions2_waiver_trade.json`.
+
+### `mPendingTransactions` → `TransactionsView`
+
+- §1 #2 and #3. The web app requests it on the team page next to `mRoster`.
+- Fixtures: `*/mPendingTransactions.json`.
+
+### `proTeamSchedules_wl` (season level) → `ProSchedule`
+
+- `settings.proTeams[]` with `proGamesByScoringPeriod` (each game listed under both teams), byes for `ffl`. NBA games
+  are keyed by day: 1,200 games over days 1–174 (games on 156 days). Each game's start falls inside its period's window
+  in the web client's calendar.
+- Fixtures: `*/proTeamSchedules_wl.json` (the current period only; `tests/fixtures/sports/` keeps the NFL weeks 4–5).
+
+### `kona_game_state` (season level)
+
+- `currentScoringPeriod.id` and `settings` (`statSettings`, `firstMatchupOverrides: {}`, `proScheduleAvailable`,
+  `teamAutoPilotSettings`). The web app loads it on every page. Fixtures: `*/kona_game_state.json`.
+
+### `mStatus`
+
+- The `status` block alone, with `creationInfo` (the creating member's SWID, scrubbed) and `previousSeasons`.
+  Fixtures: `*/mStatus.json`.
+
+### Not a view: the season calendar
+
+- The web client ships each game's calendar as constants: `scoringPeriods[]` (`id`, `startDate`, `endDate`,
+  `preSeason`, `postSeason`) and `periodTypes[]` (0 season-long, 1 daily, 2 weekly; `periods[]` with
+  `scoringPeriodStart`/`scoringPeriodEnd`). Periods run 3 a.m. to 3 a.m. ET; period 1's stored start is a preseason
+  placeholder, so the client uses `endDate` minus one period (NFL weeks run Tuesday to Tuesday).
+- `scripts/capture/capture.py webclient` re-extracts it each season and checks it against the pro schedule.
+  Fixtures: `*/calendar.json` (the league's own period type plus the season-long one). The same bundle labels each
+  game's stat splits (§1 #11) and holds the write code (section 4), both in `webclient.json`.
+
+### What the web app itself reads
+
+| Page | Requests |
+|---|---|
+| Team | `kona_game_state`; one league read with `rosterForTeamId` and `mDraftDetail`, `mLiveScoring`, `mMatchupScore`, `mPendingTransactions`, `mPositionalRatings`, `mRoster`, `mSettings`, `mTeam`, `modular`, `mNav`; `proTeamSchedules_wl`; `GET /seasons/{season}/players?view=players_wl` with `{"filterActive": {"value": true}}` |
+| Scoreboard | `modular`, `mNav`, `mMatchupScore`, `mScoreboard`, `mSettings`, `mTopPerformers`, `mTeam` with `{"schedule": {"filterCurrentMatchupPeriod": {"value": true}}}` |
+| Schedule | `mMatchupScore`, `mStatus`, `mSettings`, `mTeam`, `modular`, `mNav` |
+
+## 4. Write flows
+
+All writes are `POST https://lm-api-writes.fantasy.espn.com/apis/v3/games/{ffl|fba}/seasons/{season}/segments/0/leagues/{id}/transactions/`
+with the cookies and JSON body below, the same for both games. Everything in this section is read from ESPN's own
+code, saved verbatim in `tests/fixtures/espn/real/webclient.json` (`capture.py webclient` re-extracts it from a new
+build): `model` holds the item builders and the serializer `get()`, `service` the method behind each flow
+(`movePlayers`, `addPlayers`, `dropPlayers`, `proposeTrade`, `acceptTrade`, `declineTrade`, `cancelTrade`,
+`cancelWaiverClaim`), and `saveTransaction`, `post`, `writeHost`, `requestDefaults` and `requestConfig` the request.
+`typeNames` spells out the constants the code reads (`r["N"]` is `"WAIVER"`). Each rule below is pinned by a test in
+`tests/fixtures/espn/real/test_real_fixtures.py` (the "write payloads" section). The body comes from the serializer:
+
+```
+{isLeagueManager, teamId, type}                       always
+memberId                                              the signed-in SWID
+scoringPeriodId                                       the target period, else status.latestScoringPeriod
+executionType                                         "EXECUTE" unless set ("CANCEL" to cancel)
+items                                                 when there are any
+bidAmount (+ relatedTransactionId when set)           type WAIVER only
+expirationDate, comment (+ relatedTransactionId when set)   type TRADE_PROPOSAL
+comment + relatedTransactionId                        TRADE_DECLINE, TRADE_VETO
+relatedTransactionId                                  TRADE_ACCEPT, TRADE_UPHOLD
+isActingAsTeamOwner, skipTransactionCounters          only when isLeagueManager (never for us)
+```
+
+Items: `ADD {playerId, type, toTeamId}`, `DROP {playerId, type, fromTeamId}`, `LINEUP {playerId, type,
+fromLineupSlotId, toLineupSlotId}` (no team ids), `TRADE {playerId, type, fromTeamId, toTeamId}`, FAAB in trades as
+`{acquisitionBudget, fromTeamId, toTeamId, type: "ACQUISITION_BUDGET_TRADE"}`. A decline may carry `{playerId}` items
+without a `type` and draft-pick items. The request adds `Accept: application/json`, `X-Fantasy-Source: kona`,
+`X-Fantasy-Platform: espn-fantasy-web`, `Content-Type: application/json`, a `platformVersion` query parameter and
+`withCredentials: true` (cookies, no bearer token). A failure returns
+`details[{type, message, metaData.teamid, resolution}]`; the client knows `TRAN_ROSTER_LIMIT_EXCEEDED_*`,
+`TRAN_ROSTER_LIMIT_EXCEEDED_TRADE_RESERVED_*`, `TRAN_ROSTER_POSITION_LIMIT_EXCEEDED*` and `TRAN_ROSTER_SLOT_LIMIT_EXCEEDED*`.
+Records come back with statuses such as `FAILED_LINEUPLOCK`, `FAILED_ROSTERLOCK`, `FAILED_ROSTERLIMIT`,
+`FAILED_TRANSACTIONLOCKED`, `FAILED_UNDROPPABLEPLAYER`, `FAILED_MATCHUPACQUISITIONLIMIT`, `FAILED_TRADELOCK`,
+`FAILED_TRADE_RESERVED`, `FAILED_NOTCLEAREDWAIVERS`, `FAILED_INVALIDPLAYERSOURCE` (42 codes in the bundle; the
+calendar fixtures list them in `errorCodes`).
+
+Two other write paths exist: `POST …/teams/{teamId}/pendingTransactions` with `[{id, subOrder}]` reorders our waiver
+claims, and `POST …/teams/{teamId}/pendingTransactions/{id}` with `{bidAmount}` changes a claim's bid.
+
+**Capture status: no UI flow has been driven to its request yet**, so there are no `write_*.json` fixtures. Every
+guarded page load showed "Log in Required": the browser profile holds the API cookies but no OneID web session (no
+OneID token in any cookie or storage key; the OneID SDK logs `Not initialized`), so the UI cannot reach a transaction,
+and this task may not sign in. `fm login` cannot fix that: it clears ESPN's cookies first and closes its window by
+itself as soon as `espn_s2` and `SWID` land. *Inferred:* that early close, or a OneID token that lives only as long as
+the browser, is why this profile has API cookies and no web session.
+
+To finish, Jon runs `capture.py snapshot` and then `capture.py writes` (headed). It opens the first league's team
+page and, when the window closes, verifies every configured league. When the page shows "Log in Required", he signs in
+inside that same window, so the session cannot be lost to a restart. The write guard stays on. *Inferred:* it should
+not get in the way, since the Disney sign-in is served from `registerdisney.go.com` and the guard blocks only ESPN
+hosts; no sign-in was observed. The capture starts once the team page shows the team. He drives a bench swap, a
+free-agent add/drop, a waiver claim and a trade proposal in each league (the other league's pages open in the same
+window), then closes it. `fixtures` writes `tests/fixtures/espn/real/*/write_*.json`, which the fixture test
+validates. If the guard does block the sign-in (`writes` prints every request it aborts), the fallback is
+`capture.py web-login`. Its window stays open until closed, and its guard still aborts every league write. It then
+reports whether the web session survived a browser restart, which a later `writes` run needs.
+
+Every browser session proved the write guard before its first ESPN page and again on it. In every run that reported
+its guard, the guard aborted nothing but its own probes and analytics `POST`s (`go.web.plus.espn.com`, `sw88.espn.com`)
+and saw no leak and no WebSocket. The last `snapshot` and `verify` pair re-read both leagues unchanged. They covered
+the rest of each matchup (NBA days 1–6), our `transactionCounter` and trade block, and every transaction record and
+pending item (new, gone or changed) touching our team.
+
+### `set_lineup`: `ROSTER` / `FUTURE_ROSTER`
+
+- **Payload:** `{isLeagueManager: false, teamId, type: "ROSTER", memberId, scoringPeriodId: <latest>, executionType:
+  "EXECUTE", items: [LINEUP…]}`. A move for a later period is `FUTURE_ROSTER` with that `scoringPeriodId`. A swap lists
+  both players.
+- **NFL:** a period is a week; locks are per game (`INDIVIDUAL_GAME`), so Thursday players lock and Sunday ones can
+  still move. **NBA:** a period is a day; tomorrow's lineup is `FUTURE_ROSTER` with tomorrow's day number. Lineups lock
+  per game (`INDIVIDUAL_GAME`).
+- **Verify:** `mRoster` for that period (not cached).
+- **Mode: API.** Cookie-only auth works for this profile, the payload is fixed by ESPN's code, and real records match
+  it in both games. UI fallback only while the profile has a OneID web session.
+
+### `add_drop`: `FREEAGENT`
+
+- **Payload:** `type: "FREEAGENT"`, items `ADD {playerId, toTeamId: ours}` plus `DROP {playerId, fromTeamId: ours}`
+  when the roster is full; no `bidAmount` (the serializer sends it for `WAIVER` only). A bare drop is a `ROSTER`
+  transaction with a `DROP` item.
+- **NFL:** free agents after waivers clear; a dropped player sits on waivers 24 h (`waiverHours`). **NBA:**
+  `rosterLocktimeType: FIRSTGAME_SCORINGPERIOD`: adds and drops lock at the day's first tip, and the per-matchup
+  limit is `rate × days in the matchup`. Which day an add lands on after the first tip (the client sends
+  `latestScoringPeriod`) is unverified.
+- **Verify:** `mRoster`: roster has `add`, lacks `drop`; `transactionCounter` moved.
+- **Mode: API**, as for lineups.
+
+### `claim_waiver`: `WAIVER`
+
+- **Payload:** `type: "WAIVER"`, items `ADD` (+ `DROP`), `bidAmount` (the FAAB bid; neither league uses FAAB, so 0).
+  **Cancel:** `{type: "WAIVER", executionType: "CANCEL", relatedTransactionId: <claim>}`. **Change a bid:** the
+  `pendingTransactions/{id}` path above.
+- **NFL:** runs on record were at 03:03 and 03:47 ET (Wednesdays) and 03:02 ET (a Monday); process days are every
+  day but Tuesday in this league. **NBA:** one run on record, 03:50 ET on a Monday, although `waiverProcessDays` says
+  Sunday.
+- **Verify:** the claim appears in `mPendingTransactions` (our team) with its bid; after the run, `mTransactions2`
+  shows `EXECUTED` or a `FAILED_*` status, `executionType: PROCESS`.
+- **Mode: API.** Cancelling is documented, not captured.
+
+### `propose_trade`: `TRADE_PROPOSAL`
+
+- **Payload:** `type: "TRADE_PROPOSAL"`, items `TRADE {playerId, fromTeamId, toTeamId}` for both sides, optional
+  `ACQUISITION_BUDGET_TRADE` items, `expirationDate`, `comment`, and `DROP` items when our roster must make room.
+  Real offers expired 48 h after proposal; whether ESPN fills `expirationDate` when it is omitted is unknown, so the
+  executor should send it.
+- **Both games:** players with `tradeLocked` cannot move; `tradeReservedEntries` hold players already in an offer;
+  `settings.tradeSettings.deadlineDate` closes trading; NBA trades lock at the day's first tip like adds.
+- **Verify:** a `TRADE_PROPOSAL` with `status: PENDING` and a future `expirationDate` in `mTransactions2`, with no
+  CANCEL record pointing at it.
+- **Mode: API, approval-only** (CLAUDE.md). Never automatic.
+
+### `respond_trade`: `TRADE_ACCEPT` / `TRADE_DECLINE`
+
+- **Payload:** accept: `{type: "TRADE_ACCEPT", relatedTransactionId: <offer>, teamId: ours}` plus `DROP` items when the
+  roster must make room. Decline: `{type: "TRADE_DECLINE", relatedTransactionId, comment}`.
+- **Status: documented, not captured** (DESIGN §6.3 plus `acceptTrade`/`declineTrade` in the saved code). Real pending
+  offers were never touched and must not be: no capture drives a response to a real offer, guarded or not.
+- **Verify:** the offer's record changes, and `teamActions` gains our team's answer.
+- **Mode: API, approval-only.**
+
+### `cancel`: offer or claim
+
+- **Payload:** offer: `{type: "TRADE_PROPOSAL", executionType: "CANCEL", relatedTransactionId: <offer>}`. Claim:
+  `{type: "WAIVER", executionType: "CANCEL", relatedTransactionId: <claim>}`. ESPN records an offer's expiry in exactly
+  this shape (§1 #2).
+- **Status: documented, not captured** (`cancelTrade`/`cancelWaiverClaim` in the saved code).
+- **Verify:** a CANCEL record pointing at the offer or claim; the claim leaves `mPendingTransactions`.
+- **Mode: API.**
+
+### Decision summary
+
+| Flow | Type | Mode | Payload source | Captured |
+|---|---|---|---|---|
+| `set_lineup` | `ROSTER` / `FUTURE_ROSTER` | API, UI fallback with a web login | saved client code + real records (both games) | pending web sign-in |
+| `add_drop` | `FREEAGENT` (+ `ROSTER` for a bare drop) | API, UI fallback | saved client code + real records (`ffl`) | pending web sign-in |
+| `claim_waiver` | `WAIVER` | API, UI fallback | saved client code + real records (both games) | pending web sign-in |
+| `propose_trade` | `TRADE_PROPOSAL` | API, approval-only | saved client code + real records (`fba`) | pending web sign-in |
+| `respond_trade` | `TRADE_ACCEPT` / `TRADE_DECLINE` | API, approval-only | DESIGN §6.3 + saved client code | documented, not captured |
+| `cancel` | `TRADE_PROPOSAL`/`WAIVER` + `CANCEL` | API | saved client code + real expiry records | documented, not captured |
+
+Until the UI captures exist, a writer's envelopes can be checked against the rules above and against
+`webclient.json`, whose tests pin each rule. Once `write_*.json` exist, those captures are the reference.
+
+API mode wins every flow for the same three reasons: the API needs only the long-lived cookies this profile has, while
+the UI needs a OneID web session it lacks; ESPN's own code fixes the payloads; and API mode has no DOM to drift. The
+UI fallback (and the weekly drill) therefore needs a check that the web login is alive: "Log in Required" on the team
+page means it is not.

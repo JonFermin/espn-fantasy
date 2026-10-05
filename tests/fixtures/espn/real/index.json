@@ -1,0 +1,666 @@
+{
+ "captured_at": "2026-10-05T19:33:06.282810+00:00",
+ "files": {
+  "fba/calendar.json": {
+   "bytes": 20059,
+   "game": "fba",
+   "kind": "calendar",
+   "trimmed": "period types other than the league's own (scheduleSettings.periodTypeId) and the season-long one dropped",
+   "view": "web client constants"
+  },
+  "fba/kona_game_state.json": {
+   "bytes": 2400,
+   "fetched_at": "2026-10-05T19:33:41.418657+00:00",
+   "game": "fba",
+   "kind": "game_state",
+   "request": {
+    "view": [
+     "kona_game_state"
+    ]
+   },
+   "trimmed": "draft schedule and client flags dropped",
+   "view": "kona_game_state"
+  },
+  "fba/kona_player_info.json": {
+   "bytes": 10775,
+   "fetched_at": "2026-10-05T19:33:33.465043+00:00",
+   "game": "fba",
+   "kind": "players",
+   "request": {
+    "filter": {
+     "players": {
+      "filterStatus": {
+       "value": [
+        "FREEAGENT",
+        "WAIVERS"
+       ]
+      },
+      "limit": 50,
+      "offset": 0,
+      "sortDraftRanks": {
+       "sortAsc": true,
+       "sortPriority": 100,
+       "value": "STANDARD"
+      },
+      "sortPercOwned": {
+       "sortAsc": false,
+       "sortPriority": 1
+      }
+     }
+    },
+    "scoringPeriodId": 1,
+    "view": [
+     "kona_player_info"
+    ]
+   },
+   "trimmed": "first 4 pool players (FREEAGENT + WAIVERS, most owned first): every stat line of the first, at most 3 of each other",
+   "view": "kona_player_info"
+  },
+  "fba/kona_player_info_waivers.json": {
+   "bytes": 16,
+   "fetched_at": "2026-10-05T19:33:34.423215+00:00",
+   "game": "fba",
+   "kind": "players",
+   "request": {
+    "filter": {
+     "players": {
+      "filterStatus": {
+       "value": [
+        "WAIVERS"
+       ]
+      },
+      "limit": 25,
+      "offset": 0,
+      "sortDraftRanks": {
+       "sortAsc": true,
+       "sortPriority": 100,
+       "value": "STANDARD"
+      },
+      "sortPercOwned": {
+       "sortAsc": false,
+       "sortPriority": 1
+      }
+     }
+    },
+    "scoringPeriodId": 1,
+    "view": [
+     "kona_player_info"
+    ]
+   },
+   "trimmed": "first 2 players on waivers",
+   "view": "kona_player_info"
+  },
+  "fba/kona_playercard.json": {
+   "bytes": 5278,
+   "fetched_at": "2026-10-05T19:33:35.452122+00:00",
+   "game": "fba",
+   "kind": "players",
+   "request": {
+    "filter": {
+     "players": {
+      "filterIds": {
+       "value": [
+        4432166,
+        4871144,
+        4432573,
+        4432158,
+        4869342,
+        4397688
+       ]
+      },
+      "filterStatsForTopScoringPeriodIds": {
+       "additionalValue": [
+        "002027",
+        "102027",
+        "1120271",
+        "0120271"
+       ],
+       "value": 1
+      }
+     }
+    },
+    "scoringPeriodId": 1,
+    "view": [
+     "kona_playercard"
+    ]
+   },
+   "trimmed": "first 2 cards, 4 stat lines",
+   "view": "kona_playercard"
+  },
+  "fba/kona_playercard_stat_entries.json": {
+   "bytes": 6847,
+   "game": "fba",
+   "kind": "players",
+   "request": {
+    "filter": "see probes.json"
+   },
+   "trimmed": "first card, every stat entry kept (the evidence for the stat-entry id and split facts)",
+   "view": "kona_playercard"
+  },
+  "fba/kona_playercard_top2.json": {
+   "bytes": 2244,
+   "game": "fba",
+   "kind": "players",
+   "request": {
+    "filter": "see probes.json"
+   },
+   "trimmed": "first card, every stat entry kept (the evidence for the stat-entry id and split facts)",
+   "view": "kona_playercard"
+  },
+  "fba/mMatchup.json": {
+   "bytes": 4248,
+   "fetched_at": "2026-10-05T19:33:31.451084+00:00",
+   "game": "fba",
+   "kind": "matchups",
+   "request": {
+    "view": [
+     "mMatchup"
+    ]
+   },
+   "trimmed": "teams block and lineups dropped; our matchup in the first, current and last scheduled periods plus one other current matchup",
+   "view": "mMatchup"
+  },
+  "fba/mMatchupScore+mScoreboard.json": {
+   "bytes": 15116,
+   "fetched_at": "2026-10-05T19:33:32.430699+00:00",
+   "game": "fba",
+   "kind": "matchups",
+   "request": {
+    "filter": {
+     "schedule": {
+      "filterMatchupPeriodIds": {
+       "value": [
+        1
+       ]
+      }
+     }
+    },
+    "scoringPeriodId": 1,
+    "view": [
+     "mMatchupScore",
+     "mScoreboard"
+    ]
+   },
+   "trimmed": "our matchup only; our current lineup whole, the opponent's first 4 players, 1 stat line each",
+   "view": "mMatchupScore+mScoreboard"
+  },
+  "fba/mPendingTransactions.json": {
+   "bytes": 674,
+   "fetched_at": "2026-10-05T19:33:38.429317+00:00",
+   "game": "fba",
+   "kind": "transactions",
+   "request": {
+    "view": [
+     "mPendingTransactions"
+    ]
+   },
+   "trimmed": "whole response",
+   "view": "mPendingTransactions"
+  },
+  "fba/mRoster.json": {
+   "bytes": 31827,
+   "fetched_at": "2026-10-05T19:33:30.464534+00:00",
+   "game": "fba",
+   "kind": "rosters",
+   "request": {
+    "scoringPeriodId": 1,
+    "view": [
+     "mRoster"
+    ]
+   },
+   "trimmed": "our whole roster and 3 players of this period's opponent; rankings/outlooks dropped; one stat line per player (this period's projection, else the season projection)",
+   "view": "mRoster"
+  },
+  "fba/mSettings.json": {
+   "bytes": 4256,
+   "fetched_at": "2026-10-05T19:33:27.456522+00:00",
+   "game": "fba",
+   "kind": "settings",
+   "request": {
+    "view": [
+     "mSettings"
+    ]
+   },
+   "trimmed": "whole response",
+   "view": "mSettings"
+  },
+  "fba/mStatus.json": {
+   "bytes": 897,
+   "fetched_at": "2026-10-05T19:33:42.419459+00:00",
+   "game": "fba",
+   "kind": "envelope",
+   "request": {
+    "view": [
+     "mStatus"
+    ]
+   },
+   "trimmed": "whole response",
+   "view": "mStatus"
+  },
+  "fba/mTeam+mStandings.json": {
+   "bytes": 17209,
+   "fetched_at": "2026-10-05T19:33:28.423434+00:00",
+   "game": "fba",
+   "kind": "teams",
+   "request": {
+    "view": [
+     "mTeam",
+     "mStandings"
+    ]
+   },
+   "trimmed": "notificationSettings emptied; simulation and draft strategy dropped; schedule cut to matchup period 1",
+   "view": "mTeam+mStandings"
+  },
+  "fba/mTransactions2.json": {
+   "bytes": 14707,
+   "fetched_at": "2026-10-05T19:33:37.423691+00:00",
+   "game": "fba",
+   "kind": "transactions",
+   "request": {
+    "filter": {
+     "transactions": {
+      "filterType": {
+       "value": [
+        "FREEAGENT",
+        "WAIVER",
+        "WAIVER_ERROR",
+        "TRADE_PROPOSAL",
+        "TRADE_ACCEPT",
+        "TRADE_DECLINE",
+        "TRADE_VETO",
+        "TRADE_UPHOLD",
+        "ROSTER",
+        "FUTURE_ROSTER",
+        "DRAFT"
+       ]
+      }
+     }
+    },
+    "scoringPeriodId": 1,
+    "view": [
+     "mTransactions2"
+    ]
+   },
+   "trimmed": "every type including ROSTER/FUTURE_ROSTER/DRAFT; at most 3 per (type, status, executionType), 2 drafts",
+   "view": "mTransactions2"
+  },
+  "fba/mTransactions2_waiver_trade.json": {
+   "bytes": 7289,
+   "fetched_at": "2026-10-05T19:33:39.424212+00:00",
+   "game": "fba",
+   "kind": "transactions",
+   "request": {
+    "filter": {
+     "transactions": {
+      "filterType": {
+       "value": [
+        "WAIVER",
+        "TRADE_PROPOSAL"
+       ]
+      }
+     }
+    },
+    "scoringPeriodId": 1,
+    "view": [
+     "mTransactions2"
+    ]
+   },
+   "trimmed": "WAIVER + TRADE_PROPOSAL filter, every status",
+   "view": "mTransactions2"
+  },
+  "fba/proTeamSchedules_wl.json": {
+   "bytes": 15695,
+   "fetched_at": "2026-10-05T19:33:40.424679+00:00",
+   "game": "fba",
+   "kind": "pro_schedule",
+   "request": {
+    "view": [
+     "proTeamSchedules_wl"
+    ]
+   },
+   "trimmed": "games of the current scoring period only; teamPlayersByPosition dropped",
+   "view": "proTeamSchedules_wl"
+  },
+  "fba/probes.json": {
+   "bytes": 1896,
+   "game": "fba",
+   "kind": "probes",
+   "trimmed": "probe outcomes from the read pass",
+   "view": null
+  },
+  "ffl/calendar.json": {
+   "bytes": 4476,
+   "game": "ffl",
+   "kind": "calendar",
+   "trimmed": "period types other than the league's own (scheduleSettings.periodTypeId) and the season-long one dropped",
+   "view": "web client constants"
+  },
+  "ffl/kona_game_state.json": {
+   "bytes": 2399,
+   "fetched_at": "2026-10-05T19:33:20.391103+00:00",
+   "game": "ffl",
+   "kind": "game_state",
+   "request": {
+    "view": [
+     "kona_game_state"
+    ]
+   },
+   "trimmed": "draft schedule and client flags dropped",
+   "view": "kona_game_state"
+  },
+  "ffl/kona_player_info.json": {
+   "bytes": 18142,
+   "fetched_at": "2026-10-05T19:33:12.474661+00:00",
+   "game": "ffl",
+   "kind": "players",
+   "request": {
+    "filter": {
+     "players": {
+      "filterStatus": {
+       "value": [
+        "FREEAGENT",
+        "WAIVERS"
+       ]
+      },
+      "limit": 50,
+      "offset": 0,
+      "sortDraftRanks": {
+       "sortAsc": true,
+       "sortPriority": 100,
+       "value": "STANDARD"
+      },
+      "sortPercOwned": {
+       "sortAsc": false,
+       "sortPriority": 1
+      }
+     }
+    },
+    "scoringPeriodId": 4,
+    "view": [
+     "kona_player_info"
+    ]
+   },
+   "trimmed": "first 4 pool players (FREEAGENT + WAIVERS, most owned first): every stat line of the first, at most 3 of each other",
+   "view": "kona_player_info"
+  },
+  "ffl/kona_player_info_waivers.json": {
+   "bytes": 11974,
+   "fetched_at": "2026-10-05T19:33:13.433753+00:00",
+   "game": "ffl",
+   "kind": "players",
+   "request": {
+    "filter": {
+     "players": {
+      "filterStatus": {
+       "value": [
+        "WAIVERS"
+       ]
+      },
+      "limit": 25,
+      "offset": 0,
+      "sortDraftRanks": {
+       "sortAsc": true,
+       "sortPriority": 100,
+       "value": "STANDARD"
+      },
+      "sortPercOwned": {
+       "sortAsc": false,
+       "sortPriority": 1
+      }
+     }
+    },
+    "scoringPeriodId": 4,
+    "view": [
+     "kona_player_info"
+    ]
+   },
+   "trimmed": "first 2 players on waivers",
+   "view": "kona_player_info"
+  },
+  "ffl/kona_playercard.json": {
+   "bytes": 9258,
+   "fetched_at": "2026-10-05T19:33:14.411415+00:00",
+   "game": "ffl",
+   "kind": "players",
+   "request": {
+    "filter": {
+     "players": {
+      "filterIds": {
+       "value": [
+        4430807,
+        4362238,
+        4685382,
+        4428331,
+        4595348,
+        3915511
+       ]
+      },
+      "filterStatsForTopScoringPeriodIds": {
+       "additionalValue": [
+        "002026",
+        "102026",
+        "1120264",
+        "0120264"
+       ],
+       "value": 4
+      }
+     }
+    },
+    "scoringPeriodId": 4,
+    "view": [
+     "kona_playercard"
+    ]
+   },
+   "trimmed": "first 2 cards, 4 stat lines",
+   "view": "kona_playercard"
+  },
+  "ffl/kona_playercard_stat_entries.json": {
+   "bytes": 8425,
+   "game": "ffl",
+   "kind": "players",
+   "request": {
+    "filter": "see probes.json"
+   },
+   "trimmed": "first card, every stat entry kept (the evidence for the stat-entry id and split facts)",
+   "view": "kona_playercard"
+  },
+  "ffl/kona_playercard_top2.json": {
+   "bytes": 2286,
+   "game": "ffl",
+   "kind": "players",
+   "request": {
+    "filter": "see probes.json"
+   },
+   "trimmed": "first card, every stat entry kept (the evidence for the stat-entry id and split facts)",
+   "view": "kona_playercard"
+  },
+  "ffl/mMatchup.json": {
+   "bytes": 19593,
+   "fetched_at": "2026-10-05T19:33:10.465105+00:00",
+   "game": "ffl",
+   "kind": "matchups",
+   "request": {
+    "view": [
+     "mMatchup"
+    ]
+   },
+   "trimmed": "teams block and lineups dropped; our matchup in the first, current and last scheduled periods plus one other current matchup",
+   "view": "mMatchup"
+  },
+  "ffl/mMatchupScore+mScoreboard.json": {
+   "bytes": 49912,
+   "fetched_at": "2026-10-05T19:33:11.447689+00:00",
+   "game": "ffl",
+   "kind": "matchups",
+   "request": {
+    "filter": {
+     "schedule": {
+      "filterMatchupPeriodIds": {
+       "value": [
+        4
+       ]
+      }
+     }
+    },
+    "scoringPeriodId": 4,
+    "view": [
+     "mMatchupScore",
+     "mScoreboard"
+    ]
+   },
+   "trimmed": "our matchup only; our current lineup whole, the opponent's first 4 players, 1 stat line each",
+   "view": "mMatchupScore+mScoreboard"
+  },
+  "ffl/mPendingTransactions.json": {
+   "bytes": 722,
+   "fetched_at": "2026-10-05T19:33:17.413031+00:00",
+   "game": "ffl",
+   "kind": "transactions",
+   "request": {
+    "view": [
+     "mPendingTransactions"
+    ]
+   },
+   "trimmed": "whole response",
+   "view": "mPendingTransactions"
+  },
+  "ffl/mRoster.json": {
+   "bytes": 31541,
+   "fetched_at": "2026-10-05T19:33:09.557710+00:00",
+   "game": "ffl",
+   "kind": "rosters",
+   "request": {
+    "scoringPeriodId": 4,
+    "view": [
+     "mRoster"
+    ]
+   },
+   "trimmed": "our whole roster and 3 players of this period's opponent; rankings/outlooks dropped; one stat line per player (this period's projection, else the season projection)",
+   "view": "mRoster"
+  },
+  "ffl/mSettings.json": {
+   "bytes": 8447,
+   "fetched_at": "2026-10-05T19:33:06.468293+00:00",
+   "game": "ffl",
+   "kind": "settings",
+   "request": {
+    "view": [
+     "mSettings"
+    ]
+   },
+   "trimmed": "whole response",
+   "view": "mSettings"
+  },
+  "ffl/mStatus.json": {
+   "bytes": 920,
+   "fetched_at": "2026-10-05T19:33:21.406830+00:00",
+   "game": "ffl",
+   "kind": "envelope",
+   "request": {
+    "view": [
+     "mStatus"
+    ]
+   },
+   "trimmed": "whole response",
+   "view": "mStatus"
+  },
+  "ffl/mTeam+mStandings.json": {
+   "bytes": 21169,
+   "fetched_at": "2026-10-05T19:33:07.415835+00:00",
+   "game": "ffl",
+   "kind": "teams",
+   "request": {
+    "view": [
+     "mTeam",
+     "mStandings"
+    ]
+   },
+   "trimmed": "notificationSettings emptied; simulation and draft strategy dropped; schedule cut to matchup period 1",
+   "view": "mTeam+mStandings"
+  },
+  "ffl/mTransactions2.json": {
+   "bytes": 6338,
+   "fetched_at": "2026-10-05T19:33:16.411943+00:00",
+   "game": "ffl",
+   "kind": "transactions",
+   "request": {
+    "filter": {
+     "transactions": {
+      "filterType": {
+       "value": [
+        "FREEAGENT",
+        "WAIVER",
+        "WAIVER_ERROR",
+        "TRADE_PROPOSAL",
+        "TRADE_ACCEPT",
+        "TRADE_DECLINE",
+        "TRADE_VETO",
+        "TRADE_UPHOLD",
+        "ROSTER",
+        "FUTURE_ROSTER",
+        "DRAFT"
+       ]
+      }
+     }
+    },
+    "scoringPeriodId": 4,
+    "view": [
+     "mTransactions2"
+    ]
+   },
+   "trimmed": "every type including ROSTER/FUTURE_ROSTER/DRAFT; at most 3 per (type, status, executionType), 2 drafts",
+   "view": "mTransactions2"
+  },
+  "ffl/mTransactions2_waiver_trade.json": {
+   "bytes": 2932,
+   "fetched_at": "2026-10-05T19:33:18.414240+00:00",
+   "game": "ffl",
+   "kind": "transactions",
+   "request": {
+    "filter": {
+     "transactions": {
+      "filterType": {
+       "value": [
+        "WAIVER",
+        "TRADE_PROPOSAL"
+       ]
+      }
+     }
+    },
+    "scoringPeriodId": 4,
+    "view": [
+     "mTransactions2"
+    ]
+   },
+   "trimmed": "WAIVER + TRADE_PROPOSAL filter, every status",
+   "view": "mTransactions2"
+  },
+  "ffl/proTeamSchedules_wl.json": {
+   "bytes": 20879,
+   "fetched_at": "2026-10-05T19:33:19.379458+00:00",
+   "game": "ffl",
+   "kind": "pro_schedule",
+   "request": {
+    "view": [
+     "proTeamSchedules_wl"
+    ]
+   },
+   "trimmed": "games of the current scoring period only; teamPlayersByPosition dropped",
+   "view": "proTeamSchedules_wl"
+  },
+  "ffl/probes.json": {
+   "bytes": 2635,
+   "game": "ffl",
+   "kind": "probes",
+   "trimmed": "probe outcomes from the read pass",
+   "view": null
+  },
+  "webclient.json": {
+   "bytes": 22484,
+   "game": null,
+   "kind": "webclient",
+   "trimmed": "verbatim excerpts of the bundle (transaction types, model, service, request functions) and each game's stat sources and split types",
+   "view": "web client code"
+  }
+ }
+}
