@@ -1,0 +1,12 @@
+# NFL player ID overrides for the crosswalk in src/fm/model/ids.py. Reviewed by hand; one mapping per line.
+#
+# Columns:
+#   espn_id    the ESPN player id (team defenses are -16000 - proTeamId and need no row; they are derived)
+#   source     gsis | sleeper
+#   source_id  the player's id in that source (gsis looks like 00-0034857, sleeper like 4984); leave it empty to
+#              remove a wrong mapping that ff_playerids carries
+#   name,note  for humans: who this is, and why ff_playerids needed help
+#
+# A row replaces what ff_playerids says for that player and for that source id. When `fm sync` stops on an unmapped
+# rostered player, add a row here and run it again. Rows that no longer change anything are reported as removable.
+espn_id,source,source_id,name,note
