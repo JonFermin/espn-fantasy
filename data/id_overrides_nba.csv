@@ -1,0 +1,13 @@
+# NBA player ID overrides for the crosswalk in src/fm/model/ids_nba.py. Reviewed by hand; one mapping per line.
+#
+# Columns:
+#   espn_id    the ESPN player id
+#   source     nba (the nba.com person id, as stats.nba.com and DARKO key players)
+#   source_id  the player's nba.com person id (digits, like 203999); leave it empty to keep him unmapped
+#   name,note  for humans: who this is, and why matching by name, team and position needed help
+#
+# A row pins the player to that nba.com id whatever the name match says, and takes the id out of play for everyone
+# else. When `fm sync` stops on an unmapped rostered player (no nba.com player with that name, several of them, or one
+# on another team at another position), the error says why and names the near misses on his team; add a row here and
+# run it again. A row also confirms a partial match (Herb Jones -> Herbert Jones) and silences its warning.
+espn_id,source,source_id,name,note
