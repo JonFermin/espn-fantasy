@@ -11,9 +11,9 @@ wrote (or the scoring period given):
 - **free agent**: the ``free_agents`` best players on no roster in the league, among those ESPN projects (the wire
   ``fm sync`` reads, most-owned first, plus earlier syncs' players still unrostered). Best means ESPN's season
   projection under the league's own settings (a period line stands in for a player without one): fantasy points in a
-  points league; in a category league the sum of per-category z-scores across those players, percentages
-  volume-weighted (makes minus the pool's rate times attempts) and reverse categories (TO) negated, a ranking
-  stand-in until the category valuation (ROADMAP #24);
+  points league; in a category league the category total from :func:`fm.model.categories.fit_categories` fitted on
+  those players' lines (rates volume-weighted, reverse categories such as TO negated, G-scores for head-to-head and
+  z-scores for roto);
 - **trade target**: the players we would receive in the league's open trade proposals (proposed, approved or
   executing: offers drafted for us and incoming offers under evaluation), plus any ``trade_targets`` given.
 
@@ -33,8 +33,6 @@ the relevant players' names then. Irrelevant items are not marked triaged here; 
 from __future__ import annotations
 
 import logging
-import math
-import statistics
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,9 +45,10 @@ from pydantic import ValidationError
 from fm.config import Sport
 from fm.espn.models import MatchupsView
 from fm.espn.settings import LeagueSettings
+from fm.model.categories import fit_categories
 from fm.model.ids_nba import normalize_name
 from fm.model.projections import ESPN
-from fm.model.scoring import DERIVATIONS, Ratio, Scorer, ScoringError
+from fm.model.scoring import Scorer, ScoringError
 from fm.proposals.payloads import TradePayload
 from fm.proposals.policy import TRADE_KINDS, ProposalError, parse_payload
 from fm.sources.news import DUPLICATE_WINDOW, ROTOWIRE, NewsItem, fingerprint, news_subject
@@ -256,38 +255,21 @@ def _values(
 
 
 def _category_scores(settings: LeagueSettings, lines: Mapping[int, Mapping[str, float]]) -> dict[int, float]:
-    """The sum over the league's categories of each player's z-score among ``lines``. A percentage category scores
-    its impact, ``makes - pool_rate * attempts``, so a low-volume shooter is not mistaken for an elite one; a reverse
-    category counts negatively; a category with no spread adds nothing."""
+    """Each player's category total among ``lines`` from the league's :class:`fm.model.categories.CategoryModel`
+    (volume-weighted rates, reverse categories negated, G-scores for head-to-head and z-scores for roto), fitted on
+    these lines in the unit they come in. Fewer than two lines, or a league the model refuses (not an NBA category
+    league), ranks everyone equal, logged."""
     totals = dict.fromkeys(lines, 0.0)
     if len(lines) < 2:
         return totals
-    rules = DERIVATIONS.get(settings.game, {})
-    for item in settings.scoring_items:
-        rule = rules.get(item.stat)
-        if isinstance(rule, Ratio):
-            made = {i: _made(line, rule) for i, line in lines.items()}
-            tried = {i: line.get(rule.denominator, 0.0) for i, line in lines.items()}
-            attempts = math.fsum(tried.values())
-            if attempts <= 0:
-                continue
-            rate = math.fsum(made.values()) / attempts
-            raw = {i: made[i] - rate * tried[i] for i in lines}
-        else:
-            raw = {i: line.get(item.stat, 0.0) for i, line in lines.items()}
-        spread = statistics.pstdev(raw.values())
-        if spread == 0:
-            continue
-        mean = statistics.fmean(raw.values())
-        sign = -1.0 if item.is_reverse else 1.0
-        for espn_id, value in raw.items():
-            totals[espn_id] += sign * (value - mean) / spread
+    try:
+        model = fit_categories(lines, settings)
+    except (ValueError, ScoringError) as exc:
+        logger.warning("free-agent ranking: league %s is not rankable by categories (%s)", settings.league_id, exc)
+        return totals
+    for entry in model.rank(lines):
+        totals[entry.espn_id] = entry.total
     return totals
-
-
-def _made(line: Mapping[str, float], rule: Ratio) -> float:
-    bonus = rule.bonus_weight * line.get(rule.bonus, 0.0) if rule.bonus is not None else 0.0
-    return line.get(rule.numerator, 0.0) + bonus
 
 
 def _proposed_trade_targets(store: Store, league_id: int, warnings: list[str]) -> list[int]:
