@@ -53,7 +53,7 @@ from fm.jobs.report import (
     write_report,
 )
 from fm.notify import NotifyError, open_channel, send_report
-from fm.store import Store
+from fm.store import LeagueRow, Store
 
 MatchupsOption = Annotated[
     Path | None,
@@ -110,7 +110,7 @@ def report(
             matchups = _recorded(fixtures, View.MATCHUP)
     notes: list[str] = []
     reports: list[LeagueReport] = []
-    directory = out.parent if out is not None else reports_dir()
+    directory = reports_dir()  # odds history stays here even with --out
     with Store.open() as store:
         for configured in chosen:
             row = store.leagues.by_key(configured.key)
@@ -134,18 +134,23 @@ def report(
                 now=at,
                 schedule=loaded.schedule,
                 matchups=view,
-                previous=previous_odds(directory, configured.key),
+                previous=previous_odds(directory, _odds_key(row), before=at),
                 window=timedelta(days=days),
             )
             built = attach_report_card(built, store, row, now=at, schedule=loaded.schedule)
             reports.append(built)
             if built.odds is not None:
-                remember_odds(directory, configured.key, built.odds)
+                remember_odds(directory, _odds_key(row), built.odds)
     markdown = render_markdown(reports, as_of=at, notes=notes)
     path = write_report(markdown, out if out is not None else report_path(at, directory))
     typer.echo(f"wrote {path}")
     if notify:
         typer.echo(_push(config, report_title(reports, at), markdown))
+
+
+def _odds_key(row: LeagueRow) -> str:
+    """The odds history of one league season: a new season never trends against the last one."""
+    return f"{row.key}-{row.season}"
 
 
 def _recorded(directory: Path, view: View) -> Path | None:

@@ -170,16 +170,28 @@ def test_phone_failure_is_a_note(home: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert "phone: not sent (no chat id)" in run("--as-of", AS_OF, "--fixtures", str(RECORDED))
 
 
+def test_odds_history_trends_against_last_week_not_a_rerun_or_a_backdated_run(tmp_path: Path) -> None:
+    last_week = job.OddsSnapshot(NOW - timedelta(days=7), 0.5, 0.1, 0.05)
+    job.remember_odds(tmp_path, "nfl-2026", last_week)
+    job.remember_odds(tmp_path, "nfl-2026", job.OddsSnapshot(NOW - timedelta(days=2), 0.55, 0.1, 0.05))  # mid-week run
+    job.remember_odds(tmp_path, "nfl-2026", job.OddsSnapshot(NOW, 0.6, 0.1, 0.05))
+    job.remember_odds(tmp_path, "nfl-2026", job.OddsSnapshot(NOW + timedelta(hours=1), 0.61, 0.1, 0.05))  # rerun
+    assert job.previous_odds(tmp_path, "nfl-2026", before=NOW + timedelta(hours=1)) == last_week
+    job.remember_odds(tmp_path, "nfl-2026", job.OddsSnapshot(NOW - timedelta(days=14), 0.4, 0.1, 0.05))  # backdated
+    assert job.previous_odds(tmp_path, "nfl-2026", before=NOW) == last_week  # newer odds untouched
+    assert job.previous_odds(tmp_path, "nfl-2027", before=NOW) is None  # a new season starts fresh
+
+
 # --- the pieces -------------------------------------------------------------------------------------------------------
 
 
 def test_odds_trend_round_trips_and_renders(tmp_path: Path) -> None:
-    assert job.previous_odds(tmp_path, "nfl") is None
+    assert job.previous_odds(tmp_path, "nfl", before=NOW) is None
     before = job.OddsSnapshot(NOW - timedelta(days=7), 0.5, 0.1, 0.05)
     job.remember_odds(tmp_path, "nfl", before)
-    assert job.previous_odds(tmp_path, "nfl") == before
+    assert job.previous_odds(tmp_path, "nfl", before=NOW) == before
     (tmp_path / "odds-nfl.json").write_text("not json")
-    assert job.previous_odds(tmp_path, "nfl") is None
+    assert job.previous_odds(tmp_path, "nfl", before=NOW) is None
     now = job.OddsSnapshot(NOW, 0.62, 0.1, 0.04)
     league = job.LeagueReport("nfl", "League", "Team", "2-1", odds=now, previous=before)
     text = "\n".join(job.render_league(league))

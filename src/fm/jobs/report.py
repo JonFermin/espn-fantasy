@@ -9,7 +9,7 @@ capture the matchup and odds sections say so). :func:`render_markdown` turns the
 - **Matchup outlook:** the current matchup period's opponent and :func:`fm.model.simulate.simulate_matchup` between the
   two rosters' outlooks (the same ones the trade evaluator values), with each category's chance in a category league.
 - **Playoff odds:** :func:`fm.model.simulate.simulate_season` over the league's schedule; the trend is the change from
-  the previous report's odds, kept in a small sidecar next to the markdown (:func:`previous_odds`).
+  last week's report's odds, kept in a small per-season history in the reports directory (:func:`previous_odds`).
 - **Moves made:** executions that finished in the window, one line per proposal with its verified or failed outcome.
 - **Upcoming deadlines:** :func:`fm.jobs.deadlines.upcoming` over the league's settings, never a hardcoded time.
 
@@ -57,8 +57,8 @@ FINISHED: Final = ("verified", "failed")
 
 @dataclass(frozen=True, slots=True)
 class MatchupOutlookLine:
-    """This matchup period's opponent and our chances: ``win``, ``tie`` and the expected points of each side in a
-    points league, ``categories`` (P(we win it) per category) in a category league."""
+    """This matchup period's opponent and our chances: ``win`` (outright, ties not counted), ``tie`` and the expected
+    points of each side in a points league, ``categories`` (P(we win it) per category) in a category league."""
 
     period: int
     opponent: str
@@ -223,7 +223,7 @@ def _matchup_outlook(ctx: TradeContext, notes: list[str], runs: int) -> MatchupO
     return MatchupOutlookLine(
         period=period,
         opponent=ctx.team_name(other.team_id),
-        win=odds.home + 0.5 * odds.tie,
+        win=odds.home,
         tie=odds.tie,
         ours=mean_ours,
         theirs=mean_theirs,
@@ -408,21 +408,45 @@ def write_report(markdown: str, path: Path) -> Path:
     return path
 
 
+TREND_MIN_AGE: Final = timedelta(days=6)
+"""A trend compares against the latest stored odds at least this much older than the report (last week's, not a rerun
+earlier the same week)."""
+ODDS_KEPT: Final = 60
+"""How many dated snapshots an odds history keeps."""
+
+
 def _odds_file(directory: Path, key: str) -> Path:
     return directory / f"odds-{key}.json"
 
 
-def previous_odds(directory: Path, key: str) -> OddsSnapshot | None:
-    """The odds the last report stored for the league, or ``None`` (first report, or an unreadable sidecar)."""
+def _snapshot(data: Mapping[str, Any]) -> OddsSnapshot:
+    return OddsSnapshot(
+        datetime.fromisoformat(data["as_of"]), float(data["playoffs"]), float(data["bye"]), float(data["title"])
+    )
+
+
+def _odds_history(directory: Path, key: str) -> list[OddsSnapshot]:
     try:
         data = json.loads(_odds_file(directory, key).read_text(encoding="utf-8"))
-        return OddsSnapshot(
-            datetime.fromisoformat(data["as_of"]), float(data["playoffs"]), float(data["bye"]), float(data["title"])
-        )
+        return sorted((_snapshot(item) for item in data["snapshots"]), key=lambda s: s.as_of)
     except (OSError, ValueError, KeyError, TypeError):
-        return None
+        return []
+
+
+def previous_odds(directory: Path, key: str, *, before: datetime) -> OddsSnapshot | None:
+    """The latest odds stored for ``key`` (league and season) at least :data:`TREND_MIN_AGE` before ``before``, or
+    ``None`` (no such report, or an unreadable history)."""
+    cutoff = before - TREND_MIN_AGE
+    earlier = [s for s in _odds_history(directory, key) if s.as_of <= cutoff]
+    return earlier[-1] if earlier else None
 
 
 def remember_odds(directory: Path, key: str, odds: OddsSnapshot) -> None:
+    """Add ``odds`` to the history, replacing a snapshot of the same day (a rerun), never touching other days (a
+    backdated run adds its own day and leaves newer ones alone)."""
+    day = odds.as_of.date()
+    kept = [s for s in _odds_history(directory, key) if s.as_of.date() != day]
+    history = sorted([*kept, odds], key=lambda s: s.as_of)[-ODDS_KEPT:]
     directory.mkdir(parents=True, exist_ok=True)
-    _odds_file(directory, key).write_text(json.dumps(odds.to_json()), encoding="utf-8")
+    payload = {"snapshots": [s.to_json() for s in history]}
+    _odds_file(directory, key).write_text(json.dumps(payload), encoding="utf-8")
