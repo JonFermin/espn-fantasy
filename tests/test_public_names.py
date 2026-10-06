@@ -1,6 +1,6 @@
 """Public names mean one thing across ``fm.config``, ``fm.store``, ``fm.espn``, ``fm.sports``, ``fm.decide``,
 ``fm.proposals``, ``fm.model``, ``fm.sources.news``, ``fm.jobs``, ``fm.notify``, ``fm.browser`` (flows, transactions,
-selectors) and ``fm.executor``.
+selectors, canary), ``fm.executor``, ``fm.advisor`` and ``fm.eval``.
 
 Store rows carry a ``Row`` suffix (``LeagueRow``) so they never shadow ``fm.config.League`` or a parsed ESPN model,
 and a name two modules both expose must be one object (a re-export such as ``Sport``), never two definitions. A module
@@ -79,6 +79,10 @@ MODULES = (
     "fm.jobs.scheduler_windows",
     "fm.advisor.client",
     "fm.advisor.news_triage",
+    "fm.browser.canary",
+    "fm.decide.faab",
+    "fm.decide.rankings",
+    "fm.eval.backtest",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
