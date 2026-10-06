@@ -1,0 +1,18 @@
+{
+ "bytes": 13272,
+ "fetched_at": "2026-10-04T15:00:00+00:00",
+ "game": "ffl",
+ "kind": "mRoster",
+ "league_id": 1234567,
+ "params": {
+  "scoringPeriodId": 4,
+  "view": [
+   "mRoster"
+  ]
+ },
+ "scoring_period_id": 4,
+ "season": 2026,
+ "sha256": "bd22f22b132dce6ddd1f5e6c92bb288761b4b55313eff10423dd01b41e345f5d",
+ "status_code": 200,
+ "url": "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567?view=mRoster&scoringPeriodId=4"
+}

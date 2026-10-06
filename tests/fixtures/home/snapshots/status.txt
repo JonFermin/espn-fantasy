@@ -1,0 +1,7 @@
+browser profile: missing; run fm login before fm sync
+nfl: NFL 2026, ESPN league 1234567: Fixture League (PPR)
+  team 1 Fixture Team 1: 2-1, 356.4 points for
+  synced 2026-10-04 15:00Z: roster for scoring period 4
+  FAAB: $23 of $100 spent
+  pro schedule: captured 2026-10-04 15:00Z, periods 4-5
+  open proposals: none

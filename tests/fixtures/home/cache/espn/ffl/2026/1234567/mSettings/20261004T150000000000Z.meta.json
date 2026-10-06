@@ -1,0 +1,17 @@
+{
+ "bytes": 7488,
+ "fetched_at": "2026-10-04T15:00:00+00:00",
+ "game": "ffl",
+ "kind": "mSettings",
+ "league_id": 1234567,
+ "params": {
+  "view": [
+   "mSettings"
+  ]
+ },
+ "scoring_period_id": null,
+ "season": 2026,
+ "sha256": "ef90b3f9c8793889bd3dd29f04ed90f2b8512e11395222bbd783cc1abd473015",
+ "status_code": 200,
+ "url": "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567?view=mSettings"
+}
