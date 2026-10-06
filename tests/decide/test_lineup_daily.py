@@ -677,6 +677,25 @@ def test_the_lock_rules_the_planner_obeys_come_from_the_league(store: Store) -> 
         )
 
 
+def test_a_team_without_a_game_locks_with_everyone_under_a_first_game_lock(store: Store) -> None:
+    """Under FIRSTGAME_SCORINGPERIOD every roster locks at the day's first tip, a team without a game included (as in
+    the NFL lineup); under per-game locks (the real league) a team without a game never locks."""
+    league = seed(store)
+    after_tip = FIRST_TIP + timedelta(hours=1)
+    first_game = real_points().model_copy(update={"lineup_lock_type": LockType.FIRSTGAME_SCORINGPERIOD})
+    inputs = daily_inputs(store, league, first_game, schedule=schedule(), period=DAY, now=after_tip)
+    wing = next(player for player in inputs.players if player.espn_id == 102)  # team 2 has no game on day 3
+    assert not wing.day(DAY).has_game and wing.day(DAY).lock_at == FIRST_TIP and wing.day(DAY).locked
+    before = daily_inputs(store, league, first_game, schedule=schedule(), period=DAY, now=MORNING)
+    assert not next(player for player in before.players if player.espn_id == 102).day(DAY).locked
+    per_game = daily_inputs(store, league, real_points(), schedule=schedule(), period=DAY, now=after_tip)
+    idle = next(player for player in per_game.players if player.espn_id == 102)
+    assert idle.day(DAY).lock_at is None and not idle.day(DAY).locked
+    # a locked idle player keeps his slot: the plan cannot swap him out for a bench player with a game
+    decision = plan_daily_lineup(store, league, schedule=schedule(), now=after_tip, period=DAY, settings=first_game)
+    assert decision.best.day(DAY).slots[102] == SG
+
+
 def test_the_plan_refuses_what_it_cannot_plan(store: Store) -> None:
     league = seed(store)
     with pytest.raises(DailyLineupError, match="no roster"):
