@@ -17,6 +17,7 @@ on the days it plays (Tue Oct 20, 2026 is day 1).
 
 from __future__ import annotations
 
+import inspect
 import math
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -29,12 +30,11 @@ from fm.config import Config, League, Policy
 from fm.decide import lineup as _nfl_lineup  # noqa: F401  (registers the NFL decision)
 from fm.decide import registry as decide_registry
 from fm.decide.lineup_daily import (
-    CREATED_BY,
-    DECISION_KIND,
+    DAILY_LINEUP_CREATED_BY,
+    DAILY_LINEUP_KIND,
     DailyLineupError,
     DayPlayer,
     PlayerDay,
-    category_outlook,
     daily_inputs,
     hold_week,
     matchup_window,
@@ -43,6 +43,7 @@ from fm.decide.lineup_daily import (
     prefer_pivots,
     propose_daily_lineup,
     slot_limits_left,
+    swing_outlook,
     swing_weights,
 )
 from fm.espn.ids import FBA
@@ -357,7 +358,7 @@ def test_a_questionable_starter_is_slotted_where_a_later_pivot_can_cover_him() -
 
 
 def test_a_close_category_swings_the_most_and_a_decided_one_almost_not_at_all() -> None:
-    outlook = category_outlook(
+    outlook = swing_outlook(
         {"PTS": 10.0, "REB": 20.0, "STL": 1.0},
         {"PTS": 10.0, "REB": 0.0, "STL": 20.0},
         games_ours=50,
@@ -371,7 +372,7 @@ def test_a_close_category_swings_the_most_and_a_decided_one_almost_not_at_all() 
     )
     assert outlook.weights["PTS"] == pytest.approx(1 / math.sqrt(2 * math.pi) / 10.0)  # phi(0) / sd, sd = sqrt(100)
     assert outlook.expected_wins == pytest.approx(sum(outlook.win_probability.values()))
-    banked = category_outlook({"PTS": 0.0}, {"PTS": 0.0}, games_ours=1, games_theirs=1, margin_so_far={"PTS": 30.0})
+    banked = swing_outlook({"PTS": 0.0}, {"PTS": 0.0}, games_ours=1, games_theirs=1, margin_so_far={"PTS": 30.0})
     assert banked.win_probability["PTS"] > 0.99
     assert swing_weights(None, ["PTS"]) is None
     assert swing_weights(outlook, ["PTS", "AST"]) == {"PTS": outlook.weights["PTS"], "AST": 0.0}
@@ -568,7 +569,7 @@ def test_the_decision_proposes_the_target_days_drafts_once(store: Store) -> None
     assert kinds == [ProposalKind.BENCH_INACTIVE.value, ProposalKind.LINEUP.value][: len(kinds)] and kinds
     assert first.blocked == ()
     for row in first.proposals:
-        assert row.created_by == CREATED_BY and row.scoring_period_id == DAY
+        assert row.created_by == DAILY_LINEUP_CREATED_BY and row.scoring_period_id == DAY
         assert row.deadline == FIRST_TIP - timedelta(0)  # the earliest lock among the moved: the 7:30 p.m. ET tip
         payload = parse_payload(row)
         assert isinstance(payload, LineupPayload)
@@ -729,6 +730,11 @@ def test_a_category_league_weights_each_game_by_its_swing_against_the_opponent(s
 
 
 def test_the_decision_is_registered_for_nba_beside_the_nfl_lineup() -> None:
-    assert decide_registry.lookup("nba", DECISION_KIND) is propose_daily_lineup
-    assert DECISION_KIND == "lineup_daily"
+    assert decide_registry.lookup("nba", DAILY_LINEUP_KIND) is propose_daily_lineup
+    assert DAILY_LINEUP_KIND == "lineup_daily"
+    # fm.jobs.tick calls ``fn(store, config, league_row, schedule=..., now=..., opponent_team_id=...)`` with what
+    # the signature accepts.
+    parameters = inspect.signature(propose_daily_lineup).parameters
+    assert list(parameters)[:3] == ["store", "config", "league"]
+    assert {"schedule", "now", "opponent_team_id"} <= set(parameters)
     assert "lineup" in [entry.kind for entry in decide_registry.registered("nfl")]

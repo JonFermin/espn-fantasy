@@ -36,7 +36,7 @@ inactive, has no team or no game; whether he has a game comes from the pro sched
 late-swap pivots (:func:`fm.model.availability.plan_pivots`): a questionable starter is slotted where a later bench
 player eligible for the slot can cover him (:func:`prefer_pivots`).
 
-**Category leagues** (:func:`category_outlook`). P(win category) is approximated by ``Phi(delta_mu / sigma)`` over the
+**Category leagues** (:func:`swing_outlook`). P(win category) is approximated by ``Phi(delta_mu / sigma)`` over the
 rest of the matchup, in the category model's score units, and a game is valued by its swing:
 ``dP/dscore = phi(delta_mu / sigma) / sigma`` per category times what he adds to the category, so a category already
 decided counts for little and one near 50% for most (:func:`swing_weights`). The opponent's side is his stored
@@ -69,6 +69,7 @@ from scipy.optimize import Bounds, LinearConstraint, milp
 
 from fm.config import Config
 from fm.decide import registry as _registry
+from fm.decide.lineup import active_slot_counts
 from fm.espn.calendar import matchup_period_of, matchup_scoring_periods
 from fm.espn.ids import Game, IdMaps, ids_for
 from fm.espn.settings import LeagueSettings, LockType
@@ -100,9 +101,9 @@ from fm.store import AvailabilityRow, LeagueRow, PlayerRow, ProposalRow, RosterE
 if TYPE_CHECKING:
     from fm.sources.nba_injuries import OfficialInjuryReport
 
-DECISION_KIND: Final = "lineup_daily"
+DAILY_LINEUP_KIND: Final = "lineup_daily"
 """The kind :func:`propose_daily_lineup` is registered under for NBA in :mod:`fm.decide.registry`."""
-CREATED_BY: Final = "decide.lineup_daily"
+DAILY_LINEUP_CREATED_BY: Final = "decide.lineup_daily"
 """``created_by`` of the proposals this module stores."""
 DEFAULT_GAME_SD: Final = 1.0
 """A player's game-to-game spread in a category in score units, absent a better estimate: about one pool standard
@@ -544,7 +545,7 @@ def prefer_pivots(
 
 
 @dataclass(frozen=True, slots=True)
-class CategoryOutlook:
+class SwingOutlook:
     """Where each category stands over the rest of the matchup, in the category model's score units: the expected
     ``margins`` (ours minus theirs), ``sds`` of that difference, ``win_probability`` ``Phi(margin / sd)`` and the swing
     ``weights`` ``phi(margin / sd) / sd`` (``dP/dscore``): near 50% a category is worth the most, decided it is worth
@@ -560,7 +561,7 @@ class CategoryOutlook:
         return math.fsum(self.win_probability.values())
 
 
-def category_outlook(
+def swing_outlook(
     ours: Mapping[str, float],
     theirs: Mapping[str, float],
     *,
@@ -568,7 +569,7 @@ def category_outlook(
     games_theirs: float,
     game_sd: Mapping[str, float] | float = DEFAULT_GAME_SD,
     margin_so_far: Mapping[str, float] | None = None,
-) -> CategoryOutlook:
+) -> SwingOutlook:
     """The outlook from each side's expected category scores over the rest of the matchup.
 
     ``games_*`` count the started games behind them; every game's category score varies independently by ``game_sd``
@@ -587,12 +588,12 @@ def category_outlook(
         margins[category], sds[category] = margin, sd
         chances[category] = normal.cdf(margin / sd)
         weights[category] = normal.pdf(margin / sd) / sd
-    return CategoryOutlook(
+    return SwingOutlook(
         MappingProxyType(margins), MappingProxyType(sds), MappingProxyType(chances), MappingProxyType(weights)
     )
 
 
-def swing_weights(outlook: CategoryOutlook | None, categories: Iterable[str]) -> dict[str, float] | None:
+def swing_weights(outlook: SwingOutlook | None, categories: Iterable[str]) -> dict[str, float] | None:
     """The per-category weights for :meth:`fm.model.categories.CategoryModel.contribution`: the outlook's swing weights,
     or ``None`` (every category weighs 1) without one."""
     if outlook is None:
@@ -622,11 +623,6 @@ def week_category_scores(
 
 
 # --- reading the store ------------------------------------------------------------------------------------------------
-
-
-def active_slot_counts(settings: LeagueSettings) -> dict[int, int]:
-    """The league's active slots and their counts (bench and IR excluded), from its settings."""
-    return {slot.slot_id: slot.count for slot in settings.active_slots}
 
 
 def slot_limits_left(
@@ -816,11 +812,11 @@ class DayModel:
 @dataclass(frozen=True, slots=True)
 class GameValues:
     """The per-game value of each player in the unit the lineups maximize: league points, or a category league's swing
-    weighted category score, and the :class:`CategoryOutlook` behind the weights."""
+    weighted category score, and the :class:`SwingOutlook` behind the weights."""
 
     per_game: Mapping[int, float]
     unit: str
-    outlook: CategoryOutlook | None = None
+    outlook: SwingOutlook | None = None
     model: CategoryModel | None = None
     vectors: Mapping[int, Mapping[str, float]] = field(default_factory=lambda: MappingProxyType({}))
     warnings: tuple[str, ...] = ()
@@ -832,7 +828,7 @@ def game_values(
     positions: Mapping[int, str | None],
     *,
     model: CategoryModel | None = None,
-    outlook: CategoryOutlook | None = None,
+    outlook: SwingOutlook | None = None,
 ) -> GameValues:
     """One game's value from an empty slot for each player with a per-game line. A points league scores the line with
     the league's items; a category league needs a fitted ``model`` (:func:`fit_categories` on the pool's lines when not
@@ -918,7 +914,7 @@ def daily_inputs(
     Reads the roster snapshot of ``period``, the ``players`` rows, the day's blended per-game lines (``lines`` or
     :func:`_lines_for`), availability (:func:`_freshest`) and locks (from ``schedule`` at ``now`` and ESPN's
     ``lineupLocked``). In a category league the opponent's stored roster (``opponent_team_id``) sets the swing weights
-    (:func:`category_outlook`). Raises :class:`DailyLineupError` when the period's roster snapshot is missing, the
+    (:func:`swing_outlook`). Raises :class:`DailyLineupError` when the period's roster snapshot is missing, the
     settings are not an NBA league's, the matchup cannot be placed on the calendar or the lock type is unknown.
     """
     _require_aware(now)
@@ -997,7 +993,7 @@ def _opponent_outlook(
     opponent_team_id: int,
     game_sd: Mapping[str, float] | float,
     margin_so_far: Mapping[str, float] | None,
-) -> tuple[CategoryOutlook | None, list[str]]:
+) -> tuple[SwingOutlook | None, list[str]]:
     entries = store.rosters.team(league.row_id, period, opponent_team_id)
     if not entries:
         return None, [f"opponent: no roster for team {opponent_team_id} in period {period}; flat category weights"]
@@ -1022,7 +1018,7 @@ def _opponent_outlook(
         return None, ["opponent: no lineup could be planned; flat category weights"]
     our_scores, our_games = week_category_scores(mine, ours, flat.vectors)
     their_scores, their_games = week_category_scores(other, theirs, flat.vectors)
-    outlook = category_outlook(
+    outlook = swing_outlook(
         our_scores,
         their_scores,
         games_ours=our_games,
@@ -1167,7 +1163,7 @@ def _draft(
         "basis": basis,
         "roster_as_of": inputs.roster_as_of.isoformat(),
         "moves": [_move_numbers(move, by_id[move.espn_id], plan.period, ids) for move in plan.moves],
-        "category_outlook": None
+        "swing_outlook": None
         if outlook is None
         else {
             "expected_wins": outlook.expected_wins,
@@ -1326,7 +1322,7 @@ def propose_daily_lineup(
                     league,
                     draft.kind,
                     draft.payload,
-                    created_by=CREATED_BY,
+                    created_by=DAILY_LINEUP_CREATED_BY,
                     scoring_period_id=draft.scoring_period_id,
                     engine_numbers=draft.engine_numbers,
                     rationale=draft.rationale,
@@ -1340,4 +1336,4 @@ def propose_daily_lineup(
     return DailyLineupProposals(decision=decision, proposals=tuple(stored), blocked=tuple(blocked))
 
 
-_registry.register("nba", DECISION_KIND, propose_daily_lineup)
+_registry.register("nba", DAILY_LINEUP_KIND, propose_daily_lineup)
