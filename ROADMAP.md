@@ -51,7 +51,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - Duplicate claims: `EspnClient.pending_offers` returns only open claims and offers (`PENDING`, not expired, not named by a CANCEL record; docs/espn-api.md §1 #2). Adds and drops close at the league's roster lock: `plugin.transaction_cutoff(pro_team_id, period, schedule, lock_type=settings.roster_lock_type)` per player moved (the real NBA league's `FIRSTGAME_SCORINGPERIOD` is the day's first tip, the NFL league's `INDIVIDUAL_GAME` each player's kickoff; `UNKNOWN` and ESPN's weekly types raise, so refuse the move rather than guess).
   - Phase 5: `fm.decide.waivers` (#21) already skips a free agent whose game this period has started and proposes nothing under an `UNKNOWN` roster lock type, so these preconditions are the backstop, not the first refusal. `fm.browser.transactions` has the ADD and DROP item builders and the envelope; `fm.browser.flows.lineup` is the pattern for preconditions that list every problem at once and refuse a wrong-period answer before the token is spent.
   AC: test command passes for test_add_drop and test_waiver against a fake page (preconditions, verification, dry-run)
-- IN PROGRESS [P1] [S] #28: Selector canary — scope: src/fm/browser/canary.py, src/fm/commands/canary.py, tests/browser/test_canary.py — depends: #25 ✓
+- DONE [P1] [S] #28: Selector canary — scope: src/fm/browser/canary.py, src/fm/commands/canary.py, tests/browser/test_canary.py — depends: #25 ✓
   - Read-only: asserts every registered selector resolves on the roster, free-agent, and trade pages, and that every read view still parses. Alerts on drift.
   - Phase 5: iterate the selector registry (`fm.browser.selectors`, #25) rather than listing selectors again: each entry records its page, a `Presence` (always / sometimes / never on a healthy page) and the row it sits in or the click that reveals it. The MOVE/HERE controls, the `Empty` text, the role=cell slot column, the Bench/FLEX labels and the team page's `scoringPeriodId` query parameter are unverified until #14's UI capture.
   AC: test command passes for tests/browser/test_canary.py (missing selector → alert payload); `uv run fm canary --help` exits 0
@@ -86,11 +86,11 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - Monte Carlo over the remaining schedule → P(win week), P(playoffs), P(bye), P(title); per-category win probabilities for NBA.
   - Phase 5: `fm.model.valuation.PlayerOutlook` and `LeagueValuation` (#21) are the simulator's per-team inputs; `fm.decide.lineup` already approximates P(win week) as a normal over the lineup's expected points and variance (`p·sd² + p(1−p)·points²` per player, 0 when he does not play).
   AC: test command passes for tests/model/test_simulate.py (seeded runs reproducible; playoff probabilities sum to playoff spots within tolerance)
-- IN PROGRESS [P1] [M] #33: Backtest harness — scope: src/fm/eval/backtest.py, src/fm/commands/backtest.py, tests/eval/test_backtest.py, tests/fixtures/backtest/ — depends: #15 ✓, #20 ✓
+- DONE [P1] [M] #33: Backtest harness — scope: src/fm/eval/backtest.py, src/fm/commands/backtest.py, tests/eval/test_backtest.py, tests/fixtures/backtest/ — depends: #15 ✓, #20 ✓
   - Replays past weeks → projection MAE by position, lineup efficiency (actual ÷ hindsight-optimal), start/sit regret.
   - Computes your historical lineup-efficiency baseline.
   AC: `uv run fm backtest --sport nfl --fixtures tests/fixtures/backtest` exits 0 and prints the three metrics; test command passes
-- IN PROGRESS [P2] [S] #34: FAAB bid model — scope: src/fm/decide/faab.py, src/fm/decide/waivers.py, tests/decide/test_faab.py — depends: #14 ✓, #21 ✓
+- DONE [P2] [S] #34: FAAB bid model — scope: src/fm/decide/faab.py, src/fm/decide/waivers.py, tests/decide/test_faab.py — depends: #14 ✓, #21 ✓
   - Fits winning-bid behavior from league transaction history and replaces the heuristic.
   AC: test command passes for tests/decide/test_faab.py (bid monotonic in value; cap respected)
 - IN PROGRESS [P2] [S] #35: Rest-of-season rankings sheet — scope: src/fm/decide/rankings.py, src/fm/commands/rankings.py, tests/decide/test_rankings.py — depends: #21 ✓, #24 ✓
@@ -114,7 +114,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - Market values: `MarketSource.market_values(settings, rank_type=<"PPR"/"STANDARD"/"SUPERFLEX" for ffl, "STANDARD"/"ROTO" for fba>)` takes the game, the season and FantasyCalc's league shape from the league's `LeagueSettings` (`LeagueShape.from_settings`: team count, REC scoring points, starting slots a QB can fill, so superflex/2-QB leagues ask for 2 QBs; there is no default shape); derive `rank_type` from `LeagueSettings` too, never a literal. FantasyCalc is skipped for fba and every rank type stays in `MarketValue.espn_ranks`.
   - Phase 5: availability rows keep `inputs["news"]["before"]`, the `p_active` without Claude signals (#22); value trades on it so a Claude-only signal never triggers a trade (CLAUDE.md). `fm.model.valuation.load_valuation(include_rostered=True)` (#21) values every player on any roster (`LeagueValuation.rostered`).
   AC: test command passes for tests/decide/test_trades.py (symmetric trade ≈ 0 Δ; finder returns only legal trades in ranked order); `uv run fm trade eval --help` exits 0
-- TODO [P2] [S] #39: Blend weight tuning — scope: src/fm/eval/tune.py, data/blend_weights.toml, tests/eval/test_tune.py — depends: #33
+- TODO [P2] [S] #39: Blend weight tuning — scope: src/fm/eval/tune.py, data/blend_weights.toml, tests/eval/test_tune.py — depends: #33 ✓
   - Fits per-(source, position) weights on held-out weeks.
   AC: test command passes for tests/eval/test_tune.py (held-out MAE ≤ equal-weight MAE on fixtures)
 - TODO [P2] [M] #40: MCP server — scope: src/fm/mcp_server.py, tests/test_mcp_server.py — depends: #8 ✓, #26
@@ -124,11 +124,11 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
 - TODO [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27 ✓
   - Weekly dry-run of each UI-mode flow against the live site, stopping before the final confirm, so the fallback is known-good when API mode breaks. Alerts on failure.
   AC: test command passes for tests/browser/test_drills.py against a fake page; `uv run fm drill --help` exits 0
-- TODO [P2] [M] #42: NFL opportunity baseline — scope: src/fm/model/baseline_nfl.py, tests/model/test_baseline_nfl.py — depends: #13 ✓, #15 ✓, #33
+- TODO [P2] [M] #42: NFL opportunity baseline — scope: src/fm/model/baseline_nfl.py, tests/model/test_baseline_nfl.py — depends: #13 ✓, #15 ✓, #33 ✓
   - Shares × implied team total × regressed efficiency, registered as a projection source.
   - ESPN removes the scoreboard `odds` block at kickoff, so implied team totals must be captured while `ScoreboardGame.state == "pre"` (the scoreboard TTL is 10 minutes); have the sync job (#16) snapshot pregame lines if the baseline needs them after the fact.
   AC: test command passes; the backtest on fixtures shows the blend with the baseline no worse than without it
-- TODO [P2] [M] #43: NBA minutes baseline — scope: src/fm/model/baseline_nba.py, tests/model/test_baseline_nba.py — depends: #11 ✓, #24 ✓, #33
+- TODO [P2] [M] #43: NBA minutes baseline — scope: src/fm/model/baseline_nba.py, tests/model/test_baseline_nba.py — depends: #11 ✓, #24 ✓, #33 ✓
   - Minutes × per-minute rates, registered as a projection source.
   - Teammates-out redistribution from without-player splits + on/off data, with DARKO minutes as the prior; blowout risk and back-to-back rest risk.
   - `fm.sources.nba_stats` works live (#17 smoke test, 2026-10-05: `game_logs("2025-26")` 26,651 rows, `player_splits("2025-26", "Base")` 582 rows). Its `leaguedashplayerstats` fixtures are hand-built from nba_api's expected_data (`CFID`, `CFPARAMS`); live stats.nba.com sends `NICKNAME`, `WNBA_FANTASY_PTS`, `FP_HIGH_SCORE`, their ranks and `TEAM_COUNT` instead. The adapter's required columns are present either way, and live game logs match their fixture.
@@ -154,6 +154,6 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   AC: `uv run fm report` against fixtures writes a markdown report; test command passes
 
 ## Phase 9
-- TODO [P2] [S] #47: Live report card — scope: src/fm/eval/report_card.py, tests/eval/test_report_card.py — depends: #33, #46
+- TODO [P2] [S] #47: Live report card — scope: src/fm/eval/report_card.py, tests/eval/test_report_card.py — depends: #33 ✓, #46
   - Weekly lineup efficiency, bench points, and pickup value on real decisions, appended to the report.
   AC: test command passes for tests/eval/test_report_card.py
