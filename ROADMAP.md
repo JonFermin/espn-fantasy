@@ -124,25 +124,34 @@ Open follow-ups:
 
 Key files: src/fm/advisor/{close_call,explain}.py, src/fm/decide/{weekly,trades}.py, src/fm/eval/tune.py, src/fm/mcp_server.py, src/fm/browser/drills.py, src/fm/model/baseline_{nfl,nba}.py, src/fm/commands/{trade,tune,mcp,drill}.py, tests/fixtures/backtest/{nfl_world,nba}/. 2537 tests. Skipped: none. (8/8 tasks)
 
-## Phase 8 — MILESTONE: trades end-to-end + weekly report
-- DONE [P1] [M] #44: Trade flows and offer handling — scope: src/fm/browser/flows/trade.py, src/fm/browser/selectors.py, src/fm/decide/offers.py, tests/executor/test_trade_flow.py, tests/decide/test_offers.py — depends: #25 ✓, #29 ✓, #38 ✓
-  - Propose/respond/cancel flows (approval-only), API mode with UI fallback.
-  - Never duplicates an open offer; checks lock status for every player involved.
-  - Pending incoming offers become evaluation proposals registered for the tick.
-  - Trade kinds have no policy field in `fm.proposals.policy.KINDS` (`effective_setting` is always `approve`); incoming offers become `TradeResponsePayload` proposals through `propose`, outgoing ones `TradePayload`.
-  - Open offers: ESPN leaves an expired offer `PENDING` and closes it with a separate CANCEL record that still says `isPending`; `EspnClient.pending_offers` keeps only open ones (docs/espn-api.md §1 #2). Offers come from `mTransactions2`, not `mPendingTransactions`, and expire 48 h after `proposedDate`.
-  - Phase 5: `fm.browser.transactions` (#25) builds the TRADE item and the envelope (`isLeagueManager` false, impossible combinations refused) and `fm.browser.selectors` is the registry to extend; `fm.model.relevance` (#23) already reads open trade proposals for its trade targets.
-  AC: test command passes for both tests (fake page; `auto` policy rejected for trade kinds; duplicate offers and locked-player trades blocked)
-- DONE [P1] [M] #45: Trade pitch and weekly strategist workers — scope: src/fm/advisor/pitch.py, src/fm/advisor/strategist.py, tests/advisor/test_pitch.py, tests/advisor/test_strategist.py — depends: #30 ✓, #32 ✓, #38 ✓
-  - Pitch draft per approved trade idea.
-  - Weekly priorities, punts, and targets → proposals.
-  AC: test command passes for both tests with a stubbed client
-- DONE [P1] [S] #46: Weekly report — scope: src/fm/jobs/report.py, src/fm/commands/report.py, tests/jobs/test_report.py — depends: #16 ✓, #18 ✓, #36 ✓
-  - `fm report`: matchup outlook, playoff odds, moves made, upcoming deadlines; markdown + phone channel.
-  - Phone: `fm.notify.send_report(channel, title, body)` on `fm.notify.open_channel(config)`; long reports are split automatically.
-  AC: `uv run fm report` against fixtures writes a markdown report; test command passes
+## Phase 8 — DONE (MILESTONE: trades end-to-end + weekly report)
+Built:
+- **Trade flows and offers (#44).** `fm.browser.flows.trade`: `propose_trade` (`trade_propose`), `respond_trade` (`trade_accept`/`trade_decline`), `cancel_trade` (`trade_cancel`), both sports, API mode only.
+  - The proposal body is pinned key for key to `tests/fixtures/espn/real/{ffl/write_TRADE_PROPOSAL_1,fba/write_TRADE_PROPOSAL_derived}.json` (`expirationDate` ISO ms = now + 2 days, `comment: ""`, added to the serialized envelope because `Envelope.expiration_date` is an int). Accept/decline/cancel bodies follow the documented shapes only (no capture).
+  - Preconditions (all listed at once): `policy` must be `approve`, `decided_by` must be a person (not `auto`, not missing once past `proposed`), no duplicate open offer (same team, or a player already in any open offer), the trade deadline from `LeagueSettings.trade`, `tradeLocked`/`rosterLocked`/roster-lock cutoff for every player on both sides (`UNKNOWN` refuses), players where the deal says, our roster not over size (trade payloads carry no drop).
+  - Verify: a proposal by an open offer of ours with the same players; an accept only when the players moved or the record says executed (a deal held for league review is unverified); decline/cancel when the offer is closed and not executed.
+  - The UI builder walk (`/{sport}/team/trade?…` → `Trade <Player>` → Continue → `Send Trade Proposal`) is written and tested through a test-only subclass, but not registered: `fm.browser.drills` guards don't know `Send Trade Proposal` yet. Selectors `trade.*`, `trade_builder_url`, `WebPage.TRADE` + canary `PAGE_ADDRESSES` entry.
+  - `fm.decide.offers.decide_offers`, registered as `("nfl"|"nba","offers")`: evaluates open incoming offers with `evaluate_trade` and drafts one `TradeResponsePayload` answer each (ACCEPT → `trade_accept`; DECLINE/COUNTER → `trade_decline`, counter note in the rationale), deadline = offer expiry, dedupe `offer:<id>`, a rejected answer is not redrafted, an accept needing a drop is `blocked`. Skips loading the trade model when every offer is already answered. The tick imports it, passes `client=` to decisions that accept it, and runs it in every roster-lock window (`ACQUISITION_DECISIONS`).
+- **Pitch and strategist workers (#45).** `fm.advisor.pitch.draft_pitch(client, proposal, …)` → `Pitch` for a stored `trade_propose` (Claude sees only both sides, names and their-side facts; a draft missing a player is rejected; template fallback; 700 chars). `fm.advisor.strategist`: `engine_plan` (wraps `plan_weekly` with simulated category odds), `StrategyInputs` (incl. `league_id` for `llm_usage`), `idea_from`, `write_strategy` (Claude summary/priorities/notes over the template; punts and targets are the engine's only), `propose_targets` (approve-only `trade_propose`, one open offer per team, weekly cap, `max_offers` 3, same dedupe as `decide.trades`), `run_strategist`. Prompts in `src/fm/advisor/prompts/{trade_pitch,weekly_strategist}.md`. Not decision modules; nothing calls them yet.
+- **Weekly report (#46).** `fm.jobs.report` (`build_league_report` → `LeagueReport`, `render_markdown`, `report_path`, `write_report`) and `fm report [--league --as-of --schedule --matchups --fixtures DIR --out --days --notify/--no-notify]`: matchup outlook (outright win and tie odds, expected points or per-category odds), playoff/bye/title odds with trend against last week (per-season history `odds-<key>-<season>.json` in `reports_dir()`, one snapshot per day, trend vs the latest ≥ 6 days older), moves made (verified/failed executions in the window plus open proposals), deadlines from `fm.jobs.deadlines.upcoming` + the trade deadline. Every missing input degrades to a Notes line. Markdown to `cache/reports/weekly-YYYY-MM-DD.md`; phone via `send_report(open_channel(config), …)`, a send failure is a line, not an error.
+
+Patterns:
+- Trades are approval-only in policy and again in every flow (defence in depth against hand-edited rows); tests prove `auto` never reaches a trade at any layer.
+- `tests/test_public_names.py` forbids the same public name in two modules: check before naming (`write_report` is the report's; the strategist's is `write_strategy`).
+- Reports degrade per section with a note; nothing in `fm report` can write to ESPN.
+
+Open follow-ups:
+- Register the trade UI fallback: a trade planner in `fm.browser.drills.PLANNERS`, guard `Send Trade Proposal` as a final save, then `ProposeTrade.modes = (Mode.API, Mode.UI)`.
+- Capture accept/decline/cancel trade bodies.
+- Wire `run_strategist`/`draft_pitch` and a weekly `fm report` job into the tick/scheduler (DESIGN: "a weekly `fm report` job runs alongside the tick").
+- Canary `_trade_page` assumes team id 1 or 2 exists; pick from synced teams.
+- `fm sync` still does not store `mMatchup` (the report's matchup/odds sections need `--matchups`/`--fixtures` until it does).
+- Pitch term guard catches missing players only, not added players or swapped direction.
+- `ruff format --check` fails on `src/fm/commands/schedule.py` and `src/fm/decide/streaming.py` (pre-existing).
+
+Key files: src/fm/browser/flows/trade.py, src/fm/decide/offers.py, src/fm/browser/{selectors,canary}.py, src/fm/advisor/{pitch,strategist}.py, src/fm/advisor/prompts/, src/fm/jobs/report.py, src/fm/commands/report.py, src/fm/jobs/{tick,deadlines}.py, tests/fixtures/espn/real/*/write_TRADE_PROPOSAL_*.json. 2708 tests. Skipped: none. (3/3 tasks)
 
 ## Phase 9
-- IN PROGRESS [P2] [S] #47: Live report card — scope: src/fm/eval/report_card.py, tests/eval/test_report_card.py — depends: #33 ✓, #46 ✓
+- DONE [P2] [S] #47: Live report card — scope: src/fm/eval/report_card.py, tests/eval/test_report_card.py — depends: #33 ✓, #46 ✓
   - Weekly lineup efficiency, bench points, and pickup value on real decisions, appended to the report.
   AC: test command passes for tests/eval/test_report_card.py
