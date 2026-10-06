@@ -102,6 +102,19 @@ def roster_fix_screen(*, cancel: bool = True, proceed: bool = True) -> list[Fake
     return screen
 
 
+def trade_screen() -> list[FakeElement]:
+    """The trade builder: its heading, a checkbox per rostered player, Continue and Cancel Trade."""
+    return [
+        FakeElement(role="heading", name="Propose Trade Team 2"),
+        FakeElement(role="checkbox", name="Trade Some Starter"),
+        FakeElement(role="button", name="Continue"),
+        FakeElement(role="button", name="Cancel Trade"),
+    ]
+
+
+TRADE_URL = selectors.trade_builder_url("ffl", 1010101, 2026, 2, 1)
+
+
 def fix_url(player_id: int, kind: str) -> str:
     return selectors.roster_fix_url("ffl", 1010101, 2026, 1, player_id, kind)
 
@@ -113,11 +126,13 @@ ROSTER_ONLY = selectors.selectors_for(WebPage.ROSTER)
 
 
 def site(**screens: list[FakeElement]) -> FakePage:
-    """Every page of the registry, healthy unless a screen is replaced (``roster=``, ``players=``, ``fix=``)."""
+    """Every page of the registry, healthy unless a screen is replaced (``roster=``, ``players=``, ``fix=``,
+    ``trade=``)."""
     return FakePage(
         screens={
             ROSTER_URL: screens.get("roster", healthy_screen()),
             PLAYERS_URL: screens.get("players", players_screen()),
+            TRADE_URL: screens.get("trade", trade_screen()),
             fix_url(FIRST_POOL_PLAYER, "claim"): screens.get("fix", roster_fix_screen()),
         }
     )
@@ -549,6 +564,7 @@ def nfl_site() -> FakePage:
             selectors.team_page_url("ffl", league_id, team, season): healthy_screen(),
             selectors.players_page_url("ffl", league_id, team, season): players_screen(),
             selectors.roster_fix_url("ffl", league_id, season, team, FIRST_POOL_PLAYER, "claim"): roster_fix_screen(),
+            selectors.trade_builder_url("ffl", league_id, season, 1 if team != 1 else 2, team): trade_screen(),
         }
     )
 

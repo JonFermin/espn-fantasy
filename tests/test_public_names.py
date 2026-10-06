@@ -75,6 +75,8 @@ MODULES = (
     "fm.model.simulate",
     "fm.browser.flows.add_drop",
     "fm.browser.flows.waiver",
+    "fm.browser.flows.trade",
+    "fm.decide.offers",
     "fm.jobs.tick",
     "fm.jobs.deadlines",
     "fm.jobs.scheduler_windows",
