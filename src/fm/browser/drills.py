@@ -16,15 +16,19 @@ Nothing the drill does can save, in four layers. Any one of them alone is enough
 1. **The browser context is a dry run.** ``fm drill`` opens it as ``live_opener(...)(row, dry_run=True)``, the way ``fm
    execute --dry-run`` and ``fm canary`` do: every request that is not a GET to ``espn.com`` and everything sent to
    ESPN's write host is aborted, and the runtime's write transport refuses every send. :func:`run_drills` refuses a
-   runtime whose transport is not that :class:`fm.executor.RefusingTransport` (:class:`DrillError`).
+   runtime the opener did not mark ``dry_run`` (:attr:`fm.executor.Runtime.dry_run`, set by ``opener(row,
+   dry_run=True)``) or whose transport is not that :class:`fm.executor.RefusingTransport` (:class:`DrillError`).
 2. **The driver cannot confirm.** The flow gets a :class:`DrillUi` in place of the executor's. Its ``confirm`` waits for
    the control (so a missing one fails the drill), records the step it reached and raises
    :class:`fm.browser.flows.DryRunStop`; the control it is handed can never be clicked, and ``confirm`` returning
    instead of raising is a :class:`DrillSafetyError`.
-3. **The page refuses the save.** The page the flow sees is a :class:`GuardedPage`: a click on any locator that could be
-   a final-save control (the lineup's HERE, the player list's Add and Claim, the roster-fix dialog's Confirm) or that
-   cannot be classified raises :class:`FinalSaveClickError` before the click reaches the page, even for a flow that
-   skips ``ui.confirm``. Both errors are ``BaseException`` so a flow's ``except Exception`` cannot swallow them.
+3. **The page refuses the save.** The page the flow sees is a :class:`GuardedPage`: a click (or an Enter or Space
+   press, a check, a select) on any locator that could be a final-save control (the lineup's HERE, the player list's
+   Add and Claim, the roster-fix dialog's Confirm) or that cannot be classified raises :class:`FinalSaveClickError`
+   before it reaches the page, even for a flow that skips ``ui.confirm``. A locator is a final-save control when its
+   name matches a probe built from the players the plan and the preconditions name, and, whatever the player, when
+   its role name or text starts with Confirm, Add, Claim or Here. Both errors are ``BaseException`` so a flow's
+   ``except Exception`` cannot swallow them.
 4. **A watcher on the page's requests.** A request to ESPN's write host or a non-GET to a ``/transactions`` path is
    recorded when the page makes it (:class:`RequestWatch`). The context aborts it, but the drill reports it as a
    safety finding all the same.
@@ -49,6 +53,7 @@ what the flows click.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -101,6 +106,8 @@ ALERT_LINES = 12
 BLANK_PAGE = "about:blank"
 """Where the drill navigates after a walk: away from the half-made move."""
 DRILL_ACTOR = "fm drill"
+MAX_PROBE_NAMES = 40
+"""Player names the final-save probes are built from (their add/drop pairs grow with the square)."""
 
 
 class DrillError(RuntimeError):
@@ -395,6 +402,17 @@ class _Spec:
         shown = wanted.pattern if isinstance(wanted, Pattern) else wanted
         return f"{self.role or 'text'}[{shown}]"
 
+    def confirm_like(self) -> bool:
+        """Whether the name this locator looks for starts with Confirm, Add, Claim or Here (any alternative of a
+        pattern counts), whoever the player is: the shapes of every save control, which the probes only spell out for
+        the players the drill knows of."""
+        wanted = self.name if self.role is not None else self.text
+        if wanted is None:
+            return False
+        if isinstance(wanted, Pattern):
+            return any(_SAVE_WORDS.match(lead) for lead in _leads(wanted.pattern))
+        return _SAVE_WORDS.match(wanted.strip()) is not None
+
     def matches(self, accessible_name: str) -> bool:
         """Whether this locator would pick a control with this name. One that names nothing picks any."""
         if not self.known:
@@ -410,6 +428,39 @@ class _Spec:
 
 
 _UNKNOWN = _Spec(known=False)
+
+_SAVE_WORDS = re.compile(r"(?:confirm|add|claim|here)\b", re.IGNORECASE)
+"""What the name of every control that could save starts with (``Confirm move of ...``, ``Add ... for ...``, ``Claim
+... for ...``, HERE), compared case-insensitively."""
+_PATTERN_NOISE = re.compile(r"(?:\^|\\s[*+?]?|\\b|\s|\(\?[a-zA-Z-]*[:)]|\()+")
+_FLAG_GROUP = re.compile(r"\(\?[a-zA-Z-]*\)")
+
+
+def _leads(pattern: str) -> list[str]:
+    """What each alternative of a regex begins with, past anchors, whitespace and opening groups: for
+    ``^\\s*(?:confirm move of\\s.+|move)\\s*$`` that is ``confirm move of ...`` and ``move ...``. Only the alternatives
+    of the groups the pattern opens with count (the ``|`` in ``continue to (?:add|claim) ...`` sits in a later one)."""
+    first = _PATTERN_NOISE.match(pattern)
+    start = first.end() if first else 0
+    noise = pattern[:start]
+    lead_depth = noise.count("(") - len(_FLAG_GROUP.findall(noise))
+    leads = [pattern[start : start + 40]]
+    depth, index = lead_depth, start
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth <= lead_depth:
+            skipped = _PATTERN_NOISE.match(pattern, index + 1)
+            begin = skipped.end() if skipped else index + 1
+            leads.append(pattern[begin : begin + 40])
+        index += 1
+    return leads
 
 
 def final_save_probes(names: Sequence[str]) -> tuple[str, ...]:
@@ -430,6 +481,36 @@ def final_save_probes(names: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(probes))
 
 
+_ACTIVATION_KEYS = frozenset({"enter", "return", "numpadenter", "space"})
+
+
+def _activates(key: str) -> bool:
+    """Whether pressing ``key`` (``Enter``, ``Control+Enter``, ``Space``, a lone space...) would activate a control."""
+    last = " " if key.strip() == "" else key.rsplit("+", 1)[-1].strip().lower()
+    return last == " " or last in _ACTIVATION_KEYS
+
+
+def observed_names(observed: Any) -> tuple[str, ...]:
+    """The player names in a flow's ``Preconditions.observed`` (JSON-able data): every string under a ``name`` key, at
+    any depth. The probes are built from these as well as from the plan, because a flow builds its locators from the
+    names the preconditions read, which need not be the plan's."""
+    found: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key == "name" and isinstance(item, str) and item.strip():
+                    found.append(item.strip())
+                else:
+                    walk(item)
+        elif isinstance(value, list | tuple):
+            for item in value:
+                walk(item)
+
+    walk(observed)
+    return tuple(dict.fromkeys(found))
+
+
 class _Guard:
     """The guard's state, shared by one page and the locators derived from it."""
 
@@ -444,6 +525,11 @@ class _Guard:
         if not spec.known:
             self.refused.append(spec.describe())
             raise FinalSaveClickError(f"refused to click {spec.describe()}: the guard cannot tell it from a save")
+        if spec.confirm_like():
+            self.refused.append(spec.describe())
+            raise FinalSaveClickError(
+                f"refused to click {spec.describe()}: a name that starts with Confirm, Add, Claim or Here is a save"
+            )
         for probe in self.probes:
             if spec.matches(probe):
                 self.refused.append(spec.describe())
@@ -476,6 +562,7 @@ class GuardedLocator:
         self._inner.fill(value, timeout=timeout)
 
     def check(self, *, timeout: float | None = None) -> None:
+        self._guard.before_click(self._spec)  # a checked box on a save control can submit as well
         self._inner.check(timeout=timeout)
 
     def uncheck(self, *, timeout: float | None = None) -> None:
@@ -488,9 +575,12 @@ class GuardedLocator:
         label: str | Sequence[str] | None = None,
         timeout: float | None = None,
     ) -> list[str]:
+        self._guard.before_click(self._spec)
         return self._inner.select_option(value, label=label, timeout=timeout)
 
     def press(self, key: str, *, timeout: float | None = None) -> None:
+        if _activates(key):  # Enter or Space on a focused save control is a click
+            self._guard.before_click(self._spec)
         self._inner.press(key, timeout=timeout)
 
     # --- state ---
@@ -748,7 +838,8 @@ def _drill_flow(
         return DrillResult(flow.name, DrillStatus.FAILED, plan.description), (finding,)
     watch = RequestWatch()
     watch.attach(page)
-    ui = DrillUi(page, audit, final_save_probes(plan.names), prefix=f"drill-{flow.name}")
+    names = tuple(dict.fromkeys([*plan.names, *observed_names(pre.observed)]))[:MAX_PROBE_NAMES]
+    ui = DrillUi(page, audit, final_save_probes(names), prefix=f"drill-{flow.name}")
     findings: list[DrillFinding] = []
     stopped = False
     try:
@@ -765,8 +856,11 @@ def _drill_flow(
             DrillFinding(DrillFailureKind.NO_CONFIRM, flow.name, "the walk ended without reaching a confirm")
         )
     finally:
-        if findings:
-            ui.screenshot("failed")
+        try:
+            if findings:
+                ui.screenshot("failed")
+        except Exception as exc:  # a screenshot that fails must not stop the walk's page from being left
+            logger.warning("drill: could not take the failure screenshot: %s", exc)
         _leave(page)
     if watch.save_attempts:
         detail = f"the page sent a write ({'; '.join(watch.save_attempts)}); the dry-run guard aborted it"
@@ -837,13 +931,15 @@ def run_drills(
 ) -> DrillReport:
     """Drill every UI flow of ``league``'s sport (or just ``flows``, by name) on ``runtime``'s browser.
 
-    ``runtime`` must be a dry run's (its transport a :class:`fm.executor.RefusingTransport`), or :class:`DrillError`.
+    ``runtime`` must be a dry run's (opened with ``dry_run=True``, so ``Runtime.dry_run`` is set, and its transport a
+    :class:`fm.executor.RefusingTransport`), or :class:`DrillError`.
     ``registry`` defaults to the process-wide flows and ``planners`` to :data:`PLANNERS`; tests pass their own.
     Screenshots go under ``audit_root`` (default: ``drills/`` in the audit folder).
     """
-    if not isinstance(runtime.transport, RefusingTransport):
+    if not runtime.dry_run or not isinstance(runtime.transport, RefusingTransport):
         raise DrillError(
-            "the drill needs a dry-run runtime (a transport that refuses every send): open it with dry_run=True"
+            "the drill needs a dry-run runtime (Runtime.dry_run set, a transport that refuses every send): "
+            "open it with dry_run=True"
         )
     chosen = registry
     if chosen is None:

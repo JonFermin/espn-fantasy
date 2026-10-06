@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -42,6 +43,7 @@ from fm.browser.drills import (
     drill_alert,
     drill_payload,
     final_save_probes,
+    observed_names,
     read_views,
     run_drills,
     swap_target,
@@ -161,13 +163,14 @@ class Site(FakePage):
         ids = header.get("players", {}).get("filterIds", {}).get("value", [])
         return {"players": [self.cards[player_id] for player_id in ids if player_id in self.cards]}
 
-    def runtime(self, api: FakeEspnApi | None = None, *, transport: Any = None) -> Runtime:
+    def runtime(self, api: FakeEspnApi | None = None, *, transport: Any = None, dry_run: bool = True) -> Runtime:
         reader = (api or self.api()).client("fba", self.league.espn_league_id, self.league.season)
         return Runtime(
             reader=reader,
             transport=transport if transport is not None else RefusingTransport("dry run"),
             browser=FakeBrowser(self),
             member_id=FAKE_SWID,
+            dry_run=dry_run,
         )
 
     # --- what a visit shows ---
@@ -578,6 +581,21 @@ def test_a_failed_walk_still_navigates_away_and_leaves_a_screenshot(tmp_path: Pa
     assert any("failed" in Path(name).name for name in only(report, "add_drop").artifacts)
 
 
+def test_a_failure_screenshot_that_raises_does_not_skip_leaving_the_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: Any, name: str) -> None:
+        raise RuntimeError("the page is gone")
+
+    monkeypatch.setattr(UiSession, "screenshot", broken)
+    site = nba_site()
+    site.lacks.add("continue")
+    report = drill(site, tmp_path=tmp_path, flows=["add_drop"])  # does not raise
+
+    assert site.did("goto")[-1] == "about:blank" and site.closed
+    assert only(report, "add_drop").status is DrillStatus.FAILED
+
+
 def test_a_signed_out_profile_is_a_failure_naming_the_login(tmp_path: Path) -> None:
     site = nba_site()
     site.signed_in = False
@@ -781,6 +799,91 @@ def test_the_guard_refuses_every_shape_of_save_control_and_what_it_cannot_classi
     assert len(guard.clicks) == len(allowed)
 
 
+def test_a_confirm_like_name_is_refused_whatever_the_player_is() -> None:
+    """The probes only spell out the players the drill knows of; a flow builds its locators from ``PlayerFacts.name``,
+    which can differ, so a name that starts like a save control is refused on its own."""
+    guard = drills._Guard(final_save_probes(["Cole Anthony"]))
+    guarded = GuardedPage(FakePage(), guard)
+    blocked = [
+        selectors.add_button(guarded, "Somebody Else"),
+        selectors.claim_button(guarded, "Somebody Else"),
+        selectors.confirm_transaction_button(guarded, "Somebody Else", "Another One"),
+        guarded.get_by_role("button", name=re.compile(r"^\s*(?:here)\s*$", re.IGNORECASE)),
+        guarded.get_by_role("button", name=re.compile(r"(?i)^claim\s+x")),
+        guarded.get_by_role("button", name="  CONFIRM the thing"),
+        guarded.get_by_role("button", name=re.compile(r"^(?:move this|add a)", re.IGNORECASE)),  # a later alternative
+        guarded.get_by_text(re.compile(r"^add", re.IGNORECASE)),
+        guarded.get_by_text("Here"),
+    ]
+    for locator in blocked:
+        with pytest.raises(FinalSaveClickError):
+            locator.click()
+    assert guard.clicks == [] and len(guard.refused) == len(blocked)
+    for locator in (
+        selectors.drop_player_button(guarded, "Add Smith"),  # a player called Add is still only a drop button
+        selectors.continue_button(guarded, "Somebody Else", "Another One"),  # its (?:add|claim) is not a lead
+        guarded.get_by_role("button", name="Address book", exact=True),  # not the word Add
+        guarded.get_by_role("button", name=selectors.MOVE_NAME),
+    ):
+        guard.before_click(locator._spec)
+    assert len(guard.clicks) == 4
+
+
+def test_press_check_and_select_option_are_guarded_like_a_click() -> None:
+    """Enter or Space on a focused save control is a click, and so is checking or choosing on one."""
+    page = FakePage(
+        FakeElement(role="button", name="Add Somebody Guard for Team", on_click=lambda _page: pytest.fail("clicked")),
+        FakeElement(role="checkbox", name="Confirm it", options=("a",)),
+        FakeElement(role="combobox", name="Status", options=("ALL",)),
+    )
+    guard = drills._Guard(())
+    guarded = GuardedPage(page, guard)
+    add = guarded.get_by_role("button", name=re.compile("^add", re.IGNORECASE))
+    for key in ("Enter", "Space", " ", "Control+Enter", "NumpadEnter", "Return"):
+        with pytest.raises(FinalSaveClickError):
+            add.press(key)
+    with pytest.raises(FinalSaveClickError):
+        guarded.get_by_role("checkbox", name="Confirm it").check()
+    with pytest.raises(FinalSaveClickError):
+        guarded.locator("select").select_option("a")  # unclassified, as a click on it would be
+    assert page.did("press") == [] and page.did("check") == [] and page.did("select") == []
+    add.press("Tab")  # a key that activates nothing is not a save
+    status = guarded.get_by_role("combobox", name="Status")
+    status.select_option("ALL")
+    assert page.did("press") == [f"{add.__repr__()[len('GuardedLocator(') : -1]} Tab"] or len(page.did("press")) == 1
+    assert page.did("select") != []
+
+
+def test_the_probes_are_built_from_the_names_the_preconditions_observed_too(tmp_path: Path) -> None:
+    observed = {
+        "add": {"name": "Cole Anthony", "slot": 3},
+        "roster": {"1": {"name": "Tyus Jones"}},
+        "moves": [{"name": "A"}],
+    }
+    assert observed_names(observed) == ("Cole Anthony", "Tyus Jones", "A")
+    assert observed_names({"name": 5, "x": [{"name": " "}]}) == ()
+
+    seen: list[tuple[str, ...]] = []
+
+    class Spy(SneakyFlow):
+        name = "spy"
+
+        def check(self, ctx: FlowContext[AddDropPayload]) -> Preconditions:
+            return Preconditions(observed={"add": {"name": "Observed Name"}})
+
+        def run_ui(self, ctx: FlowContext[AddDropPayload], ui: UiDriver, pre: Preconditions) -> None:
+            seen.append(ui.guard.probes)  # type: ignore[attr-defined]
+            raise DryRunStop
+
+    site = nba_site()
+    plan = DrillPlan(AddDropPayload(add_espn_id=6589), "spy", ("Plan Name",))
+    registry = FlowRegistry()
+    registry.register(Spy(site))
+    drill(site, tmp_path=tmp_path, registry=registry, planners={"spy": lambda _views: plan})
+    [probes] = seen
+    assert any("Plan Name" in probe for probe in probes) and any("Observed Name" in probe for probe in probes)
+
+
 def test_a_derived_locator_keeps_what_it_was_built_from() -> None:
     page = FakePage(FakeElement(role="row").add(FakeElement(role="button", name="Move", text="HERE")))
     guarded = GuardedPage(page, drills._Guard(final_save_probes(["Cole Anthony"])))
@@ -839,6 +942,21 @@ def test_the_drill_refuses_a_runtime_that_could_send(tmp_path: Path) -> None:
         run_drills(
             LEAGUES["fba"],
             runtime=site.runtime(transport=FakeTransport()),
+            registry=real_registry(),
+            audit_root=tmp_path,
+            now=NOW,
+        )
+    assert site.did("goto") == [] and site.saves == []
+
+
+def test_the_drill_requires_the_runtime_to_say_it_was_opened_as_a_dry_run(tmp_path: Path) -> None:
+    """A refusing transport alone is not enough: the opener's own ``dry_run`` flag must be set (it is what makes
+    the live context abort every write), so a runtime built by hand with the right transport type is refused."""
+    site = nba_site()
+    with pytest.raises(DrillError, match="needs a dry-run runtime"):
+        run_drills(
+            LEAGUES["fba"],
+            runtime=site.runtime(dry_run=False),
             registry=real_registry(),
             audit_root=tmp_path,
             now=NOW,
@@ -1004,6 +1122,7 @@ def live(monkeypatch: pytest.MonkeyPatch, site: Site, *, error: Exception | None
             transport=RefusingTransport("dry run"),
             browser=FakeBrowser(site),
             member_id=FAKE_SWID,
+            dry_run=dry_run,
         )
 
     def opener(options: Any) -> Any:

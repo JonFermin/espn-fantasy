@@ -642,6 +642,7 @@ def fake_runtime(
     transport: FakeTransport | None = None,
     browser: FakeBrowser | None = None,
     member_id: str | None = FAKE_SWID,
+    dry_run: bool = False,
 ) -> Runtime:
     """An ``fm.executor.Runtime`` over fakes: ``api`` for reads, ``transport`` for writes, ``browser`` for UI mode."""
     return Runtime(
@@ -649,6 +650,7 @@ def fake_runtime(
         transport=transport if transport is not None else FakeTransport(),
         browser=browser if browser is not None else FakeBrowser(),
         member_id=member_id,
+        dry_run=dry_run,
     )
 
 
@@ -668,6 +670,8 @@ class FakeOpener:
 
     def __call__(self, league: LeagueRow, *, dry_run: bool) -> AbstractContextManager[Runtime]:
         self.calls.append((league.row_id, dry_run))
-        runtime = replace(self.runtime, transport=RefusingTransport("dry run")) if dry_run else self.runtime
+        runtime = (
+            replace(self.runtime, transport=RefusingTransport("dry run"), dry_run=True) if dry_run else self.runtime
+        )
         self.opened.append(runtime)
         return nullcontext(runtime)
