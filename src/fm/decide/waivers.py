@@ -879,8 +879,8 @@ before its add counts is two of them)."""
 
 
 def _in_flight(store: Store, league: LeagueRow, now: datetime) -> list[ProposalRow]:
-    """The league's acquisition proposals that have not settled on ESPN: the open ones, and the waiver claims the executor
-    submitted (``verified``) whose waiver run has not been read back yet.
+    """The league's acquisition proposals that have not settled on ESPN: the open ones, and the waiver claims the
+    executor submitted (``verified``) whose waiver run has not been read back yet.
 
     A ``verified`` claim stays pending on ESPN until its run, so its bid is still pledged. The run is the proposal's
     ``deadline`` (:func:`decide_waivers` sets a claim's to its waiver run; a claim stored without one is held for
@@ -891,7 +891,8 @@ def _in_flight(store: Store, league: LeagueRow, now: datetime) -> list[ProposalR
     team = store.teams.get(league.row_id, league.team_id)
     synced_at = team.as_of if team is not None else None
     rows: list[ProposalRow] = []
-    for row in store.proposals.find(league_id=league.row_id, statuses=(*OPEN_PROPOSAL_STATUSES, "verified"), kinds=kinds):
+    statuses = (*OPEN_PROPOSAL_STATUSES, "verified")
+    for row in store.proposals.find(league_id=league.row_id, statuses=statuses, kinds=kinds):
         if row.status == "verified":
             if row.kind != ProposalKind.WAIVER.value:
                 continue
@@ -986,8 +987,8 @@ def decide_waivers(
 
     In a league that bids, ``history`` (default: :func:`fm.decide.faab.load_bid_history`, the ``mTransactions2`` pages
     the sync captured) fits the winning-bid model the claims bid from; too little of it leaves the heuristic, with a
-    warning saying so. The bids of the league's open waiver proposals and of the claims already submitted whose run is not synced yet come
-    off the budget left (the module docs).
+    warning saying so. The bids of the league's open waiver proposals and of the claims already submitted whose run is
+    not synced yet come off the budget left (the module docs).
     """
     at = as_utc(now)
     row = _league_row(store, league)

@@ -879,7 +879,8 @@ def test_a_second_run_bids_from_what_the_first_runs_open_claim_leaves(store: Sto
     )
     numbers = second.proposals[0].engine_numbers["bid"]
     assert (numbers["budget_left"], numbers["pledged"]) == (80 - first_claim.bid, first_claim.bid)
-    assert f"nfl: ${first_claim.bid} of the FAAB budget is pledged by open or submitted waiver claims" in second.warnings
+    pledge = f"nfl: ${first_claim.bid} of the FAAB budget is pledged by open or submitted waiver claims"
+    assert pledge in second.warnings
     assert len(store.proposals.open(league.row_id)) == 2
     assert first_claim.bid + (second_claim.bid or 0) <= 80  # together the open claims never exceed what is left
 
