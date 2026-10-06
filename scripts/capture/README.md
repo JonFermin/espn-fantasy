@@ -48,20 +48,24 @@ Run from the repo root with `uv run python scripts/capture/capture.py [--raw DIR
 Typical order: `reads`, `webclient`, `snapshot`, `writes` (a person signs in and drives the flows), `fixtures`, then
 `uv run pytest -q tests/fixtures/espn/real`. `verify` repeats the check `writes` ends with.
 
-## Status (2026-10-05)
+## Status (2026-10-06)
 
-Reads, probes, calendars, the web-client code, fixtures and the verification are done; the last `snapshot`/`verify`
-pair found both leagues unchanged. The UI write captures are not done. The browser profile holds valid API cookies
-(`espn_s2`/`SWID`) but no OneID web session, so every ESPN page shows "Log in Required" and the UI cannot reach a
-transaction. `fm login` cannot create that session: it clears ESPN's cookies first and closes its window by itself as
-soon as the API cookies land. To finish:
+Done. Reads, probes, calendars, the web-client code and the fixtures landed on 2026-10-05; the guarded UI write
+captures on 2026-10-06, after Jon signed in by hand inside the `writes` window (the guard aborted nothing the sign-in
+needed). Captured and scrubbed into `tests/fixtures/espn/real/`: `ffl/write_ROSTER_1.json` (bench swap),
+`ffl/write_WAIVER_1.json` (claim with a drop, `bidAmount: null`), `fba/write_ROSTER_1.json` (bench swap),
+`fba/write_FREEAGENT_1.json` (one-click Add from the player list, no `memberId`) and `fba/write_FREEAGENT_2.json`
+(add plus drop through the roster-fix page). Not captured: a trade proposal in either game (an offer reaches a real
+manager, so none was driven to its request), an NBA waiver claim (nobody was on waivers) and an NFL free-agent add
+(everyone was on waivers until Wednesday). The `snapshot`/`verify` pair around the session found both leagues
+unchanged, and `writes` now also prints and keeps (raw, outside the repo) any non-transaction request it aborts.
+docs/espn-api.md section 4 records every payload and the page controls the capture saw; `tests/executor/test_transactions.py`
+rebuilds each capture from `fm.browser.transactions`.
 
-1. `capture.py snapshot`
-2. `capture.py writes`. Sign in inside its window when "Log in Required" shows. Once the team page shows the team,
-   drive a bench swap, a free-agent add/drop, a waiver claim and a trade proposal in each league, then close the
-   window. If the sign-in fails because the guard aborted a request it needed (the command lists them), run
-   `capture.py web-login`, sign in, close its window, and rerun `writes` if it reports that the session survived.
-3. `capture.py fixtures`, then `uv run pytest -q tests/fixtures/espn/real`.
+To repeat the capture after an ESPN change: `snapshot`, `writes` (sign in inside its window if "Log in Required"
+shows; drive the flows; close the window), `fixtures`, then `uv run pytest -q tests/fixtures/espn/real tests/executor`.
+If the sign-in fails because the guard aborted a request it needed (the command lists them), run `web-login`, sign in,
+close its window, and rerun `writes` if it reports that the session survived.
 
 ## Modules
 

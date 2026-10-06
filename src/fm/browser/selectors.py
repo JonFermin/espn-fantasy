@@ -8,12 +8,16 @@ canary (ROADMAP #28) can assert that each one still resolves. :class:`Presence` 
 page, ``within`` names the selector a scoped one is looked up inside, and ``after`` names the control whose click
 reveals it.
 
-Status (ROADMAP #14): the team-page address and the "Log in Required" heading are what the real-league capture saw.
-The roster controls (``MOVE`` on a player's row, then ``HERE`` on the row he goes to, which saves the move at once)
-follow ESPN's long-standing lineup editor but have not been driven yet: that needs the web sign-in the guarded UI
-capture is waiting for. Until it lands, API mode is the write path (docs/espn-api.md section 4), the UI fallback
-uses what is here, and the canary is the drift alarm. Add/drop (#27) and trades (#44) add their pages to
-:class:`WebPage` and register their selectors in this module.
+Status (ROADMAP #14): everything on the roster page below is what the guarded UI capture of 2026-10-06 saw while a
+bench swap was driven in each league (docs/espn-api.md section 4). The team-page address, the "Log in Required"
+heading, the ``table``/``row``/``cell`` roles, the slot labels and the ``Empty`` text held. The roster controls did
+not go by their visible text: the button that reads ``MOVE`` is named ``Select <Player> to move`` (and
+``Cancel Move of <Player>`` while his move is open), and the button that reads ``HERE`` is named ``Confirm move of
+<Player in that row> to <Slot full name>`` (``... to Bench``, ``... to Tight End``, ``... to Forward``), or just
+``Move`` on an empty slot's row. :data:`MOVE_BUTTON` and :data:`HERE_BUTTON` match those names, never the visible
+text. A ``HERE`` saves the move at once. The canary (#28) is the drift alarm. Add/drop (#27) and trades (#44) add
+their pages to :class:`WebPage` and register their selectors here; the names the capture saw on the player list, the
+roster-fix page and the trade builder are in docs/espn-api.md section 4.
 """
 
 from __future__ import annotations
@@ -65,10 +69,17 @@ def slot_label(game: Game | str, slot_id: int) -> str:
     return _SLOT_LABELS[resolved].get(slot_id) or ids_for(resolved).slot_label(slot_id)
 
 
-def _whole_word(text: str) -> Pattern[str]:
-    """A control whose accessible name is ``text`` and nothing else, in any case: ``MOVE`` or ``Move``, never
-    ``Remove``."""
-    return re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)
+def _whole_name(pattern: str) -> Pattern[str]:
+    """A control whose whole accessible name matches ``pattern``, in any case (Playwright's regex names search, so the
+    anchors keep ``Move`` from matching ``Select X to move`` or ``Cancel Move of X``)."""
+    return re.compile(rf"^\s*(?:{pattern})\s*$", re.IGNORECASE)
+
+
+MOVE_NAME = _whole_name(r"select\s.+\sto move")
+"""The accessible name of the button that reads ``MOVE``: ``Select <Player> to move`` (seen in both games)."""
+HERE_NAME = _whole_name(r"confirm move of\s.+\sto\s.+|move")
+"""The accessible name of the button that reads ``HERE``: ``Confirm move of <Player in that row> to <Slot full
+name>`` on a row that holds a player, ``Move`` on an empty slot's row (seen in both games)."""
 
 
 class Presence(StrEnum):
@@ -191,9 +202,10 @@ MOVE_BUTTON = _register(
     Selector(
         "roster.move",
         WebPage.ROSTER,
-        "MOVE on an unlocked player's row: picks him up and marks the rows he may go to (changes nothing by itself)",
+        "MOVE on an unlocked player's row (named 'Select <Player> to move'): picks him up and marks the rows he may "
+        "go to (changes nothing by itself)",
         role="button",
-        name=_whole_word("move"),
+        name=MOVE_NAME,
         presence=Presence.SOMETIMES,
         within="roster.row",
     )
@@ -202,9 +214,10 @@ HERE_BUTTON = _register(
     Selector(
         "roster.here",
         WebPage.ROSTER,
-        "HERE on a destination row after MOVE: puts the player there, swapping with whoever holds it; saves at once",
+        "HERE on a destination row after MOVE (named 'Confirm move of <Player> to <Slot>', or 'Move' on an empty "
+        "row): puts the player there, swapping with whoever holds it; saves at once",
         role="button",
-        name=_whole_word("here"),
+        name=HERE_NAME,
         presence=Presence.SOMETIMES,
         within="roster.row",
         after="roster.move",
