@@ -90,6 +90,7 @@ MODULES = (
     "fm.decide.lineup_daily",
     "fm.decide.streaming",
     "fm.decide.weekly",
+    "fm.model.baseline_nba",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""

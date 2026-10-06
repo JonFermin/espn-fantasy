@@ -37,3 +37,22 @@ Every id in `lineup`, `projections` and `actuals` must be in `players`; a slot m
 
 To make a new fixture: write `<sport>/backtest.json` and a settings file in this format. There is no generator in the
 repo; the loader's error messages name the offending key.
+
+## `nba/` (ROADMAP #43)
+
+A synthetic NBA points-league replay with the inputs of the `baseline_nba` source. `uv run python
+tests/fixtures/backtest/nba/generate.py` regenerates it (seed 43); the module docstring says what the world contains.
+Nothing in it is a capture: four made-up teams of ten made-up players (`BOS 1` ... `OKC 10`, ids in the 9,xxx,xxx
+range), 54 days, the last 14 of them scoring periods 1-14 (NBA periods are days; days without a game have no week).
+
+| File | Contents |
+|---|---|
+| `backtest.json` | Format 1, as above: sport `nba`, season 2027, the manager's 13-player roster (a fixed lineup), sources `espn` and `darko`, and actuals. A player who sits that day has no projection and no actual |
+| `settings.json` | Copy of `tests/fixtures/espn/fba_settings_points.json` (ESPN's default H2H points: PG SG SF PF C G F, 3 UTIL, 3 bench, IR) |
+| `inputs.json` | What `fm.model.baseline_nba.project_day` needs: DARKO's talent row per player (`players[].talent`, with the ESPN id), the game logs of all 54 days (`columns` + `logs` rows, stats.nba.com's column names), and per period (`days`) the teams that play, who is out, each team's spread and the teams on the second night of a back-to-back |
+
+The truth the games are drawn from has the effects the baseline models (teammates out, second nights, blowouts) and
+the two projection sources see none of them, so the fixture shows the mechanics of the comparison (does a source that
+models context help the blend?) and nothing about how much real NBA context is worth. `tests/model/test_baseline_nba.py`
+builds the baseline's rows from `inputs.json` (only games before each day are read) and compares the blend with and
+without them.
