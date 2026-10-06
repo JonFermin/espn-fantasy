@@ -165,7 +165,7 @@ def test_card_scores_the_lineups_we_started_against_the_hindsight_optimum(
     assert card.efficiency == pytest.approx(41 / 50)
     assert (card.left, card.bench, card.swaps) == (9, 10, 1)
     assert card.pickups == ()
-    assert "no verified add or claim to value yet" in card.notes
+    assert not any("add or claim" in note for note in card.notes)  # no pickups is said in the section, not a note
 
 
 def test_pickup_value_is_the_add_against_the_player_dropped_in_the_weeks_he_was_ours(
@@ -249,3 +249,29 @@ def test_the_weekly_report_gets_a_report_card_section(tmp_path: Path, monkeypatc
     # the fixture home has no replayable history: the section says so, the report still has its other sections
     assert "### Report card\n\nNot available (see notes)." in markdown
     assert "report card:" in markdown and "### Moves made" in markdown
+
+
+def test_a_pickup_is_valued_over_one_stint_on_the_roster_and_needs_its_period(
+    settings: LeagueSettings, tmp_path: Path
+) -> None:
+    with Store.open(tmp_path / "state.db") as store:
+        league = seed(store)
+        later = {espn_id: slot for espn_id, slot in LINEUP[2].items() if espn_id != R3}  # R3 gone in period 2
+        store.rosters.replace(
+            league.row_id,
+            2,
+            1,
+            [
+                RosterEntryRow(
+                    league_id=league.row_id, scoring_period_id=2, team_id=1, espn_id=e, lineup_slot_id=s, as_of=AS_OF
+                )
+                for e, s in later.items()
+            ],
+        )
+        stint = add_pickup(store, league, add=R3, drop=None, period=1)
+        unknown = add_pickup(store, league, add=W1, drop=None, period=1)
+        store.proposals.update(store.proposals.get(unknown).model_copy(update={"scoring_period_id": None}))  # type: ignore[union-attr]
+        card = build_report_card(store, league, now=NOW, settings=settings)
+    (line,) = card.pickups
+    assert line.proposal_id == stint and line.periods == (1,)  # the stint ends when he leaves the roster
+    assert f"pickup #{unknown} has no scoring period; not valued" in card.notes

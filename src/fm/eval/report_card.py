@@ -22,6 +22,7 @@ synced settings, without a played week, or without actuals is a note in :attr:`R
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final
@@ -210,8 +211,10 @@ def _pickups(
             continue
         if not isinstance(payload, AddDropPayload | WaiverPayload) or payload.add_espn_id is None:
             continue
-        first = proposal.scoring_period_id or 0
-        played = tuple(period for period in data.periods if period >= first and payload.add_espn_id in rosters[period])
+        if proposal.scoring_period_id is None:
+            notes.append(f"pickup #{move.proposal_id} has no scoring period; not valued")
+            continue
+        played = _stint(data.periods, rosters, proposal.scoring_period_id, payload.add_espn_id)
         dropped = payload.drop_espn_id
         lines.append(
             PickupLine(
@@ -225,9 +228,20 @@ def _pickups(
                 given_up=0.0 if dropped is None else math.fsum(scored(period, dropped) for period in played),
             )
         )
-    if not lines:
-        notes.append("no verified add or claim to value yet")
     return tuple(lines), notes
+
+
+def _stint(
+    periods: Iterable[int], rosters: Mapping[int, Mapping[int, int]], first: int, espn_id: int
+) -> tuple[int, ...]:
+    """The played periods of one stint on our roster from ``first``: it ends at the first played period he is not
+    on the roster, so a later re-add is its own pickup and no period is valued twice."""
+    stint: list[int] = []
+    for period in sorted(p for p in periods if p >= first):
+        if espn_id not in rosters[period]:
+            break
+        stint.append(period)
+    return tuple(stint)
 
 
 def _name(data: BacktestData, store: Store, league: LeagueRow, espn_id: int) -> str:
