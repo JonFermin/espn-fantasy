@@ -89,7 +89,21 @@ def _game_state(data: Any, game: str) -> None:
 def _write(data: Any, game: str) -> None:
     body = data["body"]
     assert data["method"] == "POST" and body["isLeagueManager"] is False
-    assert {"teamId", "type", "memberId", "scoringPeriodId", "executionType"} <= set(body)
+    assert {"teamId", "type", "scoringPeriodId", "executionType"} <= set(body)
+    # The player list's one-click Add sends no memberId; every other captured flow does.
+    assert body.get("memberId", "{00000000-0000-0000-0000-000000000001}").startswith("{00000000-")
+    path, _, query = data["url"].partition("?")
+    assert path == (
+        f"https://lm-api-writes.fantasy.espn.com/apis/v3/games/{game}/seasons/{SEASONS[game]}/segments/0/leagues/"
+        f"{LEAGUE_PLACEHOLDERS[game]}/transactions/"
+    )
+    assert re.fullmatch(r"platformVersion=[0-9a-f]{40}", query)  # the web client's build sha
+    assert data["headers"] == {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-fantasy-platform": "espn-fantasy-web",
+        "x-fantasy-source": "kona",
+    }
 
 
 def _webclient(data: Any, game: None) -> None:

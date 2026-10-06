@@ -1,0 +1,17 @@
+{
+ "bytes": 14328,
+ "fetched_at": "2026-10-04T15:00:00+00:00",
+ "game": "ffl",
+ "kind": "proTeamSchedules_wl",
+ "league_id": null,
+ "params": {
+  "view": [
+   "proTeamSchedules_wl"
+  ]
+ },
+ "scoring_period_id": null,
+ "season": 2026,
+ "sha256": "1f02f6749884927aa331ab7ba21feff8534950cddd6d31be34475ef9cf095bf9",
+ "status_code": 200,
+ "url": "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026?view=proTeamSchedules_wl"
+}

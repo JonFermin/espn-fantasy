@@ -1,0 +1,39 @@
+{
+ "bytes": 5376,
+ "fetched_at": "2026-10-04T15:00:00+00:00",
+ "game": "ffl",
+ "kind": "kona_player_info",
+ "league_id": 1234567,
+ "params": {
+  "filter": {
+   "players": {
+    "filterStatus": {
+     "value": [
+      "FREEAGENT",
+      "WAIVERS"
+     ]
+    },
+    "limit": 50,
+    "offset": 0,
+    "sortDraftRanks": {
+     "sortAsc": true,
+     "sortPriority": 100,
+     "value": "STANDARD"
+    },
+    "sortPercOwned": {
+     "sortAsc": false,
+     "sortPriority": 1
+    }
+   }
+  },
+  "scoringPeriodId": 4,
+  "view": [
+   "kona_player_info"
+  ]
+ },
+ "scoring_period_id": 4,
+ "season": 2026,
+ "sha256": "cf2d8152a1fed42f93a5a7956a0e355e312c82fe34e12b84e802ccfc0dd607da",
+ "status_code": 200,
+ "url": "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567?view=kona_player_info&scoringPeriodId=4"
+}

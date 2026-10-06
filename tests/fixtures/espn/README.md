@@ -5,8 +5,12 @@ are `Manager N` with all-zero SWIDs, teams are `Fixture Team N`. Player ids and 
 data).
 
 All files are hand-built stand-ins in the shape of ESPN's responses (field catalogue from `cwendt94/espn-api` and the
-ESPN web app), not live captures. ROADMAP #14 replaces them with scrubbed real-league captures and settles the open
-unknowns (the lineup-lock key and value set, the pending-offer view and its list key, the player-card filter).
+ESPN web app), not live captures. The scrubbed real-league captures of ROADMAP #14 live under `real/` and settled the
+open unknowns (the lineup-lock key and value set, the pending-offer view and its list key, the player-card filter;
+docs/espn-api.md section 1). `tests/espn/test_settings.py` reads `real/*/mSettings.json` for everything the real
+leagues show; the stand-ins below stay for what they do not: categories, FAAB, a season acquisition limit, a fixed
+per-matchup limit and games-played caps (`fba_settings_9cat.json`, `ffl_settings_ppr.json`), and the model, sync and
+client tests still build on them.
 
 ## Settings (`mSettings`, parsed by `fm.espn.settings`)
 

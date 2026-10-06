@@ -8,12 +8,18 @@ canary (ROADMAP #28) can assert that each one still resolves. :class:`Presence` 
 page, ``within`` names the selector a scoped one is looked up inside, and ``after`` names the control whose click
 reveals it.
 
-Status (ROADMAP #14): the team-page address and the "Log in Required" heading are what the real-league capture saw.
-The roster controls (``MOVE`` on a player's row, then ``HERE`` on the row he goes to, which saves the move at once)
-follow ESPN's long-standing lineup editor but have not been driven yet: that needs the web sign-in the guarded UI
-capture is waiting for. Until it lands, API mode is the write path (docs/espn-api.md section 4), the UI fallback
-uses what is here, and the canary is the drift alarm. Add/drop (#27) and trades (#44) add their pages to
-:class:`WebPage` and register their selectors in this module.
+Status (ROADMAP #14): everything on the roster page below is what the guarded UI capture of 2026-10-06 saw while a
+bench swap was driven in each league (docs/espn-api.md section 4). The team-page address, the "Log in Required"
+heading, the ``table``/``row``/``cell`` roles, the slot labels and the ``Empty`` text held. The roster controls did
+not go by their visible text: the button that reads ``MOVE`` is named ``Select <Player> to move`` (and
+``Cancel Move of <Player>`` while his move is open), and the button that reads ``HERE`` is named ``Confirm move of
+<Player in that row> to <Slot full name>`` (``... to Bench``, ``... to Tight End``, ``... to Forward``), or just
+``Move`` on an empty slot's row. :data:`MOVE_BUTTON` and :data:`HERE_BUTTON` match those names, never the visible
+text. A ``HERE`` saves the move at once. The canary (#28) is the drift alarm. The player list and the roster-fix page
+(#27) carry the names the same capture saw while an add and a claim were driven (``Add <Name> <Position> for
+<Team>`` and ``Claim ...`` on the list; ``Drop Player <Name>``, ``Continue to add <Name> and drop <Name>`` and the
+"Confirm Transaction" dialog's ``Confirm add <Name> and drop <Name>`` on the roster-fix page; docs/espn-api.md
+section 4). Trades (#44) add the trade builder.
 """
 
 from __future__ import annotations
@@ -37,6 +43,35 @@ class WebPage(StrEnum):
     """The ESPN pages UI mode works on."""
 
     ROSTER = "roster"  # the team page: our roster by lineup slot, where lineup moves are made
+    PLAYERS = "players"  # the player list: free agents and waiver players, where an add or a claim starts
+    ROSTERFIX = "rosterfix"  # the roster-fix page: the drop an add or a claim needs when the roster is full
+
+
+class RosterFixType(StrEnum):
+    """The ``type`` query parameter of the roster-fix page: what the player named in ``players`` is coming in as."""
+
+    ADD = "add"  # a free-agent add
+    CLAIM = "claim"  # a waiver claim
+
+
+def players_page_url(game: Game | str, league_id: int, team_id: int, season: int) -> str:
+    """The player list (``fantasy.espn.com/{football|basketball}/players/add?leagueId=...&teamId=...&seasonId=...``),
+    where a free agent has an ``Add`` button and a waiver player a ``Claim`` button (seen by the #14 capture)."""
+    path = _SPORT_PATHS[Game.coerce(game)]
+    return f"{WEB_ROOT}/{path}/players/add?leagueId={league_id}&teamId={team_id}&seasonId={season}"
+
+
+def roster_fix_url(
+    game: Game | str, league_id: int, season: int, team_id: int, player_id: int, kind: RosterFixType | str
+) -> str:
+    """The roster-fix page for adding or claiming ``player_id``
+    (``.../rosterfix?leagueId=...&seasonId=...&teamId=...&players=<playerId>&type=add|claim``), where the app sends an
+    add or a claim when the roster is full, to pick the drop (seen by the #14 capture)."""
+    path = _SPORT_PATHS[Game.coerce(game)]
+    return (
+        f"{WEB_ROOT}/{path}/rosterfix?leagueId={league_id}&seasonId={season}&teamId={team_id}"
+        f"&players={player_id}&type={RosterFixType(kind).value}"
+    )
 
 
 def team_page_url(
@@ -65,10 +100,33 @@ def slot_label(game: Game | str, slot_id: int) -> str:
     return _SLOT_LABELS[resolved].get(slot_id) or ids_for(resolved).slot_label(slot_id)
 
 
-def _whole_word(text: str) -> Pattern[str]:
-    """A control whose accessible name is ``text`` and nothing else, in any case: ``MOVE`` or ``Move``, never
-    ``Remove``."""
-    return re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)
+def _whole_name(pattern: str) -> Pattern[str]:
+    """A control whose whole accessible name matches ``pattern``, in any case (Playwright's regex names search, so the
+    anchors keep ``Move`` from matching ``Select X to move`` or ``Cancel Move of X``)."""
+    return re.compile(rf"^\s*(?:{pattern})\s*$", re.IGNORECASE)
+
+
+MOVE_NAME = _whole_name(r"select\s.+\sto move")
+"""The accessible name of the button that reads ``MOVE``: ``Select <Player> to move`` (seen in both games)."""
+HERE_NAME = _whole_name(r"confirm move of\s.+\sto\s.+|move")
+"""The accessible name of the button that reads ``HERE``: ``Confirm move of <Player in that row> to <Slot full
+name>`` on a row that holds a player, ``Move`` on an empty slot's row (seen in both games)."""
+ADD_NAME = _whole_name(r"add\s.+\sfor\s.+")
+"""The player list's button for a free agent: ``Add <Name> <Position words> for <Team>`` (seen in both games). With
+roster room one click sends the ``FREEAGENT`` request."""
+CLAIM_NAME = _whole_name(r"claim\s.+\sfor\s.+")
+"""The player list's button for a player on waivers: ``Claim <Name> <Position words> for <Team>``."""
+DROP_PLAYER_NAME = _whole_name(r"drop player\s.+")
+"""The roster-fix page's button per droppable player (reads ``DROP``): ``Drop Player <Name>``."""
+UNDROPPABLE_TEXT = re.compile(r"^\s*can't drop\s.+", re.IGNORECASE)
+"""What the roster-fix page shows in place of the drop button for a player on ESPN's undroppable list."""
+CONTINUE_NAME = _whole_name(r"continue(?:\sto\s(?:add|claim)\s.+\sand drop\s.+)?")
+"""The roster-fix page's ``Continue`` button, renamed ``Continue to add <Name> and drop <Name>`` once a drop is
+picked (seen for a claim in NFL and an add in NBA); it opens the "Confirm Transaction" dialog."""
+CONFIRM_TRANSACTION_NAME = _whole_name(r"confirm (?:add|claim)\s.+\sand drop\s.+")
+"""The dialog's button that sends the transaction (reads ``Confirm``): ``Confirm add <Name> and drop <Name>``."""
+SAVE_FAILED_TEXT = re.compile(r"^\s*oops! looks like something went wrong", re.IGNORECASE)
+"""What the app shows when a save fails: ``Oops! Looks like something went wrong. Please try again``."""
 
 
 class Presence(StrEnum):
@@ -191,9 +249,10 @@ MOVE_BUTTON = _register(
     Selector(
         "roster.move",
         WebPage.ROSTER,
-        "MOVE on an unlocked player's row: picks him up and marks the rows he may go to (changes nothing by itself)",
+        "MOVE on an unlocked player's row (named 'Select <Player> to move'): picks him up and marks the rows he may "
+        "go to (changes nothing by itself)",
         role="button",
-        name=_whole_word("move"),
+        name=MOVE_NAME,
         presence=Presence.SOMETIMES,
         within="roster.row",
     )
@@ -202,9 +261,10 @@ HERE_BUTTON = _register(
     Selector(
         "roster.here",
         WebPage.ROSTER,
-        "HERE on a destination row after MOVE: puts the player there, swapping with whoever holds it; saves at once",
+        "HERE on a destination row after MOVE (named 'Confirm move of <Player> to <Slot>', or 'Move' on an empty "
+        "row): puts the player there, swapping with whoever holds it; saves at once",
         role="button",
-        name=_whole_word("here"),
+        name=HERE_NAME,
         presence=Presence.SOMETIMES,
         within="roster.row",
         after="roster.move",
@@ -229,3 +289,152 @@ def empty_slot_row(scope: PageLike | LocatorLike, label: str) -> LocatorLike | N
         if slot_cell(row, label).count() and EMPTY_SLOT.locate(row).count():
             return row
     return None
+
+
+# --- the player list --------------------------------------------------------------------------------------------------
+
+STATUS_FILTER = _register(
+    Selector(
+        "players.status_filter",
+        WebPage.PLAYERS,
+        "the status filter of the player list, a select offering ALL, AVAILABLE, WAIVERS, FREEAGENT and ONTEAM "
+        "(seen by the #14 capture); flows find a player's button by name instead of filtering",
+        role="combobox",
+    )
+)
+ADD_BUTTON = _register(
+    Selector(
+        "players.add",
+        WebPage.PLAYERS,
+        "a free agent's button on the player list (named 'Add <Name> <Position words> for <Team>'): with roster "
+        "room one click sends the FREEAGENT request, with a full roster it opens the roster-fix page",
+        role="button",
+        name=ADD_NAME,
+        presence=Presence.SOMETIMES,
+    )
+)
+CLAIM_BUTTON = _register(
+    Selector(
+        "players.claim",
+        WebPage.PLAYERS,
+        "a waiver player's button on the player list (named 'Claim <Name> <Position words> for <Team>')",
+        role="button",
+        name=CLAIM_NAME,
+        presence=Presence.SOMETIMES,
+    )
+)
+
+# --- the roster-fix page ----------------------------------------------------------------------------------------------
+
+DROP_PLAYER_BUTTON = _register(
+    Selector(
+        "rosterfix.drop",
+        WebPage.ROSTERFIX,
+        "the button per droppable player (reads DROP, named 'Drop Player <Name>'): picks him as the drop and renames "
+        "Continue (changes nothing by itself)",
+        role="button",
+        name=DROP_PLAYER_NAME,
+        presence=Presence.SOMETIMES,
+    )
+)
+UNDROPPABLE = _register(
+    Selector(
+        "rosterfix.undroppable",
+        WebPage.ROSTERFIX,
+        "what a player on ESPN's undroppable list shows in place of his drop button: \"Can't drop <Name>\"",
+        text=UNDROPPABLE_TEXT,
+        presence=Presence.SOMETIMES,
+    )
+)
+ROSTER_FIX_CANCEL = _register(
+    Selector(
+        "rosterfix.cancel",
+        WebPage.ROSTERFIX,
+        "the Cancel button of the roster-fix page (the dialog has its own; this one is looked up on the page only)",
+        role="button",
+        name=_whole_name("cancel"),
+    )
+)
+CONTINUE_BUTTON = _register(
+    Selector(
+        "rosterfix.continue",
+        WebPage.ROSTERFIX,
+        "Continue, renamed 'Continue to add <Name> and drop <Name>' once a drop is picked: opens the Confirm "
+        "Transaction dialog (changes nothing by itself)",
+        role="button",
+        name=CONTINUE_NAME,
+    )
+)
+CONFIRM_DIALOG = _register(
+    Selector(
+        "rosterfix.confirm_dialog",
+        WebPage.ROSTERFIX,
+        'the "Confirm Transaction" dialog Continue opens',
+        role="dialog",
+        name="Confirm Transaction",
+        presence=Presence.SOMETIMES,
+        after="rosterfix.continue",
+    )
+)
+CONFIRM_TRANSACTION_BUTTON = _register(
+    Selector(
+        "rosterfix.confirm",
+        WebPage.ROSTERFIX,
+        "the dialog's button that sends the FREEAGENT or WAIVER request (reads Confirm, named 'Confirm add <Name> "
+        "and drop <Name>'): the one state-changing click of the page",
+        role="button",
+        name=CONFIRM_TRANSACTION_NAME,
+        presence=Presence.SOMETIMES,
+        within="rosterfix.confirm_dialog",
+        after="rosterfix.continue",
+    )
+)
+SAVE_FAILED = _register(
+    Selector(
+        "rosterfix.save_failed",
+        WebPage.ROSTERFIX,
+        "what the app shows after a save that failed ('Oops! Looks like something went wrong. Please try again'); "
+        "seen on the roster-fix page, looked for after the player list's one-click Add too",
+        text=SAVE_FAILED_TEXT,
+        presence=Presence.NEVER,
+    )
+)
+
+
+def _named(scope: PageLike | LocatorLike, role: str, pattern: str) -> LocatorLike:
+    return scope.get_by_role(role, name=_whole_name(pattern))
+
+
+def add_button(scope: PageLike | LocatorLike, player_name: str) -> LocatorLike:
+    """The player list's ``Add <player_name> <Position words> for <Team>`` button."""
+    return _named(scope, "button", rf"add\s+{re.escape(player_name)}\s.+\sfor\s.+")
+
+
+def claim_button(scope: PageLike | LocatorLike, player_name: str) -> LocatorLike:
+    """The player list's ``Claim <player_name> <Position words> for <Team>`` button."""
+    return _named(scope, "button", rf"claim\s+{re.escape(player_name)}\s.+\sfor\s.+")
+
+
+def drop_player_button(scope: PageLike | LocatorLike, player_name: str) -> LocatorLike:
+    """The roster-fix page's ``Drop Player <player_name>`` button."""
+    return _named(scope, "button", rf"drop player\s+{re.escape(player_name)}")
+
+
+def undroppable_notice(scope: PageLike | LocatorLike, player_name: str) -> LocatorLike:
+    """The roster-fix page's ``Can't drop <player_name>`` text."""
+    return scope.get_by_text(re.compile(rf"^\s*can't drop\s+{re.escape(player_name)}\s*$", re.IGNORECASE))
+
+
+def continue_button(scope: PageLike | LocatorLike, add_name: str, drop_name: str) -> LocatorLike:
+    """The roster-fix page's ``Continue to add <add_name> and drop <drop_name>`` button, as it reads once the drop is
+    picked (``claim`` accepted in place of ``add``: the wording for a claim is read from the same page)."""
+    return _named(
+        scope, "button", rf"continue to (?:add|claim)\s+{re.escape(add_name)}\s+and drop\s+{re.escape(drop_name)}"
+    )
+
+
+def confirm_transaction_button(scope: PageLike | LocatorLike, add_name: str, drop_name: str) -> LocatorLike:
+    """The dialog's ``Confirm add <add_name> and drop <drop_name>`` button, the click that sends the transaction."""
+    return _named(
+        scope, "button", rf"confirm (?:add|claim)\s+{re.escape(add_name)}\s+and drop\s+{re.escape(drop_name)}"
+    )

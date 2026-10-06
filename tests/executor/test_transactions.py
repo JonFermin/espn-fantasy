@@ -1,11 +1,13 @@
 """Transaction envelopes and ESPN error codes (ROADMAP #25): ``fm.browser.transactions`` against docs/espn-api.md
 section 4.
 
-Until the guarded UI capture writes ``tests/fixtures/espn/real/{ffl,fba}/write_*.json`` (ROADMAP #14), the reference for
-a write is ESPN's own web client. Its serializer, item builders and service methods are saved verbatim in
-``tests/fixtures/espn/real/webclient.json``, and ``tests/fixtures/espn/real/test_real_fixtures.py`` pins the rules of
-docs/espn-api.md section 4 against that code. These tests hold the envelopes to the same sources:
+The reference for a write is what ESPN's own web app sent: the requests the guarded UI capture aborted and saved as
+``tests/fixtures/espn/real/{ffl,fba}/write_*.json`` (ROADMAP #14), and behind them the web client's serializer, item
+builders and service methods, saved verbatim in ``tests/fixtures/espn/real/webclient.json`` and pinned to the rules of
+docs/espn-api.md section 4 by ``tests/fixtures/espn/real/test_real_fixtures.py``. These tests hold the envelopes to
+those sources:
 
+- each captured flow, built from a proposal's own ids the way its flow builds it, is the captured body key for key;
 - the keys each body may carry come from section 4's serializer table;
 - their order comes from the serializer's ``get()``, and the items' order from the item builder;
 - the lineup transactions on record in both real leagues are rebuilt from their own items, and come out with the type
@@ -349,11 +351,21 @@ def test_the_headers_are_the_web_clients() -> None:
     assert f"X-Fantasy-Platform: {platform}" in API_DOC.read_text(encoding="utf-8")  # the value the capture saw
 
 
-# --- the guarded UI captures, once they exist -------------------------------------------------------------------------
+# --- the guarded UI captures ------------------------------------------------------------------------------------------
 
 WRITE_CAPTURES = sorted(path.relative_to(REAL).as_posix() for path in REAL.glob("*/write_*.json"))
-"""``{ffl,fba}/write_*.json``: requests the guard aborted while the UI flows were driven by hand (ROADMAP #14). None
-exist yet; when they land, this test makes them the reference."""
+"""``{ffl,fba}/write_*.json``: the requests the guard aborted while the UI flows were driven by hand on 2026-10-06
+(ROADMAP #14): a bench swap in each league, an NFL waiver claim with a drop, and two NBA free-agent adds (one-click from
+the player list, and add-plus-drop through the roster-fix page). They are the reference for every envelope."""
+CAPTURED_FLOWS = {
+    "ffl/write_ROSTER_1.json": "set_lineup",
+    "ffl/write_WAIVER_1.json": "claim_waiver",
+    "fba/write_FREEAGENT_1.json": "add_drop (one-click Add, no memberId)",
+    "fba/write_FREEAGENT_2.json": "add_drop (roster-fix add plus drop)",
+    "fba/write_ROSTER_1.json": "set_lineup",
+}
+LATEST_AT_CAPTURE = {"ffl": 5, "fba": 1}
+"""``status.latestScoringPeriod`` on 2026-10-06, the Tuesday of NFL week 5 and still NBA preseason day 1."""
 _REBUILD_ITEM = {
     "LINEUP": lambda item: lineup_item(item["playerId"], item["fromLineupSlotId"], item["toLineupSlotId"]),
     "ADD": lambda item: add_item(item["playerId"], item["toTeamId"]),
@@ -362,14 +374,96 @@ _REBUILD_ITEM = {
 }
 
 
-@pytest.mark.parametrize(
-    "relative",
-    [pytest.param(name, id=name) for name in WRITE_CAPTURES]
-    or [pytest.param("", id="none-yet", marks=pytest.mark.skip(reason="no write_*.json captures yet (ROADMAP #14)"))],
-)
+def test_the_captures_are_the_five_the_guard_saved() -> None:
+    assert WRITE_CAPTURES == sorted(CAPTURED_FLOWS)
+
+
+@pytest.mark.parametrize("relative", WRITE_CAPTURES, ids=WRITE_CAPTURES)
 def test_envelopes_rebuild_the_captured_web_client_requests(relative: str) -> None:
     """Each captured request, rebuilt from its own fields by this module, is byte for byte what the web client sent."""
     rebuild_capture(relative.split("/")[0], load(relative))
+
+
+def flow_built(relative: str) -> tuple[Envelope, LeagueRow]:
+    """The captured transaction built the way its flow would: ``set_lineup`` through ``lineup_envelope`` from
+    ``LineupMove``s, a claim or an add through ``Envelope`` with the item builders, nothing copied from the capture
+    but the player and slot ids a proposal would carry."""
+    game = relative.split("/")[0]
+    league = NFL if game == "ffl" else NBA
+    body = load(relative)["body"]
+    match relative:
+        case "ffl/write_ROSTER_1.json":  # bench swap: Omarion Hampton (FLEX 23) and the bench back (20)
+            envelope = lineup_envelope(
+                team_id=1,
+                member_id=SWID,
+                scoring_period_id=5,
+                latest_scoring_period=LATEST_AT_CAPTURE["ffl"],
+                moves=swap(15847, 4685382, 23, 20),
+            )
+        case "fba/write_ROSTER_1.json":  # bench swap: Andrew Wiggins (UTIL 11) and Jaime Jaquez Jr. (bench 12)
+            envelope = lineup_envelope(
+                team_id=1,
+                member_id=SWID,
+                scoring_period_id=1,
+                latest_scoring_period=LATEST_AT_CAPTURE["fba"],
+                moves=swap(3059319, 4432848, 11, 12),
+            )
+        case "ffl/write_WAIVER_1.json":  # a claim with a drop in a league without FAAB: bidAmount is null
+            envelope = Envelope(
+                1, TransactionType.WAIVER, SWID, 5, items=(add_item(4723086, 1), drop_item(4360078, 1)), bid_amount=None
+            )
+        case "fba/write_FREEAGENT_1.json":  # the player list's one-click Add: no drop and no memberId
+            envelope = Envelope(1, TransactionType.FREEAGENT, None, 1, items=(add_item(6589, 1),))
+        case "fba/write_FREEAGENT_2.json":  # the roster-fix page: add plus drop, with memberId
+            envelope = Envelope(1, TransactionType.FREEAGENT, SWID, 1, items=(add_item(6589, 1), drop_item(4397136, 1)))
+        case _:
+            raise AssertionError(f"no builder for {relative}: add one when a new capture lands")
+    assert envelope.type.value == body["type"]
+    return envelope, league
+
+
+@pytest.mark.parametrize("relative", WRITE_CAPTURES, ids=WRITE_CAPTURES)
+def test_each_flow_builds_its_captured_body(relative: str) -> None:
+    """A transaction built from a proposal's own ids (not from the capture) is the captured body, key for key and in
+    order; the placeholder ids (team 1, our SWID) are the scrubber's, the player and slot ids are ESPN's."""
+    envelope, _league = flow_built(relative)
+    captured = load(relative)["body"]
+    assert envelope.body() == captured
+    assert list(envelope.body()) == list(captured)
+    assert json.dumps(envelope.body()) == json.dumps(captured)
+
+
+def test_a_claim_without_a_bid_sends_bid_amount_null_and_a_cancel_sends_none() -> None:
+    claim = Envelope(1, TransactionType.WAIVER, SWID, 5, items=(add_item(4723086, 1),)).body()
+    assert "bidAmount" in claim and claim["bidAmount"] is None  # ffl/write_WAIVER_1.json
+    assert list(claim)[-1] == "bidAmount"
+    cancel = Envelope(
+        1, TransactionType.WAIVER, SWID, 5, execution_type=ExecutionType.CANCEL, related_transaction_id="c"
+    )
+    assert "bidAmount" not in cancel.body()  # cancelWaiverClaim never sets one, so the serializer writes undefined
+
+
+def test_member_id_is_optional_on_the_wire() -> None:
+    one_click = load("fba/write_FREEAGENT_1.json")["body"]
+    roster_fix = load("fba/write_FREEAGENT_2.json")["body"]
+    assert "memberId" not in one_click and roster_fix["memberId"] == SWID
+    assert all("memberId" in load(name)["body"] for name in WRITE_CAPTURES if name != "fba/write_FREEAGENT_1.json")
+    assert "memberId" not in Envelope(1, TransactionType.FREEAGENT, None, 1, items=(add_item(6589, 1),)).body()
+
+
+@pytest.mark.parametrize("relative", WRITE_CAPTURES, ids=WRITE_CAPTURES)
+def test_the_request_matches_the_capture_but_for_platform_version(relative: str) -> None:
+    """URL (minus the web client's build sha), method, and the headers the executor sends from the browser session
+    (:data:`WEB_CLIENT_HEADERS` plus the transport's ``Content-Type`` and ``Accept``) are what the web client sent."""
+    envelope, league = flow_built(relative)
+    capture = load(relative)
+    request = transaction_request(league, envelope)
+    path, _, query = capture["url"].partition("?")
+    assert (request.method, request.url) == (capture["method"], path)
+    assert re.fullmatch(r"platformVersion=[0-9a-f]{40}", query)  # the client's own build; ours has none to send
+    sent = {"Content-Type": "application/json", "Accept": "application/json", **dict(request.headers)}
+    assert {name.lower(): value for name, value in sent.items()} == capture["headers"]
+    check_write_request(request, league)
 
 
 def rebuild_capture(game: str, capture: dict[str, Any]) -> None:
@@ -392,9 +486,8 @@ def rebuild_capture(game: str, capture: dict[str, Any]) -> None:
     assert capture["url"].split("?")[0] == transaction_request(league, rebuilt).url
 
 
-def test_without_captures_the_web_client_code_is_the_reference() -> None:
-    """Until the captures exist the tests above hold the envelopes to section 4 and webclient.json; this one fails
-    when the captures land without the index knowing them, so the switch is never silent."""
+def test_every_capture_is_in_the_fixture_index() -> None:
+    """A capture the index does not know would be loaded by nothing but the tests above."""
     index = load("index.json")["files"]
     assert set(WRITE_CAPTURES) == {name for name, entry in index.items() if entry["kind"] == "write"}
 
