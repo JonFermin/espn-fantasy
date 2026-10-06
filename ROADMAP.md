@@ -82,7 +82,7 @@ Open follow-ups:
 Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm/render/, src/fm/browser/flows/{add_drop,waiver}.py, src/fm/browser/canary.py, src/fm/jobs/{tick,deadlines,scheduler_windows}.py, src/fm/advisor/{client,news_triage}.py, src/fm/model/simulate.py, src/fm/espn/calendar.py, data/calendars/, src/fm/decide/{lineup_daily,streaming,faab,rankings}.py, src/fm/eval/backtest.py, tests/fixtures/{home,backtest}/. 2148 tests. Skipped: none. (10/10 tasks)
 
 ## Phase 7
-- IN PROGRESS [P1] [M] #36: Close-call and explain workers — scope: src/fm/advisor/close_call.py, src/fm/advisor/explain.py, tests/advisor/test_close_call.py, tests/advisor/test_explain.py — depends: #20 ✓, #30 ✓
+- DONE [P1] [M] #36: Close-call and explain workers — scope: src/fm/advisor/close_call.py, src/fm/advisor/explain.py, tests/advisor/test_close_call.py, tests/advisor/test_explain.py — depends: #20 ✓, #30 ✓
   - Near-tie tie-break with the web search tool over a domain allowlist and cited sources.
   - Rationale per non-trivial proposal; trivial moves use templates.
   AC: test command passes for both tests with a stubbed client (allowlist configured; templated path makes no API call)
@@ -130,7 +130,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   - Pitch draft per approved trade idea.
   - Weekly priorities, punts, and targets → proposals.
   AC: test command passes for both tests with a stubbed client
-- TODO [P1] [S] #46: Weekly report — scope: src/fm/jobs/report.py, src/fm/commands/report.py, tests/jobs/test_report.py — depends: #16 ✓, #18 ✓, #36
+- TODO [P1] [S] #46: Weekly report — scope: src/fm/jobs/report.py, src/fm/commands/report.py, tests/jobs/test_report.py — depends: #16 ✓, #18 ✓, #36 ✓
   - `fm report`: matchup outlook, playoff odds, moves made, upcoming deadlines; markdown + phone channel.
   - Phone: `fm.notify.send_report(channel, title, body)` on `fm.notify.open_channel(config)`; long reports are split automatically.
   AC: `uv run fm report` against fixtures writes a markdown report; test command passes
