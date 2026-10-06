@@ -62,3 +62,22 @@ weeks, which the hand-built fixture cannot.
 | `backtest.json`, `settings.json` | the replay (format 1): `espn`, `sleeper` projections and the actuals of 2026 weeks 1-10 |
 | `player_stats.json`, `snap_counts.json`, `schedules.json`, `player_ids.json` | nflverse-shaped history of the same world (2025 weeks 1-17, 2026 weeks 1-10), in the shapes described in `tests/fixtures/sources/baseline_nfl/README.md`; filler players have a GSIS id and an ESPN id but no PFR id |
 | `scoreboards.json` | the 2026 pregame lines by week: `home`, `away`, `spread` (home, ESPN's sign), `over_under` |
+
+## Result (recorded after the protocol was committed; nothing above was changed afterwards)
+
+Overall MAE in league points, `restrict_to_common=True`, 491 player-weeks, equal weights:
+
+| Source or blend | MAE | QB | RB | WR | TE |
+|---|---|---|---|---|---|
+| `espn` | 6.299 | 5.91 | 5.45 | 9.33 | 4.39 |
+| `sleeper` | 6.638 | 6.32 | 5.48 | 9.74 | 4.99 |
+| `opportunity` | 6.174 | 5.80 | 5.44 | 8.93 | 4.41 |
+| blend without the baseline (`espn` + `sleeper`) | 6.317 | 5.87 | 5.36 | 9.32 | 4.62 |
+| blend with the baseline (all three) | 6.157 | 5.82 | 5.32 | 8.91 | 4.50 |
+
+The blend with the baseline is about 2.5% better, so `test_acceptance_the_consistent_world_blend_with_the_baseline_is_no_worse`
+asserts it. Lineup efficiency (not part of the criterion) is 0.9351 with the baseline and 0.9398 without. Read the
+result with the caveats above: the world has the model's own structure and the sources' MAE (6.3, 6.6) sit well above
+the first fixture's (3.9, 4.2) because this world's game noise is a real week's, so a win here shows the baseline
+recovers a consistent world from noisy history, not that it beats ESPN on real NFL weeks. The WR column is high
+because the filler "WR" player aggregates a team's remaining wide-receiver volume.

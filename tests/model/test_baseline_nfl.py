@@ -819,3 +819,101 @@ def test_the_baseline_only_hurts_the_fixture_blend_by_a_bounded_amount(replay: B
     assert equal_without == pytest.approx(light_without)
     assert light_with < equal_with
     assert equal_with < equal_without * 1.06  # within about six percent at equal weight
+
+
+# --- the consistent-world backtest ---------------------------------------------
+# tests/fixtures/backtest/nfl_world/: one world supplies the baseline's history, the actuals and the sources' lines
+# (the pre-registered protocol is in its README).
+
+WORLD = BACKTEST / "nfl_world"
+
+
+@cache
+def world_raw(name: str) -> Any:
+    return json.loads((WORLD / name).read_text(encoding="utf-8"))
+
+
+@cache
+def world_inputs() -> tuple[tuple[PlayerGame, ...], Mapping[tuple[int, int, str], TeamLine]]:
+    def table(name: str) -> pl.DataFrame:
+        return pl.DataFrame(world_raw(name), infer_schema_length=None)
+
+    pfr = {row["pfr_id"]: row["gsis_id"] for row in world_raw("player_ids.json") if row["pfr_id"]}
+    return player_games(table("player_stats.json"), table("snap_counts.json"), pfr), schedule_lines(
+        table("schedules.json")
+    )
+
+
+def world_rows(data: BacktestData) -> list[ProjectionRow]:
+    """The baseline's rows for every replayed week of the world: history before the week, that week's pregame lines."""
+    games, schedule = world_inputs()
+    espn = {row["gsis_id"]: int(row["espn_id"]) for row in world_raw("player_ids.json")}
+    out: list[ProjectionRow] = []
+    for week in data.periods:
+        past = {key: line for key, line in schedule.items() if key[:2] < (data.season, week)}
+        settings = replace(DEFAULT_CONFIG, league_avg_total=league_average_total(past, DEFAULT_CONFIG.league_avg_total))
+        slate_: dict[str, TeamLine] = {}
+        for game in world_raw("scoreboards.json")[str(week)]:
+            totals = implied_team_totals(spread=game["spread"], over_under=game["over_under"])
+            slate_[game["home"]] = TeamLine(game["home"], game["away"], totals.home, "scoreboard")
+            slate_[game["away"]] = TeamLine(game["away"], game["home"], totals.away, "scoreboard")
+        projected = project_week(
+            games, season=data.season, week=week, games=slate_, history_lines=past, config=settings
+        )
+        out += [
+            ProjectionRow(
+                sport="nfl",
+                espn_id=espn[gsis],
+                source=OPPORTUNITY,
+                season=data.season,
+                scoring_period_id=week,
+                stats=dict(line),
+                as_of=NOW,
+            )
+            for gsis, line in projected.lines.items()
+        ]
+    return out
+
+
+@pytest.fixture(scope="module")
+def world() -> BacktestData:
+    data = load_fixture(WORLD)
+    return data.with_source(OPPORTUNITY, world_rows(data))
+
+
+def test_the_world_fixture_is_one_world(world: BacktestData) -> None:
+    assert world.sources == ("espn", "sleeper", OPPORTUNITY)
+    assert world.periods == tuple(range(1, 11)) and len(world.players) == 50
+    games, _ = world_inputs()
+    stats = {(g.gsis_id, g.week): g for g in games if g.season == 2026}
+    espn = {int(row["espn_id"]): row["gsis_id"] for row in world_raw("player_ids.json")}
+    # The backtest's actuals are the nflverse-shaped history's 2026 lines: the same world, not a lookalike.
+    checked = 0
+    for week in world.weeks:
+        for espn_id, line in week.actuals.items():
+            game = stats[(espn[espn_id], week.period)]
+            assert line.get("PY", 0.0) == game.pass_yards and line.get("REY", 0.0) == game.rec_yards
+            assert line.get("RTD", 0.0) == game.rush_tds and line.get("REC", 0.0) == game.receptions
+            checked += 1
+    assert checked > 300
+    # ESPN projects a bye as an empty line and Sleeper omits it; the baseline omits it.
+    allen = next(p.espn_id for p in world.players.values() if p.full_name == "Josh Allen")
+    by_source = {
+        source: {row.espn_id for row in rows if row.scoring_period_id == 2}
+        for source, rows in world.projections.items()
+    }
+    assert allen in by_source["espn"] and allen not in by_source["sleeper"] and allen not in by_source[OPPORTUNITY]
+
+
+def test_the_baseline_is_scored_beside_two_sources_that_see_the_truth_with_error(world: BacktestData) -> None:
+    report = run_backtest(world, restrict_to_common=True)
+    samples = {report.sources[name].overall.samples for name in report.sources}
+    assert len(samples) == 1 and samples.pop() > 300
+    assert all(math.isfinite(report.sources[name].mae) for name in report.sources)
+    # ESPN is the tighter source by construction (sigma 0.22 against 0.30).
+    assert report.sources["espn"].mae < report.sources["sleeper"].mae
+
+
+def test_acceptance_the_consistent_world_blend_with_the_baseline_is_no_worse(world: BacktestData) -> None:
+    with_baseline, without_baseline = blend_maes(world, 1.0)
+    assert with_baseline <= without_baseline + 1e-9

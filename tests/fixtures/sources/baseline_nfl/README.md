@@ -21,3 +21,7 @@ levels (its quarterbacks throw for about 170 yards), which is why the equal-weig
 | `schedules.json` | nflverse `schedules` columns (subset) | every game of those teams (`spread_line` is the home margin, positive when home is favored; `total_line`). 2026 week 4 has ATL @ NO (spread and total as in the recorded scoreboard) and DET @ CAR |
 | `player_ids.json` | `ff_playerids` columns (subset) | `espn_id`, `gsis_id`, `pfr_id` for the twelve |
 | `scoreboards.json` | week to games | the 2026 slates as ESPN's scoreboard would carry them before kickoff: `home`, `away`, `spread` (home spread, negative when home is favored) and `over_under`, nflverse team codes |
+
+The two backtest fixtures answer different questions. Scored on `tests/fixtures/backtest/nfl/` (made-up levels) this
+history hurts the equal-weight blend; `tests/fixtures/backtest/nfl_world/` generates history, actuals and the other
+sources' projections from one world, and its README pre-registers the protocol and records the result.
