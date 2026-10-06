@@ -1,0 +1,52 @@
+{
+ "bytes": 15511,
+ "fetched_at": "2026-10-04T15:00:00+00:00",
+ "game": "ffl",
+ "kind": "kona_playercard",
+ "league_id": 1234567,
+ "params": {
+  "filter": {
+   "players": {
+    "filterIds": {
+     "value": [
+      3918298,
+      4429795,
+      4430807,
+      4362628,
+      4361307,
+      4241416,
+      -16021,
+      3055899,
+      4373626,
+      4249836,
+      4361370,
+      3916387,
+      3929630,
+      15847,
+      4038815,
+      4569173,
+      4361050,
+      4429160
+     ]
+    },
+    "filterStatsForTopScoringPeriodIds": {
+     "additionalValue": [
+      "002026",
+      "102026",
+      "1120264"
+     ],
+     "value": 4
+    }
+   }
+  },
+  "scoringPeriodId": 4,
+  "view": [
+   "kona_playercard"
+  ]
+ },
+ "scoring_period_id": 4,
+ "season": 2026,
+ "sha256": "340dfe2614296ad53db08a75efc0be76bcd1200ec0a924bb463fc35a7a98525a",
+ "status_code": 200,
+ "url": "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567?view=kona_playercard&scoringPeriodId=4"
+}
