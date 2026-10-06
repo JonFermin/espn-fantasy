@@ -1,5 +1,6 @@
 """Public names mean one thing across ``fm.config``, ``fm.store``, ``fm.espn``, ``fm.sports``, ``fm.decide``,
-``fm.proposals``, ``fm.model``, ``fm.jobs``, ``fm.notify``, ``fm.browser.flows`` and ``fm.executor``.
+``fm.proposals``, ``fm.model``, ``fm.sources.news``, ``fm.jobs``, ``fm.notify``, ``fm.browser`` (flows, transactions,
+selectors) and ``fm.executor``.
 
 Store rows carry a ``Row`` suffix (``LeagueRow``) so they never shadow ``fm.config.League`` or a parsed ESPN model,
 and a name two modules both expose must be one object (a re-export such as ``Sport``), never two definitions. A module
@@ -32,6 +33,8 @@ MODULES = (
     "fm.sports.base",
     "fm.sports.nfl",
     "fm.decide.registry",
+    "fm.decide.lineup",
+    "fm.decide.waivers",
     "fm.proposals",
     "fm.proposals.payloads",
     "fm.proposals.policy",
@@ -43,6 +46,11 @@ MODULES = (
     "fm.model.scoring",
     "fm.model.projections",
     "fm.model.availability",
+    "fm.model.valuation",
+    "fm.model.relevance",
+    "fm.model.categories",
+    "fm.model.value_nba",
+    "fm.sources.news",
     "fm.jobs.sync",
     "fm.notify",
     "fm.notify.base",
@@ -53,6 +61,9 @@ MODULES = (
     "fm.notify.send",
     "fm.notify.bot",
     "fm.browser.flows",
+    "fm.browser.flows.lineup",
+    "fm.browser.transactions",
+    "fm.browser.selectors",
     "fm.executor",
     "fm.executor.audit",
     "fm.executor.run",

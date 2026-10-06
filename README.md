@@ -17,8 +17,12 @@ interface with the NFL plugin and decision registry, the proposal queue with pol
 capture of ESPN's write requests from the web UI (#14, which needs a manual web sign-in): scrubbed real-league read
 fixtures and `docs/espn-api.md`, league scoring and the ESPN + Sleeper projection blend, `fm sync` (league state,
 projections and the NFL and NBA id-crosswalk gates), the NBA plugin and crosswalk, phone approvals over Telegram or
-ntfy (`fm notify`, `fm bot`), and the executor framework behind `fm execute --dry-run`. No executor flow is
-registered yet, so nothing writes to ESPN.
+ntfy (`fm notify`, `fm bot`), and the executor framework behind `fm execute --dry-run`. Phase 5 is done: the NFL
+lineup optimizer, player valuation with NFL waiver and add/drop proposals, the full availability model (practice
+trends, the NBA official injury report, bounded Claude news signals, late-game pivots), ESPN and RotoWire news ingest
+with a relevance filter, NBA valuation (points and category G-scores, DARKO in the blend) and the transaction writer
+with the `set_lineup` executor flow. Only `fm execute` writes to ESPN, and during development it runs with `--dry-run`
+only (`--fixtures` serves recorded views offline).
 
 - [`docs/DESIGN.md`](docs/DESIGN.md): architecture, data sources, safety rules, phase plan
 - [`ROADMAP.md`](ROADMAP.md): 47 dependency-ordered build tasks
