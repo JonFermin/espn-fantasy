@@ -51,7 +51,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - Duplicate claims: `EspnClient.pending_offers` returns only open claims and offers (`PENDING`, not expired, not named by a CANCEL record; docs/espn-api.md §1 #2). Adds and drops close at the league's roster lock: `plugin.transaction_cutoff(pro_team_id, period, schedule, lock_type=settings.roster_lock_type)` per player moved (the real NBA league's `FIRSTGAME_SCORINGPERIOD` is the day's first tip, the NFL league's `INDIVIDUAL_GAME` each player's kickoff; `UNKNOWN` and ESPN's weekly types raise, so refuse the move rather than guess).
   - Phase 5: `fm.decide.waivers` (#21) already skips a free agent whose game this period has started and proposes nothing under an `UNKNOWN` roster lock type, so these preconditions are the backstop, not the first refusal. `fm.browser.transactions` has the ADD and DROP item builders and the envelope; `fm.browser.flows.lineup` is the pattern for preconditions that list every problem at once and refuse a wrong-period answer before the token is spent.
   AC: test command passes for test_add_drop and test_waiver against a fake page (preconditions, verification, dry-run)
-- TODO [P1] [S] #28: Selector canary — scope: src/fm/browser/canary.py, src/fm/commands/canary.py, tests/browser/test_canary.py — depends: #25 ✓
+- IN PROGRESS [P1] [S] #28: Selector canary — scope: src/fm/browser/canary.py, src/fm/commands/canary.py, tests/browser/test_canary.py — depends: #25 ✓
   - Read-only: asserts every registered selector resolves on the roster, free-agent, and trade pages, and that every read view still parses. Alerts on drift.
   - Phase 5: iterate the selector registry (`fm.browser.selectors`, #25) rather than listing selectors again: each entry records its page, a `Presence` (always / sometimes / never on a healthy page) and the row it sits in or the click that reveals it. The MOVE/HERE controls, the `Empty` text, the role=cell slot column, the Bench/FLEX labels and the team page's `scoringPeriodId` query parameter are unverified until #14's UI capture.
   AC: test command passes for tests/browser/test_canary.py (missing selector → alert payload); `uv run fm canary --help` exits 0
@@ -74,7 +74,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - News triage → stored signals.
   - Phase 5: `fm.model.relevance.relevance_for` ranks a category league's free agents by a summed per-category z-score stand-in written before #24; `fm.model.categories.CategoryModel` now exists, so rank with it. Store triage output as the news signals `fm.model.availability.assess` reads: each needs a source URL and a finite value, is clamped to ±0.3 × confidence, and the latest signal of a kind supersedes earlier ones.
   AC: test command passes for tests/advisor/ with a stubbed client (parsed output stored; refusal/max_tokens handled; budget cap blocks calls)
-- TODO [P1] [L] #31: NBA daily lineups and streaming — scope: src/fm/decide/lineup_daily.py, src/fm/decide/streaming.py, src/fm/espn/calendar.py, data/calendars/, tests/decide/test_lineup_daily.py, tests/decide/test_streaming.py — depends: #20 ✓, #24 ✓
+- IN PROGRESS [P1] [L] #31: NBA daily lineups and streaming — scope: src/fm/decide/lineup_daily.py, src/fm/decide/streaming.py, src/fm/espn/calendar.py, data/calendars/, tests/decide/test_lineup_daily.py, tests/decide/test_streaming.py — depends: #20 ✓, #24 ✓
   - Daily lineups across the matchup week, honoring any games-played limit.
   - Open slot-day detection.
   - Add/drop sequence under the acquisition limit as a daily knapsack/DP; adds land before the day's first tip; core players protected.
@@ -86,14 +86,14 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - Monte Carlo over the remaining schedule → P(win week), P(playoffs), P(bye), P(title); per-category win probabilities for NBA.
   - Phase 5: `fm.model.valuation.PlayerOutlook` and `LeagueValuation` (#21) are the simulator's per-team inputs; `fm.decide.lineup` already approximates P(win week) as a normal over the lineup's expected points and variance (`p·sd² + p(1−p)·points²` per player, 0 when he does not play).
   AC: test command passes for tests/model/test_simulate.py (seeded runs reproducible; playoff probabilities sum to playoff spots within tolerance)
-- TODO [P1] [M] #33: Backtest harness — scope: src/fm/eval/backtest.py, src/fm/commands/backtest.py, tests/eval/test_backtest.py, tests/fixtures/backtest/ — depends: #15 ✓, #20 ✓
+- IN PROGRESS [P1] [M] #33: Backtest harness — scope: src/fm/eval/backtest.py, src/fm/commands/backtest.py, tests/eval/test_backtest.py, tests/fixtures/backtest/ — depends: #15 ✓, #20 ✓
   - Replays past weeks → projection MAE by position, lineup efficiency (actual ÷ hindsight-optimal), start/sit regret.
   - Computes your historical lineup-efficiency baseline.
   AC: `uv run fm backtest --sport nfl --fixtures tests/fixtures/backtest` exits 0 and prints the three metrics; test command passes
-- TODO [P2] [S] #34: FAAB bid model — scope: src/fm/decide/faab.py, src/fm/decide/waivers.py, tests/decide/test_faab.py — depends: #14 ✓, #21 ✓
+- IN PROGRESS [P2] [S] #34: FAAB bid model — scope: src/fm/decide/faab.py, src/fm/decide/waivers.py, tests/decide/test_faab.py — depends: #14 ✓, #21 ✓
   - Fits winning-bid behavior from league transaction history and replaces the heuristic.
   AC: test command passes for tests/decide/test_faab.py (bid monotonic in value; cap respected)
-- TODO [P2] [S] #35: Rest-of-season rankings sheet — scope: src/fm/decide/rankings.py, src/fm/commands/rankings.py, tests/decide/test_rankings.py — depends: #21 ✓, #24 ✓
+- IN PROGRESS [P2] [S] #35: Rest-of-season rankings sheet — scope: src/fm/decide/rankings.py, src/fm/commands/rankings.py, tests/decide/test_rankings.py — depends: #21 ✓, #24 ✓
   - League-tuned ROS values for rostered players and free agents in both leagues (points, or G-scores for categories) → CSV.
   - A sanity check for waiver and trade calls; replaces the draft sheet, since both drafts are done.
   - Phase 5: `fm.model.value_nba.scheduled_points`, `period_lines` and `fit_categories` / `rank` (#24) give the NBA side; `fm.model.valuation.load_valuation(include_rostered=True)` (#21) values every rostered NFL player too.
