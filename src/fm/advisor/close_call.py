@@ -11,28 +11,35 @@ trade):
 
 - *Only near-ties are asked.* A :class:`CloseCall` cannot be built unless it has two or more options, all within its
   ``margin`` of the engine's best score (:func:`near_ties` picks them from a larger field). The engine's own top
-  option is always one of them.
+  option is always one of them. The margin itself is bounded: at most :data:`CLOSE_CALL_MAX_MARGIN_FRACTION` of the
+  best score and never above :data:`CLOSE_CALL_MAX_MARGIN` (:func:`max_margin`), so a caller cannot widen "near" until
+  anything qualifies; a larger margin raises ``ValueError``.
+- *Only our own players are options.* A :class:`CloseCall` takes the ids of the current roster and refuses an option
+  that is not on it, so a free agent can never be among the choices and a "pick" can never turn into an add.
 - *Only the options can be chosen.* The pick must be the ESPN id of one of the options; anything else is
   ``rejected``. There is no way to name a player outside the call, so there is no way to ask for an add, a drop or a
   trade, and :attr:`CloseCallResult.choice` is an option whatever happened.
 - *Cited or ignored.* A pick stands only with at least one finding that names an option, has a claim, and cites an
-  ``http(s)`` page on an allowlisted domain (the same list the search tool is restricted to, so a page the search
-  cannot have returned is dropped here too). A pick with no such finding is ``rejected`` and the engine's choice
-  stands. The valid sources come back as :class:`Source` rows for the proposal's rationale.
+  ``http(s)`` page that is on an allowlisted domain (the list the search tool is restricted to) AND was actually
+  returned by the search: the URL, normalized by :func:`normalize_url` (scheme and host case, trailing slash,
+  fragment), must be among the ``web_search_result`` URLs of the reply (``WorkerReply.search_urls``). A model can
+  write a plausible URL it never retrieved; such a finding is logged and dropped. A pick with no valid finding is
+  ``rejected`` and the engine's choice stands. The valid sources come back as :class:`Source` rows for the
+  proposal's rationale.
 - *Confident or ignored.* A pick below :data:`CLOSE_CALL_MIN_CONFIDENCE` is ``no_change``, as is a null pick.
 - *Logged.* Every outcome is logged with its sources, and the call is recorded in ``llm_usage`` by the client.
 
 The statuses of :class:`fm.advisor.client.WorkerReply` map to ``failed`` (refusal, ``max_tokens`` and the other
-non-``ok`` statuses, with the reason: no partial data is read, and a ``pause_turn`` from the search loop is a
-failure, not something to resume), and :class:`fm.advisor.client.BudgetExceededError` to ``blocked``. In both the
-engine's choice stands, which is the fallback.
+non-``ok`` statuses, with the reason: no partial data is read; a ``pause_turn`` from the search loop is resumed by
+the client up to its cap and is a failure if it is still paused then), and
+:class:`fm.advisor.client.BudgetExceededError` to ``blocked``. In both the engine's choice stands, which is the
+fallback.
 
-**The search tool.** The client's :class:`fm.advisor.client.Prompt` carries no tools, so this module adds
-:class:`SearchPrompt` (a prompt that also carries the allowlist and the ``max_uses`` cap, and puts the tool in the
-call parameters) and :class:`SearchSdkTransport` (the SDK transport that sends them). :func:`close_call_client` builds
-an :class:`~fm.advisor.client.AdvisorClient` over it; :func:`decide_close_call` refuses a client whose transport is
-the plain one, which would drop the tool and let the model answer without searching. The allowlist is a parameter
-defaulting to :data:`DEFAULT_ALLOWED_DOMAINS` because ``fm.config.Llm`` has no field for it yet.
+**The search tool.** The client's :class:`fm.advisor.client.Prompt` carries ``tools``; :func:`close_call_prompt` puts
+the web search tool there (:class:`WebSearchTool`: the allowlist and the ``max_uses`` cap), so any
+:class:`~fm.advisor.client.AdvisorClient` can run this worker. The tool entry is the same on every call with the same
+allowlist and cap, which keeps the cached prefix warm. The allowlist is a parameter defaulting to
+:data:`DEFAULT_ALLOWED_DOMAINS` because ``fm.config.Llm`` has no field for it yet.
 """
 
 from __future__ import annotations
@@ -40,34 +47,26 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Final, Literal, NotRequired, cast
-from urllib.parse import urlsplit
+from typing import Any, Final, Literal
+from urllib.parse import urlsplit, urlunsplit
 
-import anthropic
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from fm.advisor.client import (
-    FALLBACK_BETA,
     AdvisorClient,
     AdvisorError,
     BudgetExceededError,
-    CallParams,
     Prompt,
-    RawReply,
-    SdkTransport,
-    TokenUsage,
-    Transport,
     WorkerReply,
     effort_for,
-    reply_from_message,
 )
 from fm.advisor.prompts import prompt_text
-from fm.config import Config, Sport
+from fm.config import Sport
 from fm.decide.lineup import LineupCandidate
-from fm.store import Store, utc_now
+from fm.store import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +75,12 @@ CLOSE_CALL_MAX_TOKENS: Final = 4096
 """The answer is a pick, a short rationale and a few findings; the search results count as input, not output."""
 CLOSE_CALL_MIN_CONFIDENCE: Final = 0.6
 """A pick below this confidence is ignored (``no_change``): 0.5 is a coin flip and the engine is the default."""
+CLOSE_CALL_MAX_MARGIN_FRACTION: Final = 0.2
+"""The widest a margin may be, as a fraction of the best option's score: two options 20% apart are a preference the
+engine already has, not a near-tie. A best score at or below 0 allows only an exact tie."""
+CLOSE_CALL_MAX_MARGIN: Final = 3.0
+"""The widest a margin may be in the engine's score units (usually league points), whatever the best score: no
+fraction of a large score turns a clear gap into a tie."""
 CLOSE_CALL_MAX_SEARCHES: Final = 5
 """The search tool's ``max_uses`` cap per call."""
 WEB_SEARCH_TOOL: Final = "web_search_20260209"
@@ -128,88 +133,33 @@ def normalize_domains(domains: Sequence[str]) -> tuple[str, ...]:
 
 def domain_allowed(url: str, allowed_domains: Sequence[str]) -> bool:
     """True for an ``http(s)`` URL whose host is an allowlisted domain or a subdomain of one."""
-    parts = urlsplit(url.strip())
-    host = (parts.hostname or "").lower()
+    try:
+        parts = urlsplit(url.strip())
+        host = (parts.hostname or "").lower()
+    except ValueError:  # e.g. an unclosed IPv6 bracket
+        return False
     if parts.scheme not in ("http", "https") or not host:
         return False
     return any(host == domain or host.endswith(f".{domain}") for domain in allowed_domains)
 
 
-class SearchCallParams(CallParams):
-    """:class:`~fm.advisor.client.CallParams` plus the server tools of the call."""
-
-    tools: NotRequired[list[dict[str, Any]]]
-
-
-@dataclass(frozen=True, slots=True)
-class SearchPrompt(Prompt):
-    """A :class:`~fm.advisor.client.Prompt` whose call also enables the web search tool over ``allowed_domains``."""
-
-    allowed_domains: tuple[str, ...] = ()
-    max_uses: int = CLOSE_CALL_MAX_SEARCHES
-
-    def __post_init__(self) -> None:
-        Prompt.__post_init__(self)
-        if self.max_uses < 1:
-            raise ValueError(f"max_uses must be positive, got {self.max_uses!r}")
-        object.__setattr__(self, "allowed_domains", normalize_domains(self.allowed_domains))
-
-    @property
-    def tool(self) -> WebSearchTool:
-        return WebSearchTool(max_uses=self.max_uses, allowed_domains=self.allowed_domains)
-
-    def params(self, model: str) -> SearchCallParams:
-        base = Prompt.params(self, model)
-        return SearchCallParams(**base, tools=[self.tool.model_dump(mode="json")])
+def normalize_url(url: str) -> str:
+    """The URL as compared against the search results: scheme and host lower-cased, the fragment dropped and a
+    trailing slash on the path removed (``https://ESPN.com/a/#x`` equals ``https://espn.com/a``). The path and the
+    query keep their case and order, which are significant. A string that is not a URL comes back stripped."""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return url.strip()
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, ""))
 
 
-class SearchSdkTransport(SdkTransport):
-    """:class:`~fm.advisor.client.SdkTransport` that also sends the ``tools`` of a :class:`SearchPrompt`; a call
-    without tools goes the plain way."""
-
-    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
-        tools = cast(SearchCallParams, params).get("tools")
-        if not tools:
-            return super().parse(params, output, fallback=fallback)
-        kwargs: dict[str, Any] = {
-            "model": params["model"],
-            "max_tokens": params["max_tokens"],
-            "system": params["system"],
-            "messages": params["messages"],
-            "output_config": params["output_config"],
-            "output_format": output,
-            "tools": tools,
-        }
-        try:
-            message: Any
-            if fallback:
-                message = self._sdk.beta.messages.parse(**kwargs, betas=[FALLBACK_BETA], fallbacks="default")
-            else:
-                message = self._sdk.messages.parse(**kwargs)
-        except ValidationError as exc:
-            return RawReply(
-                request_id=None,
-                model=str(params["model"]),
-                stop_reason=None,
-                usage=TokenUsage(),
-                detail=f"SDK could not parse the answer as {output.__name__} ({exc.error_count()} errors)",
-            )
-        except anthropic.APIError as exc:
-            raise AdvisorError(f"Claude API call failed: {exc}") from exc
-        return reply_from_message(message, output)
-
-
-def close_call_client(store: Store, config: Config, *, transport: Transport | None = None) -> AdvisorClient:
-    """An :class:`~fm.advisor.client.AdvisorClient` for the configured model and budget whose transport sends the
-    search tool (:class:`SearchSdkTransport` over the ``.env`` key, unless ``transport`` is given)."""
-    if transport is None:
-        key = config.secrets.anthropic_api_key
-        if key is None:
-            raise AdvisorError("ANTHROPIC_API_KEY is not set in .env; the advisor cannot run (fm config check)")
-        transport = SearchSdkTransport(
-            anthropic.Anthropic(api_key=key.get_secret_value(), timeout=120.0, max_retries=2)
-        )
-    return AdvisorClient(store, config.llm, transport)
+def web_search_tool(domains: Sequence[str], max_uses: int = CLOSE_CALL_MAX_SEARCHES) -> dict[str, Any]:
+    """The ``tools`` entry of a call: the web search tool over ``domains`` with a ``max_uses`` cap."""
+    if max_uses < 1:
+        raise ValueError(f"max_uses must be positive, got {max_uses!r}")
+    tool = WebSearchTool(max_uses=max_uses, allowed_domains=normalize_domains(domains))
+    return tool.model_dump(mode="json")
 
 
 # --- the structured output --------------------------------------------------------------------------------------------
@@ -292,14 +242,25 @@ def option_from_candidate(
     )
 
 
+def max_margin(best_score: float) -> float:
+    """The widest margin a :class:`CloseCall` may have when the best option scores ``best_score``: the smaller of
+    :data:`CLOSE_CALL_MAX_MARGIN` and :data:`CLOSE_CALL_MAX_MARGIN_FRACTION` of the score (0 for a score at or below
+    0)."""
+    return min(CLOSE_CALL_MAX_MARGIN, CLOSE_CALL_MAX_MARGIN_FRACTION * max(best_score, 0.0))
+
+
 def near_ties(options: Sequence[CloseCallOption], margin: float) -> tuple[CloseCallOption, ...]:
     """The options within ``margin`` of the best score, best first (ties keep their order); empty unless at least
-    two qualify, since one option is no call."""
+    two qualify, since one option is no call. A margin above :func:`max_margin` of the best score raises
+    ``ValueError``, as it would for a :class:`CloseCall`."""
     if margin < 0 or not math.isfinite(margin):
         raise ValueError(f"margin must be finite and non-negative, got {margin!r}")
     if not options:
         return ()
     ranked = sorted(options, key=lambda option: -option.score)
+    ceiling = max_margin(ranked[0].score)
+    if margin > ceiling:
+        raise ValueError(f"margin {margin:.2f} is wider than a near-tie may be (at most {ceiling:.2f})")
     tied = tuple(option for option in ranked if ranked[0].score - option.score <= margin)
     return tied if len(tied) >= 2 else ()
 
@@ -307,24 +268,39 @@ def near_ties(options: Sequence[CloseCallOption], margin: float) -> tuple[CloseC
 @dataclass(frozen=True, slots=True)
 class CloseCall:
     """One start/sit decision the engine cannot separate: ``options`` (two or more, all within ``margin`` of the best
-    score) for ``question`` ("Who starts at FLEX in week 5?"). Building one that is not a near-tie raises
-    ``ValueError``, which is how the worker stays a tie-breaker."""
+    score) for ``question`` ("Who starts at FLEX in week 5?"). ``roster_ids`` are the ESPN ids of the players on our
+    current roster; every option must be one of them. Building one that is not a near-tie, whose margin exceeds
+    :func:`max_margin`, or that has an option off the roster raises ``ValueError``, which is how the worker stays a
+    tie-breaker among our own players."""
 
     sport: Sport
     league_label: str
     question: str
     options: tuple[CloseCallOption, ...]
     margin: float
+    roster_ids: Collection[int]
     deadline: datetime | None = None
     league_id: int | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "roster_ids", frozenset(self.roster_ids))
         if len(self.options) < 2:
             raise ValueError("a close call needs at least two options")
         if len({option.espn_id for option in self.options}) != len(self.options):
             raise ValueError("a close call's options must be distinct players")
+        off_roster = [option.espn_id for option in self.options if option.espn_id not in self.roster_ids]
+        if off_roster:
+            raise ValueError(
+                f"options not on our roster: {', '.join(map(str, off_roster))}; only our players can be asked"
+            )
         if self.margin < 0 or not math.isfinite(self.margin):
             raise ValueError(f"margin must be finite and non-negative, got {self.margin!r}")
+        ceiling = max_margin(self.best.score)
+        if self.margin > ceiling:
+            raise ValueError(
+                f"margin {self.margin:.2f} is wider than a near-tie may be for a best score of "
+                f"{self.best.score:.2f} (at most {ceiling:.2f})"
+            )
         if not self.question.strip():
             raise ValueError("a close call needs a question")
         gap = self.best.score - min(option.score for option in self.options)
@@ -412,9 +388,13 @@ class CloseCallResult:
         return f"{CLOSE_CALL_WORKER}: {what}" + (f": {self.detail}" if self.detail else "")
 
 
-def judge_close_call(call: CloseCall, output: CloseCallOutput, allowed_domains: Sequence[str]) -> CloseCallResult:
+def judge_close_call(
+    call: CloseCall, output: CloseCallOutput, allowed_domains: Sequence[str], retrieved_urls: Iterable[str]
+) -> CloseCallResult:
     """The rules of the module docs applied to an answer, as a result without its ``reply``: ``pick``, ``no_change``
-    or ``rejected``. Each rejection and clamp is logged."""
+    or ``rejected``. ``retrieved_urls`` are the ``web_search_result`` URLs the search returned: a finding citing any
+    other page is dropped, however plausible. Each rejection and clamp is logged."""
+    retrieved = {normalize_url(url) for url in retrieved_urls}
     label = f"close call {call.league_label!r}"
     confidence = output.confidence
     if not math.isfinite(confidence):
@@ -442,11 +422,13 @@ def judge_close_call(call: CloseCall, output: CloseCallOutput, allowed_domains: 
             reason = "no claim"
         elif not domain_allowed(url, allowed_domains):
             reason = f"{url!r} is not an http(s) page on an allowlisted domain"
+        elif normalize_url(url) not in retrieved:
+            reason = f"{url!r} was not among the pages the search returned"
         if reason is not None:
             logger.warning("%s: finding dropped: %s", label, reason)
             continue
         sources.setdefault(
-            (url, finding.espn_id),
+            (normalize_url(url), finding.espn_id),
             Source(
                 url=url,
                 title=finding.source_title.strip(),
@@ -479,20 +461,18 @@ def close_call_prompt(
     now: datetime,
     max_searches: int = CLOSE_CALL_MAX_SEARCHES,
     max_tokens: int = CLOSE_CALL_MAX_TOKENS,
-) -> SearchPrompt:
+) -> Prompt:
     """The call's prompt: the worker's instructions and the league as cached system blocks, the question as the
     user block, and the search tool over ``allowed_domains``."""
-    return SearchPrompt(
+    domains = normalize_domains(allowed_domains)
+    return Prompt(
         system=prompt_text(CLOSE_CALL_WORKER),
-        context=f"League: {call.league_label} ({call.sport}). Sources are limited to: "
-        + ", ".join(normalize_domains(allowed_domains))
-        + ".",
+        context=f"League: {call.league_label} ({call.sport}). Sources are limited to: " + ", ".join(domains) + ".",
         user=call.text(now),
         max_tokens=max_tokens,
         effort=effort_for(CLOSE_CALL_WORKER),
         league_id=call.league_id,
-        allowed_domains=tuple(allowed_domains),
-        max_uses=max_searches,
+        tools=(web_search_tool(domains, max_searches),),
     )
 
 
@@ -507,11 +487,7 @@ def decide_close_call(
     """Ask Claude to break the tie in ``call`` and apply the module's rules to the answer.
 
     Never raises for a spent budget or an unreachable API (``blocked`` and ``failed`` leave the engine's choice);
-    raises :class:`~fm.advisor.client.AdvisorError` when ``client`` cannot send the search tool (see
-    :func:`close_call_client`) and ``ValueError`` for an empty allowlist."""
-    transport = getattr(client, "_transport", None)
-    if isinstance(transport, SdkTransport) and not isinstance(transport, SearchSdkTransport):
-        raise AdvisorError("this client's transport would drop the web search tool; build it with close_call_client")
+    raises ``ValueError`` for an empty allowlist."""
     when = now if now is not None else utc_now()
     domains = normalize_domains(allowed_domains)
     prompt = close_call_prompt(call, allowed_domains=domains, now=when, max_searches=max_searches)
@@ -529,7 +505,7 @@ def decide_close_call(
         result = CloseCallResult(call, "failed", detail=reply.detail or reply.status, reply=reply)
         logger.warning("advisor: %s", result.describe())
         return result
-    result = replace(judge_close_call(call, reply.output, domains), reply=reply)
+    result = replace(judge_close_call(call, reply.output, domains, reply.search_urls), reply=reply)
     logger.info(
         "advisor: %s; sources: %s",
         result.describe(),

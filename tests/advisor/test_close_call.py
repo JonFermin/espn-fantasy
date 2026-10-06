@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import anthropic
 import pytest
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message
 from pydantic import BaseModel
 
 from fm.advisor.client import (
@@ -26,6 +26,8 @@ from fm.advisor.client import (
     Transport,
 )
 from fm.advisor.close_call import (
+    CLOSE_CALL_MAX_MARGIN,
+    CLOSE_CALL_MAX_MARGIN_FRACTION,
     CLOSE_CALL_MAX_SEARCHES,
     CLOSE_CALL_MIN_CONFIDENCE,
     CLOSE_CALL_WORKER,
@@ -35,25 +37,27 @@ from fm.advisor.close_call import (
     CloseCallFinding,
     CloseCallOption,
     CloseCallOutput,
-    SearchPrompt,
-    SearchSdkTransport,
-    close_call_client,
     close_call_prompt,
     decide_close_call,
     domain_allowed,
+    max_margin,
     near_ties,
     normalize_domains,
+    normalize_url,
     option_from_candidate,
     result_numbers,
 )
 from fm.advisor.prompts import prompt_text
-from fm.config import DEFAULT_MODEL, Config, Llm
+from fm.config import DEFAULT_MODEL, Llm
 from fm.decide.lineup import LineupCandidate
 from fm.store import Store
 
 NOW = datetime(2026, 10, 6, 15, 0, tzinfo=UTC)
 DEADLINE = NOW + timedelta(hours=20)
 A, B, C = 4426348, 4373626, 3121422
+FREE_AGENT = 3999999
+ROSTER = frozenset({A, B, C})
+"""Our current roster: the only players a close call may name."""
 URL = "https://www.espn.com/nfl/story/_/id/46000001"
 ROTO = "https://www.rotowire.com/football/news/46000002"
 
@@ -76,8 +80,28 @@ class FakeTransport(Transport):
         return reply
 
 
-def raw(stop_reason: str | None = "end_turn", output: object = None, *, detail: str | None = None) -> RawReply:
-    return RawReply("msg_1", DEFAULT_MODEL, stop_reason, TokenUsage(1000, 200, 0, 0), output, detail)
+RETRIEVED = (URL, ROTO)
+"""What the fake search "returned": the pages the default findings cite."""
+
+
+def raw(
+    stop_reason: str | None = "end_turn",
+    output: object = None,
+    *,
+    detail: str | None = None,
+    search_urls: tuple[str, ...] = RETRIEVED,
+    resume_content: tuple[dict[str, Any], ...] = (),
+) -> RawReply:
+    return RawReply(
+        "msg_1",
+        DEFAULT_MODEL,
+        stop_reason,
+        TokenUsage(1000, 200, 0, 0),
+        output,
+        detail,
+        search_urls=search_urls,
+        resume_content=resume_content,
+    )
 
 
 def finding(espn_id: int = A, **overrides: Any) -> CloseCallFinding:
@@ -115,6 +139,7 @@ def call(**overrides: Any) -> CloseCall:
             ),
         ),
         "margin": 0.5,
+        "roster_ids": ROSTER,
         "deadline": DEADLINE,
         "league_id": None,
     }
@@ -189,7 +214,7 @@ def test_the_prompt_is_cached_system_text_and_the_question(store: Store) -> None
     assert f"{A}: Player A, RB, SEA, vs ARI, engine score 11.00, chance of playing 95%" in text
     assert f"{B}: Player B" in text and "designation QUESTIONABLE" in text
     assert "Deadline: 2026-10-07T11:00:00Z" in text and "Now: 2026-10-06T15:00:00Z" in text
-    assert isinstance(prompt, SearchPrompt)
+    assert len(prompt.tools) == 1 and prompt.tools[0]["allowed_domains"] == ["espn.com"]
 
 
 def test_domains_match_the_domain_and_its_subdomains_only() -> None:
@@ -205,84 +230,200 @@ def test_domains_match_the_domain_and_its_subdomains_only() -> None:
     assert not domain_allowed("", allowed)
 
 
-# --- the SDK transport sends the tool ---
+# --- the real client path: an SDK message, its search results, the judgement ---
 
 
-def sdk_message() -> Message:
-    return Message(
-        id="msg_sdk",
-        type="message",
-        role="assistant",
-        model=DEFAULT_MODEL,
-        stop_reason="end_turn",
-        usage=Usage(input_tokens=12, output_tokens=3),
-        content=[TextBlock(type="text", text=output().model_dump_json())],
-    )
-
-
-class FakeMessages:
-    def __init__(self) -> None:
-        self.kwargs: dict[str, Any] = {}
-
-    def parse(self, **kwargs: Any) -> Any:
-        self.kwargs = kwargs
-        return sdk_message()
-
-
-class FakeBeta:
-    def __init__(self) -> None:
-        self.messages = FakeMessages()
-
-
-class FakeSdk:
-    def __init__(self) -> None:
-        self.messages = FakeMessages()
-        self.beta = FakeBeta()
-
-
-def test_the_search_transport_sends_the_tools_on_both_surfaces() -> None:
-    sdk = FakeSdk()
-    transport = SearchSdkTransport(cast(anthropic.Anthropic, sdk))
-    params = close_call_prompt(call(), allowed_domains=("espn.com",), now=NOW).params(DEFAULT_MODEL)
-
-    reply = transport.parse(params, CloseCallOutput)
-    assert sdk.messages.kwargs["tools"][0]["allowed_domains"] == ["espn.com"]
-    assert sdk.messages.kwargs["output_format"] is CloseCallOutput
-    assert reply.stop_reason == "end_turn" and isinstance(reply.output, CloseCallOutput)
-
-    transport.parse(params, CloseCallOutput, fallback=True)
-    assert sdk.beta.messages.kwargs["tools"][0]["name"] == "web_search"
-    assert sdk.beta.messages.kwargs["fallbacks"] == "default"
-
-
-def test_a_plain_sdk_transport_would_drop_the_tool_so_the_worker_refuses_it(store: Store) -> None:
-    plain = AdvisorClient(store, Llm(), SdkTransport(cast(anthropic.Anthropic, FakeSdk())))
-    with pytest.raises(AdvisorError, match="would drop the web search tool"):
-        decide_close_call(plain, call(), now=NOW)
-    searching = AdvisorClient(store, Llm(), SearchSdkTransport(cast(anthropic.Anthropic, FakeSdk())))
-    assert decide_close_call(searching, call(), now=NOW).status == "pick"
-
-
-def config(**secrets: str) -> Config:
-    return Config.model_validate(
+def search_message(results: object, text: str, *, stop_reason: str = "end_turn") -> Message:
+    """What the API returns for a searching call: a remark, the server tool use, its result, then the answer."""
+    return Message.model_validate(
         {
-            "league": [{"key": "nfl", "sport": "nfl", "espn_league_id": 1, "season": 2026, "team_id": 1}],
-            "llm": {"daily_budget_usd": 1.5},
-            "secrets": secrets,
+            "id": "msg_sdk",
+            "type": "message",
+            "role": "assistant",
+            "model": DEFAULT_MODEL,
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 12, "output_tokens": 3},
+            "content": [
+                {"type": "text", "text": "Let me check the latest reports."},
+                {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "A snaps"}},
+                {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": results},
+                {"type": "text", "text": text},
+            ],
         }
     )
 
 
-def test_the_client_factory_builds_the_searching_transport_from_the_key(store: Store) -> None:
-    with pytest.raises(AdvisorError, match="ANTHROPIC_API_KEY is not set"):
-        close_call_client(store, config())
-    with pytest.raises(AdvisorError, match="ANTHROPIC_API_KEY is not set"):
-        close_call_client(store, config(ANTHROPIC_API_KEY=" "))  # a blank value counts as unset
-    fake = FakeTransport()
-    given = close_call_client(store, config(), transport=fake)
-    assert given.model == DEFAULT_MODEL and given.daily_budget_usd == 1.5
-    real = close_call_client(store, config(ANTHROPIC_API_KEY="sk-ant-test"))
-    assert isinstance(real._transport, SearchSdkTransport)  # built, never called
+def search_results(*urls: str) -> list[dict[str, Any]]:
+    return [
+        {"type": "web_search_result", "url": url, "title": "t", "encrypted_content": "enc", "page_age": None}
+        for url in urls
+    ]
+
+
+class FakeMessages:
+    def __init__(self, *messages: Message) -> None:
+        self.messages = list(messages)
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> Message:
+        self.calls.append(kwargs)
+        return self.messages.pop(0)
+
+
+class FakeBeta:
+    def __init__(self, *messages: Message) -> None:
+        self.messages = FakeMessages(*messages)
+
+
+class FakeSdk:
+    def __init__(self, *messages: Message) -> None:
+        self.messages = FakeMessages(*messages)
+        self.beta = FakeBeta(*messages)
+
+
+def sdk_client(store: Store, sdk: FakeSdk, *, fallback: bool = False) -> AdvisorClient:
+    transport = SdkTransport(cast(anthropic.Anthropic, sdk))
+    return AdvisorClient(store, Llm(), transport, refusal_fallback=fallback)
+
+
+def test_the_sdk_client_sends_the_search_tool_and_reads_the_answer_after_the_search(store: Store) -> None:
+    answer = search_message(search_results(URL), output().model_dump_json())
+    sdk = FakeSdk(answer)
+    result = decide_close_call(sdk_client(store, sdk), call(), now=NOW)
+
+    (sent,) = sdk.messages.calls
+    assert sent["tools"] == [
+        {
+            "type": WEB_SEARCH_TOOL,
+            "name": "web_search",
+            "max_uses": CLOSE_CALL_MAX_SEARCHES,
+            "allowed_domains": list(DEFAULT_ALLOWED_DOMAINS),
+        }
+    ]
+    assert sent["output_config"]["effort"] == "medium" and sent["output_config"]["format"]["type"] == "json_schema"
+    assert result.status == "pick" and result.pick == A  # the last text block is the answer, not the remark
+    assert result.reply is not None and result.reply.search_urls == (URL,)
+
+
+def test_the_sdk_client_sends_the_tool_on_the_fallback_surface_too(store: Store) -> None:
+    sdk = FakeSdk(search_message(search_results(URL), output().model_dump_json()))
+    result = decide_close_call(sdk_client(store, sdk, fallback=True), call(), now=NOW)
+
+    assert result.status == "pick" and sdk.messages.calls == []
+    (sent,) = sdk.beta.messages.calls
+    assert sent["tools"][0]["name"] == "web_search" and sent["fallbacks"] == "default"
+
+
+def test_a_web_search_error_object_is_handled_and_nothing_is_cited(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    error = {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}
+    sdk = FakeSdk(search_message(error, output().model_dump_json()))
+    with caplog.at_level(logging.WARNING):
+        result = decide_close_call(sdk_client(store, sdk), call(), now=NOW)
+
+    assert result.reply is not None and result.reply.search_urls == ()
+    assert "web search failed: max_uses_exceeded" in caplog.text
+    # The model answered anyway, but with no page retrieved nothing it cites can stand.
+    assert result.status == "rejected" and result.choice == A and result.sources == ()
+
+
+# --- citations are required and must have been retrieved ---
+
+
+def test_a_finding_citing_a_page_the_search_did_not_return_is_dropped(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Allowlisted host, plausible path, but the search returned only the Rotowire page.
+    client, _ = make_client(store, raw(output=output(A), search_urls=(ROTO,)))
+    with caplog.at_level(logging.WARNING, logger="fm.advisor.close_call"):
+        result = decide_close_call(client, call(), now=NOW)
+    assert result.status == "rejected" and result.choice == A and result.sources == ()
+    assert "was not among the pages the search returned" in caplog.text
+
+
+def test_a_search_with_no_results_leaves_every_citation_unbacked(store: Store) -> None:
+    client, _ = make_client(store, raw(output=output(A), search_urls=()))
+    assert decide_close_call(client, call(), now=NOW).status == "rejected"
+
+
+def test_a_retrieved_allowlisted_page_is_accepted_whatever_its_spelling(store: Store) -> None:
+    returned = ("HTTPS://WWW.ESPN.COM/nfl/story/_/id/46000001/",)
+    cited = finding(A, source_url=URL + "#comments")
+    client, _ = make_client(store, raw(output=output(A, findings=[cited]), search_urls=returned))
+    result = decide_close_call(client, call(), now=NOW)
+    assert result.status == "pick" and [s.url for s in result.sources] == [URL + "#comments"]
+
+
+def test_a_retrieved_page_off_the_allowlist_is_still_dropped(store: Store) -> None:
+    reddit = "https://www.reddit.com/r/fantasyfootball/x"
+    client, _ = make_client(
+        store, raw(output=output(B, findings=[finding(B, source_url=reddit)]), search_urls=(reddit,))
+    )
+    assert decide_close_call(client, call(), now=NOW).status == "rejected"  # both checks must hold
+
+
+def test_the_query_distinguishes_pages_but_the_fragment_and_slash_do_not() -> None:
+    assert normalize_url("HTTPS://Www.ESPN.com/nfl/Story/?id=1#top") == "https://www.espn.com/nfl/Story?id=1"
+    assert normalize_url(" https://espn.com/ ") == normalize_url("https://espn.com")
+    assert normalize_url("https://espn.com/a") != normalize_url("https://espn.com/A")
+    assert normalize_url("https://espn.com/a?id=1") != normalize_url("https://espn.com/a?id=2")
+    assert normalize_url("http://[bad") == "http://[bad"  # not a URL: kept, and it will not match a result
+    assert not domain_allowed("http://[bad", ("espn.com",))
+
+
+# --- a paused search loop is resumed ---
+
+
+PAUSED = ({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "A"}},)
+
+
+def test_a_paused_search_is_resumed_and_the_urls_of_every_round_count(store: Store) -> None:
+    both = [finding(A), finding(B, source_url=ROTO)]
+    client, transport = make_client(
+        store,
+        raw("pause_turn", search_urls=(URL,), resume_content=PAUSED),
+        raw(output=output(A, findings=both), search_urls=(ROTO,)),
+    )
+    result = decide_close_call(client, call(), now=NOW)
+
+    # Both pages were retrieved, in different rounds: both findings stand.
+    assert result.status == "pick" and [s.url for s in result.sources] == [URL, ROTO]
+    first, second = transport.calls
+    assert second["messages"][0] == first["messages"][0] and len(first["messages"]) == 1
+    assert second["messages"][1] == {"role": "assistant", "content": list(PAUSED)}  # no "continue" user turn
+    assert len(second["messages"]) == 2
+    assert first.get("tools") and second.get("tools") == first.get("tools")  # same tools, same cached prefix
+    assert second["system"] == first["system"]
+    assert result.reply is not None and result.reply.rounds == 2 and result.reply.search_urls == (URL, ROTO)
+    rows = store.llm_usage.since(NOW - timedelta(days=1))
+    assert [row.stop_reason for row in rows] == ["pause_turn", "end_turn"]  # every round is recorded
+    assert result.reply.cost_usd == pytest.approx(sum(row.cost_usd for row in rows))
+
+
+def test_a_search_still_paused_after_the_resume_cap_is_a_failure(store: Store) -> None:
+    paused = raw("pause_turn", output=output(B, findings=[finding(B)]), resume_content=PAUSED)
+    client, transport = make_client(store, paused, paused, paused, raw(output=output()))
+    result = decide_close_call(client, call(), now=NOW)
+
+    assert result.status == "failed" and result.choice == A and result.pick is None
+    assert "still paused" in (result.detail or "") and "2 resumes" in (result.detail or "")
+    assert len(transport.calls) == 3  # the first call and two resumes, no more
+    assert len(store.llm_usage.since(NOW - timedelta(days=1))) == 3
+
+
+def test_a_resume_counts_against_the_daily_budget(store: Store) -> None:
+    # The first round alone ($0.008) spends the $0.005 cap: the paused answer is not resumed.
+    client, transport = make_client(store, raw("pause_turn", resume_content=PAUSED), raw(output=output()), budget=0.005)
+    result = decide_close_call(client, call(), now=NOW)
+    assert result.status == "failed" and "daily Claude budget reached" in (result.detail or "")
+    assert len(transport.calls) == 1
+
+
+def test_a_pause_without_content_to_resume_from_is_a_failure(store: Store) -> None:
+    client, transport = make_client(store, raw("pause_turn"), raw(output=output()))
+    result = decide_close_call(client, call(), now=NOW)
+    assert result.status == "failed" and len(transport.calls) == 1
 
 
 # --- citations are required ---
@@ -393,6 +534,33 @@ def test_only_a_near_tie_can_be_asked() -> None:
     with pytest.raises(ValueError, match="aware"):
         call(deadline=datetime(2026, 10, 7))
     assert call(options=options, margin=2.0).best.espn_id == A  # an exactly-at-margin pair is a call
+
+
+def test_the_margin_has_a_ceiling_so_near_does_not_mean_anything_goes() -> None:
+    assert max_margin(11.0) == pytest.approx(11.0 * CLOSE_CALL_MAX_MARGIN_FRACTION)  # a fraction of a small score
+    assert max_margin(100.0) == CLOSE_CALL_MAX_MARGIN  # a fixed ceiling for a large one
+    assert max_margin(0.0) == 0.0 and max_margin(-4.0) == 0.0  # nothing wider than an exact tie
+    with pytest.raises(ValueError, match="wider than a near-tie may be"):
+        call(margin=1e6)  # the pair is 0.2 apart, but a margin this wide would make any pair a "close call"
+    with pytest.raises(ValueError, match="at most 2.20"):
+        call(margin=max_margin(11.0) + 0.01)
+    assert call(margin=max_margin(11.0)).margin == pytest.approx(2.2)  # the ceiling itself is allowed
+    big = (CloseCallOption(A, "A", 80.0), CloseCallOption(B, "B", 79.0))
+    with pytest.raises(ValueError, match="at most 3.00"):
+        call(options=big, margin=3.5)
+    options = [CloseCallOption(A, "A", 11.0), CloseCallOption(B, "B", 10.0)]
+    with pytest.raises(ValueError, match="wider than a near-tie may be"):
+        near_ties(options, 1e6)
+
+
+def test_every_option_must_be_on_our_roster() -> None:
+    off = (CloseCallOption(A, "A", 11.0), CloseCallOption(FREE_AGENT, "Free Agent", 10.9))
+    with pytest.raises(ValueError, match=f"not on our roster: {FREE_AGENT}"):
+        call(options=off)
+    with pytest.raises(ValueError, match="not on our roster"):
+        call(roster_ids=())  # an empty roster has no one to ask about
+    assert call(options=off, roster_ids={A, FREE_AGENT}).option_ids == (A, FREE_AGENT)  # once he is rostered
+    assert call(roster_ids=[A, B]).roster_ids == frozenset({A, B})  # any collection of ids, kept as a set
 
 
 def test_near_ties_selects_the_options_within_the_margin() -> None:
