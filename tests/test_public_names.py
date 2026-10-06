@@ -83,6 +83,8 @@ MODULES = (
     "fm.advisor.news_triage",
     "fm.advisor.close_call",
     "fm.advisor.explain",
+    "fm.advisor.pitch",
+    "fm.advisor.strategist",
     "fm.browser.canary",
     "fm.browser.drills",
     "fm.decide.faab",
