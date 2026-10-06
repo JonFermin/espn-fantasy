@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import fm.decide.lineup  # noqa: F401  (registers the NFL lineup decision)
+import fm.decide.lineup_daily  # noqa: F401  (registers the NBA daily lineup decision)
+import fm.decide.streaming  # noqa: F401  (registers the NBA streaming decision)
 import fm.decide.waivers  # noqa: F401  (registers the NFL waiver decision)
 from fm import paths
 from fm.browser.flows import FlowRegistry
@@ -65,6 +67,7 @@ from fm.config import Config, League, Sport
 from fm.decide import registry as decide_registry
 from fm.decide.registry import DecisionRegistry, Registration
 from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus, load_session
+from fm.espn.calendar import matchup_period_of
 from fm.espn.client import EspnClient, EspnClientError
 from fm.espn.settings import LeagueSettings
 from fm.executor import (
@@ -125,6 +128,8 @@ NEAR_DEADLINE = timedelta(minutes=30)
 RUNS_KEPT = timedelta(days=14)
 """How long the state file remembers a window it ran."""
 _CRITICAL_ERRORS = (KeyboardInterrupt, SystemExit, MemoryError)
+OPPONENT_DECISIONS = LINEUP_DECISIONS | {"streaming"}
+"""Decisions that weigh this week's opponent (lineups, and category-league streamers' swing)."""
 
 
 class SessionVerdict(StrEnum):
@@ -829,7 +834,7 @@ class _Tick:
 
     def _run_decision(self, ctx: LeagueContext, registration: Registration, window: RunWindow) -> DecisionRun:
         kwargs: dict[str, Any] = {"schedule": ctx.schedule, "now": self.now}
-        if registration.kind in LINEUP_DECISIONS:
+        if registration.kind in OPPONENT_DECISIONS:
             kwargs["opponent_team_id"] = self._opponent(ctx)
         try:
             result = registration.fn(ctx.store, ctx.config, ctx.row, **_accepted(registration.fn, kwargs))
@@ -853,7 +858,7 @@ class _Tick:
         except EspnClientError as exc:
             self.warnings.append(f"{ctx.key}: no opponent (matchups unreadable: {exc}); planning for expected points")
             return None
-        matchup_period = ctx.settings.schedule.matchup_period_for(ctx.period)
+        matchup_period = matchup_period_of(ctx.settings, ctx.period)  # the calendar resolves NBA weekly matchups
         return opponent_from(matchups, ctx.row.team_id, matchup_period)
 
     def _notify_new(self, ctx: LeagueContext, warnings: list[str]) -> tuple[int, ...]:

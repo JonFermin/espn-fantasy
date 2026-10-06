@@ -381,8 +381,10 @@ the `as_of` of each input.
     weeks, matchup 18 = days 119–132 (14 days around the All-Star break), matchups 19–21 (playoffs) = days 133–153:
     6 + 16×7 + 14 + 3×7 = 153 (`tests/fixtures/espn/real/fba/calendar.json`). No read view carries that calendar.
     `fm.espn.settings` reads `matchupPeriods` as scoring periods only under `periodTypeId` 1 (ESPN's per-scoring-period
-    type, the NFL league's) and otherwise answers `None`, so the weekly transaction cap counts the trailing seven days
-    in NBA until #31 ships the calendar.
+    type, the NFL league's) and otherwise answers `None`. The calendar ships as `data/calendars/<game>_<season>.json`
+    (`fm.espn.calendar`; refresh with `capture.py webclient`), and `matchup_period_of` / `matchup_scoring_periods`
+    resolve NBA matchup weeks through it, so the weekly transaction cap counts the matchup's days (the trailing seven
+    days only when a season has no calendar file).
   - `matchupAcquisitionLimit` is a per-day rate when `matchupLimitPerScoringPeriod` is true: "3 adds per weekly
     matchup" arrives as 3/7. Use `AcquisitionSettings.matchup_limit_for(days)`, never the raw number.
   - Both real leagues are H2H points with traditional waivers (no FAAB, so there are no bids). The NFL league seeds its

@@ -774,3 +774,11 @@ def test_the_real_tick_imports_register_the_nfl_decisions() -> None:
 
     assert {entry.kind for entry in registry.registered("nfl")} >= {"lineup", "waivers"}
     assert tick_module.DECIDED_BY_TICK == "tick"
+
+
+def test_the_real_tick_imports_register_the_nba_decisions_and_streaming_sees_the_opponent() -> None:
+    from fm.decide import registry
+
+    assert {entry.kind for entry in registry.registered("nba")} >= {"lineup_daily", "streaming"}
+    assert {"lineup", "lineup_daily", "streaming"} <= tick_module.OPPONENT_DECISIONS
+    assert "waivers" not in tick_module.OPPONENT_DECISIONS
