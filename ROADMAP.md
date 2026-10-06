@@ -125,7 +125,7 @@ Open follow-ups:
 Key files: src/fm/advisor/{close_call,explain}.py, src/fm/decide/{weekly,trades}.py, src/fm/eval/tune.py, src/fm/mcp_server.py, src/fm/browser/drills.py, src/fm/model/baseline_{nfl,nba}.py, src/fm/commands/{trade,tune,mcp,drill}.py, tests/fixtures/backtest/{nfl_world,nba}/. 2537 tests. Skipped: none. (8/8 tasks)
 
 ## Phase 8 — MILESTONE: trades end-to-end + weekly report
-- IN PROGRESS [P1] [M] #44: Trade flows and offer handling — scope: src/fm/browser/flows/trade.py, src/fm/browser/selectors.py, src/fm/decide/offers.py, tests/executor/test_trade_flow.py, tests/decide/test_offers.py — depends: #25 ✓, #29 ✓, #38 ✓
+- DONE [P1] [M] #44: Trade flows and offer handling — scope: src/fm/browser/flows/trade.py, src/fm/browser/selectors.py, src/fm/decide/offers.py, tests/executor/test_trade_flow.py, tests/decide/test_offers.py — depends: #25 ✓, #29 ✓, #38 ✓
   - Propose/respond/cancel flows (approval-only), API mode with UI fallback.
   - Never duplicates an open offer; checks lock status for every player involved.
   - Pending incoming offers become evaluation proposals registered for the tick.
