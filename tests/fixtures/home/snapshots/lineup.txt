@@ -1,0 +1,35 @@
+nfl: Fixture League (PPR), scoring period 4 lineup for Fixture Team 1 (as of 2026-10-04 15:00Z; roster synced 2026-10-04 15:00Z)
+  opponent: Fixture Team 2, projected 0.0 points (sd 3.5)
+  current lineup: 71.5 expected points (sd 24.0), win probability 100%
+  recommended:    76.6 expected points (sd 24.2), win probability 100% (+5.1), maximizing win probability (lopsided matchup)
+
+  slot     player          pos  proj p(act)  exp note
+  QB       Josh Allen      QB    0.0   1.00  0.0 locks 2026-10-04 17:00Z
+  RB       Jahmyr Gibbs    RB   21.9   1.00 21.9 locked
+  RB       Bijan Robinson  RB   20.2   1.00 20.2 locks 2026-10-06 00:15Z
+  WR       Ja'Marr Chase   WR   20.7   0.70 14.5 locks 2026-10-04 17:00Z
+  WR       Rashid Shaheed  WR    0.0   1.00  0.0 from BE, locks 2026-10-06 00:15Z
+  TE       Trey McBride    TE   14.9   1.00 14.9 locks 2026-10-04 17:00Z
+  D/ST     Eagles D/ST     D/ST  0.0   1.00  0.0 locks 2026-10-04 17:00Z
+  K        Harrison Butker K     0.0   1.00  0.0 locks 2026-10-04 20:25Z
+  RB/WR/TE Tyler Allgeier  RB    5.1   1.00  5.1 from BE, locks 2026-10-06 00:15Z
+  BE       Chuba Hubbard   RB    0.0   1.00  0.0 from RB/WR/TE, locks 2026-10-05 00:20Z
+  IR       Chris Olave     WR    0.0   0.00  0.0 IR, locks 2026-10-06 00:15Z
+
+  bench_inactive: proposed as #1 (policy auto); fm proposals approve 1; due 2026-10-06 00:15Z
+    start Rashid Shaheed: 71.5 expected points (+0.0), win probability 100% -> 100% (lopsided matchup: maximizing win probability).
+    Rashid Shaheed (WR) BE -> WR: 0.0 proj x 1.00 = 0.0 exp locks 2026-10-06 00:15Z
+  lineup: proposed as #2 (policy approve); fm proposals approve 2; due 2026-10-05 00:20Z
+    Start Rashid Shaheed, Tyler Allgeier; bench Chuba Hubbard: 76.6 expected points (+5.1), win probability 100% -> 100% (lopsided matchup: maximizing win probability).
+    Chuba Hubbard  (RB) RB/WR/TE -> BE: 0.0 proj x 1.00 = 0.0 exp locks 2026-10-05 00:20Z
+    Rashid Shaheed (WR) BE -> WR:       0.0 proj x 1.00 = 0.0 exp locks 2026-10-06 00:15Z
+    Tyler Allgeier (RB) BE -> RB/WR/TE: 5.1 proj x 1.00 = 5.1 exp locks 2026-10-06 00:15Z
+  warning: no projection for Josh Allen (3918298) in period 4; counted as 0
+  warning: no projection for Eagles D/ST (-16021) in period 4; counted as 0
+  warning: no projection for Harrison Butker (3055899) in period 4; counted as 0
+  warning: no projection for Rashid Shaheed (4249836) in period 4; counted as 0
+  warning: no projection for Chris Olave (4361370) in period 4; counted as 0
+  warning: no projection for Chuba Hubbard (4241416) in period 4; counted as 0
+  warning: opponent: no projection for Lamar Jackson (3916387) in period 4; counted as 0
+  warning: opponent: no projection for Saquon Barkley (3929630) in period 4; counted as 0
+  warning: opponent: no projection for Travis Kelce (15847) in period 4; counted as 0

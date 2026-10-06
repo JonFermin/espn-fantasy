@@ -1,0 +1,11 @@
+browser profile: missing; run fm login before fm sync
+nfl: NFL 2026, ESPN league 1234567: Fixture League (PPR)
+  team 1 Fixture Team 1: 2-1, 356.4 points for
+  synced 2026-10-04 15:00Z: roster for scoring period 4
+  FAAB: $23 of $100 spent
+  pro schedule: captured 2026-10-04 15:00Z, periods 4-5
+  open proposals: 4 (fm proposals list)
+    #1 bench_inactive (proposed, policy auto), due 2026-10-06 00:15Z: start Rashid Shaheed: 71.5 expected points (+0.0).
+    #2 lineup (proposed, policy approve), due 2026-10-05 00:20Z: Start Rashid Shaheed, Tyler Allgeier; bench Chuba Hubbard: 76.6 expected points (+5.1).
+    #3 waiver (proposed, policy approve), due 2026-10-05 16:40Z: Claim Jaylen Warren (RB) off waivers: +83.7 rest-of-season points from period 5; bid $17 (cap $35, $77 left).
+    #4 add_drop (proposed, policy approve), due 2026-10-05 00:20Z: Add Rico Dowdle (RB) from free agency: +5.5 rest-of-season points from period 4.

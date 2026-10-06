@@ -328,6 +328,27 @@
    "trimmed": "probe outcomes from the read pass",
    "view": null
   },
+  "fba/write_FREEAGENT_1.json": {
+   "bytes": 596,
+   "game": "fba",
+   "kind": "write",
+   "trimmed": "aborted request, as captured",
+   "view": null
+  },
+  "fba/write_FREEAGENT_2.json": {
+   "bytes": 698,
+   "game": "fba",
+   "kind": "write",
+   "trimmed": "aborted request, as captured",
+   "view": null
+  },
+  "fba/write_ROSTER_1.json": {
+   "bytes": 759,
+   "game": "fba",
+   "kind": "write",
+   "trimmed": "aborted request, as captured",
+   "view": null
+  },
   "ffl/calendar.json": {
    "bytes": 4476,
    "game": "ffl",
@@ -653,6 +674,20 @@
    "game": "ffl",
    "kind": "probes",
    "trimmed": "probe outcomes from the read pass",
+   "view": null
+  },
+  "ffl/write_ROSTER_1.json": {
+   "bytes": 757,
+   "game": "ffl",
+   "kind": "write",
+   "trimmed": "aborted request, as captured",
+   "view": null
+  },
+  "ffl/write_WAIVER_1.json": {
+   "bytes": 715,
+   "game": "ffl",
+   "kind": "write",
+   "trimmed": "aborted request, as captured",
    "view": null
   },
   "webclient.json": {

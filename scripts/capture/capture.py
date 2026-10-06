@@ -416,6 +416,7 @@ def capture_writes(page: Page, guard: WriteGuard, out: Path, minutes: float) -> 
     A guard failure raises :class:`guard.GuardError`."""
     counts: dict[str, int] = {}
     seen = 0
+    other = 0
     deadline = time.monotonic() + minutes * 60
     while time.monotonic() < deadline:
         try:
@@ -429,6 +430,11 @@ def capture_writes(page: Page, guard: WriteGuard, out: Path, minutes: float) -> 
             if is_transaction_capture(record):
                 saved = save_write(out, record, counts)
                 print(f"captured and aborted: {saved.name}")
+            else:
+                # Kept raw (outside the repo, never made into fixtures) so a write sent elsewhere is visible.
+                other += 1
+                write_json(out / "other" / f"aborted_{other}.json", record.as_json())
+                print(f"  aborted, not a transaction: {record.method} {record.url[:120]} ({record.reason})")
     return sum(counts.values())
 
 

@@ -236,10 +236,12 @@ class League:
 
 
 class TeamPage:
-    """ESPN's lineup editor over :class:`League`'s roster. Each row holds the slot label, the player (or Empty) and
-    ``MOVE`` for an unlocked player. After ``MOVE`` the rows the picked player may go to show ``HERE``; ``HERE`` saves
-    the move, swapping with the row's player, and redraws the page. ``signed_in=False`` shows ESPN's Log in Required
-    heading instead."""
+    """ESPN's lineup editor over :class:`League`'s roster, with the accessible names the #14 capture saw. Each row
+    holds the slot label, the player (or Empty) and ``MOVE`` (named ``Select <Player> to move``) for an unlocked
+    player. After ``MOVE`` the rows the picked player may go to show ``HERE`` (named ``Confirm move of <Player> to
+    <Slot>``, or ``Move`` on an empty row) and the picked row's button becomes ``Cancel Move of <Player>``; ``HERE``
+    saves the move, swapping with the row's player, and redraws the page. ``signed_in=False`` shows ESPN's Log in
+    Required heading instead."""
 
     def __init__(self, league: League) -> None:
         self.league = league
@@ -262,9 +264,21 @@ class TeamPage:
         )
         if self.picked is None:
             if entry is not None and not locked(entry):
-                row.add(FakeElement(role="button", name="MOVE", on_click=functools.partial(self._pick, entry)))
+                row.add(
+                    FakeElement(
+                        role="button",
+                        name=f"Select {name_of(entry)} to move",  # reads MOVE; named as the #14 capture saw
+                        text="MOVE",
+                        on_click=functools.partial(self._pick, entry),
+                    )
+                )
+        elif entry is not None and entry is self.picked:
+            row.add(FakeElement(role="button", name=f"Cancel Move of {name_of(entry)}", text="MOVE"))
         elif self._may_take(slot, entry):
-            row.add(FakeElement(role="button", name="HERE", on_click=functools.partial(self._here, slot, entry)))
+            here = f"Confirm move of {name_of(entry)} to {label}" if entry is not None else "Move"
+            row.add(
+                FakeElement(role="button", name=here, text="HERE", on_click=functools.partial(self._here, slot, entry))
+            )
         return row
 
     def _may_take(self, slot: int, entry: dict[str, Any] | None) -> bool:
@@ -341,7 +355,8 @@ def test_team_page_address_and_slot_labels() -> None:
 def test_every_roster_selector_resolves_as_its_presence_says(nba: League) -> None:
     """A canary over the fake team page: what the flow clicks and what the registry promises agree."""
     registered = selectors.selectors_for(selectors.WebPage.ROSTER)
-    assert registered == selectors.registered_selectors() and len({s.key for s in registered}) == len(registered)
+    everything = selectors.registered_selectors()  # the player list and roster-fix pages (#27) register here too
+    assert all(entry in everything for entry in registered) and len({s.key for s in everything}) == len(everything)
     assert selectors.selector("roster.here").after == "roster.move"
     with pytest.raises(KeyError, match="no selector 'roster.nope'"):
         selectors.selector("roster.nope")
@@ -523,7 +538,7 @@ def test_api_failure_falls_back_to_ui_mode_on_the_fake_page(nba: League) -> None
     page = nba.team.page
     assert page.did("goto") == [nba.team_url(1)]
     move, here = page.did("click")
-    assert "row" in move and "move" in move and "here" in here
+    assert "row" in move and "to move" in move and "confirm move of" in here
     assert {"ui-trace.zip", "ui-01-roster.png"} <= artifact_names(result)
 
 
