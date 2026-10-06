@@ -57,8 +57,11 @@ Projections are stat lines (CLAUDE.md): the stored ESPN and Sleeper lines for th
 category league is refused here (ROADMAP #31 plans those). ``p_active`` is the stored availability row when it is no
 older than the player's synced designation (the full model's, ROADMAP #22), else the designation model's
 (:func:`fm.model.availability.assess`); an OUT, IR or suspended designation, or a player off an active pro roster,
-is always 0. The opponent's outlook (:func:`team_outlook`) assumes he starts his own expected-points lineup and uses
-projections for games already played; the season simulator (ROADMAP #32) can pass a better one.
+is always 0. Whether he has a game comes from the schedule in hand (as his lock does), never from the stored row: a
+row assessed without a schedule assumes everyone has a game, and one assessed with an older schedule may be stale, so
+a player whose team has no game in the period is a zero whatever his row says. The opponent's outlook
+(:func:`team_outlook`) assumes he starts his own expected-points lineup and uses projections for games already
+played; the season simulator (ROADMAP #32) can pass a better one.
 """
 
 from __future__ import annotations
@@ -86,7 +89,16 @@ from fm.model.projections import BlendWeights, blend, position_for
 from fm.model.scoring import Scorer
 from fm.proposals import LineupMove, LineupPayload, PolicyError, ProposalKind, propose
 from fm.proposals.policy import stored_settings
-from fm.sports.base import ScheduleLike, SportPlugin, fantasy_day, first_start, last_start, period_turn, plugin_for
+from fm.sports.base import (
+    ScheduleLike,
+    SportPlugin,
+    fantasy_day,
+    first_start,
+    game_for,
+    last_start,
+    period_turn,
+    plugin_for,
+)
 from fm.store import AvailabilityRow, LeagueRow, PlayerRow, ProposalRow, Store
 
 DECISION_KIND: Final = "lineup"
@@ -577,11 +589,20 @@ def _lock_times(
 def _availability(
     store: Store, player: PlayerRow, *, season: int, period: int, now: datetime, schedule: ScheduleLike
 ) -> AvailabilityRow:
-    """The stored availability row when it is no older than the player's synced designation, else a fresh one."""
+    """The stored availability row when it is no older than the player's synced designation, else a fresh one. Only
+    its ``p_active`` is read: ``has_game`` comes from the schedule in hand (:func:`_has_game`)."""
     stored = store.availability.get(player.sport, player.espn_id, season, period)
     if stored is not None and stored.as_of >= player.as_of:
         return stored
     return assess(player, season=season, scoring_period=period, as_of=now, schedule=schedule)
+
+
+def _has_game(schedule: ScheduleLike, player: PlayerRow, period: int) -> bool:
+    """Whether the player's pro team has a game in the period, from the schedule the lineup is planned on. Never the
+    stored availability row's flag: a row assessed without a schedule says everyone with a pro team has a game, and
+    one assessed with an older schedule can be stale, either of which would start a bye player. No pro team (none, or
+    ESPN's free-agent team 0, which the schedule lists without games), no game."""
+    return player.pro_team_id is not None and game_for(schedule, player.pro_team_id, period) is not None
 
 
 def lineup_inputs(
@@ -644,7 +665,8 @@ def lineup_inputs(
         points = 0.0 if line is None else scorer.points(line, position=position)
         availability = _availability(store, row, season=league.season, period=period, now=now, schedule=schedule)
         status = designation(row.injury_status, sport)
-        playing = availability.p_active if row.active and status not in INACTIVE_DESIGNATIONS else 0.0
+        has_game = _has_game(schedule, row, period)
+        playing = availability.p_active if has_game and row.active and status not in INACTIVE_DESIGNATIONS else 0.0
         listed = frozenset(row.eligible_slot_ids)
         if not listed and position is not None:
             try:
@@ -661,7 +683,7 @@ def lineup_inputs(
                 points=points,
                 sd=blend_weights.projection_sd(points, sport=sport, position=position),
                 p_active=playing,
-                has_game=availability.has_game,
+                has_game=has_game,
                 locked=entry.lineup_locked or (lock_at is not None and now >= lock_at),
                 lock_at=lock_at,
                 position=position,

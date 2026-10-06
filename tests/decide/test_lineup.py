@@ -58,6 +58,7 @@ from fm.decide.lineup import (
 from fm.espn.ids import FFL
 from fm.espn.models import ProSchedule, RostersView
 from fm.espn.settings import LeagueSettings, LockType, ScoringKind, ScoringType, load_league_settings
+from fm.model.availability import assess_stored
 from fm.model.projections import BlendWeights
 from fm.proposals import LineupMove, LineupPayload, ProposalKind, parse_payload
 from fm.sports.base import StatSchema
@@ -657,6 +658,24 @@ def real_schedule() -> ProSchedule:
     return ProSchedule.model_validate(json.loads((REAL_FFL / "proTeamSchedules_wl.json").read_text(encoding="utf-8")))
 
 
+def on_bye(schedule: ProSchedule, pro_team_id: int, period: int) -> ProSchedule:
+    """The schedule with the team's game in the period gone from every team's list (ESPN files a game under both
+    teams), so the team and its opponent are idle that period, as on a bye week."""
+    gone = {game.id for game in schedule.games_for(pro_team_id, period)}
+    teams = tuple(
+        team.model_copy(
+            update={
+                "pro_games_by_scoring_period": {
+                    week: tuple(game for game in games if game.id not in gone)
+                    for week, games in team.pro_games_by_scoring_period.items()
+                }
+            }
+        )
+        for team in schedule.pro_teams
+    )
+    return schedule.model_copy(update={"pro_teams": teams})
+
+
 def applied_totals(team_id: int) -> dict[int, float]:
     """ESPN's own week-4 points (``appliedTotal``) for each player of a team."""
     totals: dict[int, float] = {}
@@ -757,8 +776,11 @@ def scale_projection(store: Store, espn_id: int, factor: float) -> None:
     )
 
 
-def plan_week(store: Store, league: LeagueRow, *, now: datetime = THURSDAY, **options: Any) -> LineupDecision:
-    return plan_lineup(store, league, schedule=real_schedule(), now=now, weights=WEIGHTS, **options)
+def plan_week(
+    store: Store, league: LeagueRow, *, now: datetime = THURSDAY, schedule: ProSchedule | None = None, **options: Any
+) -> LineupDecision:
+    on = real_schedule() if schedule is None else schedule
+    return plan_lineup(store, league, schedule=on, now=now, weights=WEIGHTS, **options)
 
 
 def draft_moves(decision: LineupDecision, index: int) -> dict[int, tuple[int, int]]:
@@ -888,6 +910,46 @@ def test_a_fresh_availability_row_outranks_the_designation_model(store: Store) -
     assert nabers(SYNCED - timedelta(hours=1), 0.2).p_active == 1.0  # older than the designation: assessed again
     designate(store, NABERS, "OUT")
     assert nabers(SYNCED + timedelta(hours=1), 0.6).p_active == 0.0  # OUT is a zero whatever a row says
+
+
+@pytest.mark.parametrize("written_by", ["assess_stored without a schedule", "a hand-built row"])
+def test_a_stored_row_never_starts_a_starter_whose_team_has_no_game(store: Store, written_by: str) -> None:
+    """Whether a player has a game comes from the schedule the lineup is planned on, never from his availability row:
+    a row assessed without a schedule (ROADMAP #29's ``assess_stored(..., practice=...)``) says everyone with a pro
+    team has a game, and the row outranks the designation model once it is newer than the sync."""
+    league = seed(store)
+    giants = store.players.get("nfl", NABERS)
+    assert giants is not None and giants.pro_team_id is not None
+    bye = on_bye(real_schedule(), giants.pro_team_id, WEEK)  # NYG at ARI is gone: Nabers and Wilson are both idle
+    assert set(bye.idle_teams(WEEK)) == {giants.pro_team_id, 22}
+    after_sync = SYNCED + timedelta(hours=1)
+    if written_by == "assess_stored without a schedule":
+        (row,) = assess_stored(store, "nfl", [NABERS], season=SEASON, scoring_period=WEEK, as_of=after_sync)
+        assert row.inputs["schedule"] is False
+    else:
+        row = store.availability.upsert(
+            AvailabilityRow(
+                sport="nfl", espn_id=NABERS, season=SEASON, scoring_period_id=WEEK, p_active=1.0, as_of=after_sync
+            )
+        )
+    assert row.has_game and row.p_active == 1.0  # the row says he plays
+
+    decision = plan_week(store, league, schedule=bye)
+    by_id = {player.espn_id: player for player in decision.inputs.players}
+    nabers = by_id[NABERS]
+    assert (nabers.has_game, nabers.p_active, nabers.plays, nabers.lock_at) == (False, 0.0, False, None)
+    assert not by_id[WILSON].has_game  # the opponent's receiver sits idle on the bench, so he is no alternative
+    assert decision.current.idle_starters == (NABERS,)
+    assert decision.rescue.slots[NABERS] == BENCH and decision.best.slots[NABERS] == BENCH
+    assert decision.rescue.idle_starters == decision.best.idle_starters == ()
+    (rescue,) = decision.drafts  # with Wilson idle the full optimum goes no further than the rescue
+    assert rescue.kind is ProposalKind.BENCH_INACTIVE
+    assert draft_moves(decision, 0) == {NABERS: (WR, BENCH), BURDEN: (BENCH, WR)}
+    assert rescue.rationale.startswith("Bench Malik Nabers (no game); start Luther Burden III:")
+    assert rescue.deadline == SUNDAY_1PM  # Burden's kickoff: a player without a game never locks
+    benched = rescue.engine_numbers["moves"][0]
+    assert benched["name"] == "Malik Nabers"
+    assert (benched["p_active"], benched["has_game"], benched["expected"]) == (0.0, False, 0.0)
 
 
 def test_refuses_what_it_cannot_plan(store: Store) -> None:
