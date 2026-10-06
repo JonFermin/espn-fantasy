@@ -21,11 +21,14 @@ Then, per position:
    shrunk weights cannot be worse on the training sample than the mix of the best and the equal split.
 
 **Held out.** The fit is judged by leave-one-week-out: for each week, the whole fit (grid choice, shrinkage, fallback)
-is redone without it and the resulting weights score that week alone (:attr:`SportTuning.held_out`). The same weeks
-scored with equal weights are the comparison (:attr:`HeldOutError.equal_mae`). A tuning is
-:attr:`SportTuning.meaningful`, and :func:`write_weights` applies it, only with at least
-:attr:`TuneConfig.min_weeks` weeks, one fitted position and a held-out MAE no worse than equal weights; the four-week
-hand-built fixture is not enough, so the committed file stays as it is until real history is replayed.
+is redone without it and the resulting weights score that week alone (:attr:`SportTuning.held_out`). The comparison
+is what is in the weights file now, the production weights (:attr:`HeldOutError.current_mae`): the same weeks blended
+under ``base``, its position overrides included, since a position the tuning does not fit keeps those tables and so
+a pure equal split would not be what the tuned run is replacing. The pure equal split's MAE rides along as
+:attr:`HeldOutError.equal_mae`. A tuning is :attr:`SportTuning.meaningful`, and :func:`write_weights` applies it, only
+with at least :attr:`TuneConfig.min_weeks` weeks, one fitted position and a held-out MAE no worse than the current
+weights' (it beats what is in the file on held-out weeks); the four-week hand-built fixture is not enough, so the
+committed file stays as it is until real history is replayed.
 
 **Scale.** Weights in the file are relative, and a source the tuning leaves out keeps its own weights, so fitted weights
 are scaled to the sum of the tuned sources' default weights (two sources at 1.0 become, say, 1.4 and 0.6: 1.0 is an
@@ -130,18 +133,21 @@ class PositionFit:
 
 @dataclass(frozen=True, slots=True)
 class HeldOutError:
-    """Leave-one-week-out MAE at one position (``ALL`` for every position) of the tuned weights against equal
-    weights, over the same ``samples`` player-weeks."""
+    """Leave-one-week-out MAE at one position (``ALL`` for every position) of the tuned weights against the current
+    weights (the base file, what production blends with) and against a pure equal split, over the same ``samples``
+    player-weeks."""
 
     position: str
     samples: int
     tuned_mae: float
+    current_mae: float
     equal_mae: float
 
     @property
     def improvement(self) -> float:
-        """Points of MAE the tuning saves per player-week (positive: better than equal)."""
-        return self.equal_mae - self.tuned_mae
+        """Points of MAE the tuning saves per player-week over the current weights (positive: better than what is in
+        the file)."""
+        return self.current_mae - self.tuned_mae
 
 
 @dataclass(frozen=True)
@@ -425,7 +431,10 @@ def tune_sport(
     held_out: dict[str, HeldOutError] = {}
     overall: HeldOutError | None = None
     if len(periods) >= 2:
-        held_out, overall = _leave_one_week_out(base, sport, weekly, grid_cells[0], names, choices, positions, periods)
+        current = _evaluate(weekly, base, names)  # what is in the file now, position overrides and all
+        held_out, overall = _leave_one_week_out(
+            base, sport, weekly, current, grid_cells[0], names, choices, positions, periods
+        )
 
     estimates = fit_sd(
         data,
@@ -445,8 +454,10 @@ def tune_sport(
         notes.append("no position has enough evidence to move off the base weights")
     if overall is None:
         notes.append("no held-out score (needs at least two weeks)")
-    elif overall.tuned_mae > overall.equal_mae + TIE:
-        notes.append(f"held-out MAE {overall.tuned_mae:.3f} is worse than equal weights' {overall.equal_mae:.3f}")
+    elif overall.tuned_mae > overall.current_mae + TIE:
+        notes.append(
+            f"held-out MAE {overall.tuned_mae:.3f} is worse than the current weights' {overall.current_mae:.3f}"
+        )
     return SportTuning(
         sport=sport,
         season=data.season,
@@ -466,13 +477,15 @@ def _leave_one_week_out(
     base: BlendWeights,
     sport: Sport,
     weekly: Mapping[int, BacktestData],
+    current: WeekCells,
     equal: WeekCells,
     names: Sequence[str],
     refit: Callable[[Sequence[int]], dict[str, _Choice]],
     positions: Sequence[str],
     periods: Sequence[int],
 ) -> tuple[dict[str, HeldOutError], HeldOutError | None]:
-    """Redo the fit without each week and score that week with the resulting weights, against equal weights."""
+    """Redo the fit without each week and score that week with the resulting weights, against the ``current`` weights
+    (the base file's, scored on the same weeks) and ``equal`` weights."""
     tuned: WeekCells = {}
     for held in periods:
         fold = refit([period for period in periods if period != held])
@@ -481,15 +494,19 @@ def _leave_one_week_out(
         tuned.update(scored)
     result: dict[str, HeldOutError] = {}
     for position in positions:
-        mine, even = _total(tuned, periods, position), _total(equal, periods, position)
+        mine, now, even = (_total(cells, periods, position) for cells in (tuned, current, equal))
         if even[1]:
-            result[position] = HeldOutError(position, even[1], _mae(mine), _mae(even))
-    tuned_sum = math.fsum(e.tuned_mae * e.samples for e in result.values())
-    equal_sum = math.fsum(e.equal_mae * e.samples for e in result.values())
+            result[position] = HeldOutError(position, even[1], _mae(mine), _mae(now), _mae(even))
     count = sum(e.samples for e in result.values())
     if not count:
         return result, None
-    return result, HeldOutError("ALL", count, tuned_sum / count, equal_sum / count)
+
+    def mean(pick: Callable[[HeldOutError], float]) -> float:
+        return math.fsum(pick(e) * e.samples for e in result.values()) / count
+
+    return result, HeldOutError(
+        "ALL", count, mean(lambda e: e.tuned_mae), mean(lambda e: e.current_mae), mean(lambda e: e.equal_mae)
+    )
 
 
 # --- the weights file -------------------------------------------------------------------------------------------------

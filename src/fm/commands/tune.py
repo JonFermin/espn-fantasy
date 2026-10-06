@@ -94,13 +94,19 @@ def render(tuning: SportTuning) -> list[str]:
     align: list[Align] = ["<", ">", ">", ">", "<", "<"]
     lines.extend(columns(rows, align=align))
     lines += ["", "Held-out MAE (leave one week out: the fit is redone without each week and scores it)"]
-    held = [["position", "samples", "tuned", "equal", "gain"]]
+    held = [["position", "samples", "tuned", "current", "equal", "gain vs current"]]
     for error in (*tuning.held_out.values(), *([tuning.held_out_overall] if tuning.held_out_overall else [])):
         held.append(
-            [error.position, str(error.samples), f"{error.tuned_mae:.3f}", f"{error.equal_mae:.3f}"]
-            + [_gain(error.improvement)]
+            [
+                error.position,
+                str(error.samples),
+                f"{error.tuned_mae:.3f}",
+                f"{error.current_mae:.3f}",
+                f"{error.equal_mae:.3f}",
+                _gain(error.improvement),
+            ]
         )
-    lines.extend(columns(held, align=["<", ">", ">", ">", ">"]))
+    lines.extend(columns(held, align=["<", ">", ">", ">", ">", ">"]))
     lines += ["", "Uncertainty (coefficient of variation of the blend's residuals, refit by position)"]
     if tuning.sd:
         lines.extend(

@@ -156,13 +156,14 @@ def test_weights_are_scaled_to_the_base_mass_and_shrunk_toward_equal(tuned: Spor
 def test_held_out_mae_is_no_worse_than_equal_weights(tuned: SportTuning) -> None:
     overall = tuned.held_out_overall
     assert overall is not None
-    assert overall.tuned_mae <= overall.equal_mae
+    assert overall.tuned_mae <= overall.current_mae <= overall.equal_mae  # the file is equal weights here
+    assert overall.current_mae == pytest.approx(overall.equal_mae)
     assert overall.improvement > 0.2  # a real gain, not a tie
     for position in ("RB", "WR"):
         held = tuned.held_out[position]
         assert isinstance(held, HeldOutError)
         assert held.samples == WEEKS * len(RBS)
-        assert held.tuned_mae <= held.equal_mae
+        assert held.tuned_mae <= held.current_mae
     assert tuned.meaningful
     assert tuned.notes == ()
 
@@ -208,7 +209,7 @@ def test_a_position_with_too_few_samples_keeps_the_base_weights(synthetic: Backt
     assert result.weights.tables == base.tables
     assert not result.meaningful
     assert result.held_out_overall is not None
-    assert result.held_out_overall.tuned_mae == pytest.approx(result.held_out_overall.equal_mae)
+    assert result.held_out_overall.tuned_mae == pytest.approx(result.held_out_overall.current_mae)
 
 
 def test_on_the_shipped_fixture_nothing_moves_and_held_out_equals_equal(toy: SportTuning, base: BlendWeights) -> None:
@@ -219,22 +220,62 @@ def test_on_the_shipped_fixture_nothing_moves_and_held_out_equals_equal(toy: Spo
     assert toy.sd == {}
     overall = toy.held_out_overall
     assert overall is not None
-    assert overall.tuned_mae <= overall.equal_mae
+    assert overall.tuned_mae <= overall.current_mae
     for held in toy.held_out.values():
-        assert held.tuned_mae <= held.equal_mae
+        assert held.tuned_mae <= held.current_mae
     assert not toy.meaningful
     assert any("fewer than 6" in note for note in toy.notes)
 
 
 def test_a_toy_fit_forced_through_a_low_bar_is_reported_honestly(base: BlendWeights) -> None:
     """With the bars lowered the fixture's few player-weeks do move weights, and the held-out score is what says that
-    is noise: the tuning is not meaningful whenever it is worse than equal weights."""
+    is noise: the tuning is not meaningful whenever it is worse than the current weights."""
     loose = TuneConfig(min_samples=4, min_weeks=2)
     result = tune_sport(load_fixture(NFL_FIXTURE), base, config=loose)
     assert result.fitted_positions  # it did move
     overall = result.held_out_overall
     assert overall is not None
-    assert result.meaningful == (overall.tuned_mae <= overall.equal_mae)
+    assert result.meaningful == (overall.tuned_mae <= overall.current_mae + 1e-9)
+
+
+def file_tuned_for_receivers(tuned: SportTuning) -> BlendWeights:
+    """A weights file that already carries a good WR table (the fit's own) and says nothing about running backs."""
+    receivers = dict(tuned.weights.tables["nfl"]["WR"])
+    return BlendWeights.parse(
+        "[nfl.default]\nespn = 1.0\nsleeper = 1.0\n\n[nfl.WR]\n"
+        + "".join(f"{source} = {weight}\n" for source, weight in receivers.items())
+        + "\n[nba.default]\nespn = 1.0\n"
+    )
+
+
+def test_the_held_out_baseline_is_the_weights_in_the_file_not_a_pure_equal_split(
+    synthetic: BacktestData, tuned: SportTuning
+) -> None:
+    """Positions the tuning does not fit keep the base file's tables (here a good WR override), so a pure equal split
+    is not what the tuned run replaces: it is compared with the file, and the equal split rides along as a column."""
+    base = file_tuned_for_receivers(tuned)
+    result = tune_sport(synthetic, base, config=TuneConfig(min_samples=WEEKS * len(RBS) + 1))  # nothing is fitted
+    assert result.fitted_positions == () and result.weights.tables["nfl"]["WR"] == base.tables["nfl"]["WR"]
+    wr = result.held_out["WR"]
+    assert wr.tuned_mae == pytest.approx(wr.current_mae)  # the unfitted run IS the file
+    assert wr.equal_mae > wr.current_mae + 0.2  # while a pure equal split is clearly worse at receivers
+    assert wr.improvement == pytest.approx(0.0, abs=1e-9)  # so it earns no credit for what is already in the file
+    rb = result.held_out["RB"]
+    assert rb.current_mae == pytest.approx(rb.equal_mae)  # no RB override in the file: current is equal there
+    assert not result.meaningful
+
+
+def test_a_fit_that_does_not_beat_the_file_on_held_out_weeks_is_not_meaningful(
+    synthetic: BacktestData, tuned: SportTuning
+) -> None:
+    """Re-tuning a file that is already tuned: the fit still beats a pure equal split on held-out weeks, which the old
+    baseline would have called meaningful, but it must beat what the file holds."""
+    already = tune_sport(synthetic, tuned.weights)
+    overall = already.held_out_overall
+    assert overall is not None
+    assert overall.equal_mae - overall.tuned_mae > 0.2  # better than equal weights...
+    assert already.meaningful == (overall.tuned_mae <= overall.current_mae + 1e-9)  # ...but meaningful only vs the file
+    assert overall.current_mae < overall.equal_mae - 0.2  # and the file is already far ahead of equal weights
 
 
 def test_the_blend_sources_must_exist_and_be_at_least_two(synthetic: BacktestData, base: BlendWeights) -> None:
