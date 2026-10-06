@@ -86,7 +86,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   - Near-tie tie-break with the web search tool over a domain allowlist and cited sources.
   - Rationale per non-trivial proposal; trivial moves use templates.
   AC: test command passes for both tests with a stubbed client (allowlist configured; templated path makes no API call)
-- IN PROGRESS [P1] [M] #37: NBA category planner — scope: src/fm/decide/weekly.py, tests/decide/test_weekly.py — depends: #24 ✓, #32 ✓
+- DONE [P1] [M] #37: NBA category planner — scope: src/fm/decide/weekly.py, tests/decide/test_weekly.py — depends: #24 ✓, #32 ✓
   - Weekly per-category win probabilities → targets, punts (H-score-style roster-aware re-weighting, arXiv:2409.09884), and streamer stat targets.
   - Phase 5: `CategoryModel.stat(c)` (μ, σ, τ), `with_tau` / `within_player_sd` and `punt_weights` (#24) are the planner's inputs.
   AC: test command passes for tests/decide/test_weekly.py (punt recommended below the threshold win probability)
