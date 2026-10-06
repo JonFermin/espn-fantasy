@@ -386,8 +386,8 @@ def build_market_book(
     """Market values for every player in ``values`` (what the fallback ranks by: our rest-of-season value over
     replacement, by ESPN id). A player's market value is FantasyCalc's trade value when it has one, else his ESPN rank
     under ``rank_type`` (draft rank, then the season's total ranking), else his rank by ``values``: all on
-    :func:`rank_value`'s scale, so a package can mix them. ``starters`` are the ESPN ids that set
-    :attr:`MarketBook.scale`."""
+    :func:`rank_value`'s scale with one ``size`` (the largest rank in the feed, or the number of valued players when
+    that is larger), so a package can mix them. ``starters`` are the ESPN ids that set :attr:`MarketBook.scale`."""
     found = market or {}
     ordered = sorted(values, key=lambda espn_id: (-values[espn_id], espn_id))
     ours = {espn_id: position for position, espn_id in enumerate(ordered, start=1)}
@@ -395,6 +395,9 @@ def build_market_book(
         rank for entry in found.values() for rank in (entry.espn_ranks.get(rank_type), entry.total_ranking) if rank
     ]
     size = max([*ranks, len(ordered), 2])
+    # One ``size`` for both bases: a rank is a place among the league's players, so our 100th-best player is worth what
+    # ESPN's 100th-ranked is, whether the feed is 1000 deep or our own pool is 300 (a per-basis size would put the same
+    # rank at about 5000 on one basis and 1800 on the other).
     book: dict[int, float] = {}
     basis: dict[int, str] = {}
     for espn_id in values:
@@ -406,7 +409,7 @@ def build_market_book(
         if rank:
             book[espn_id], basis[espn_id] = rank_value(rank, size), ESPN_RANK
         else:
-            book[espn_id], basis[espn_id] = rank_value(ours[espn_id], max(len(ordered), 2)), ROS_RANK
+            book[espn_id], basis[espn_id] = rank_value(ours[espn_id], size), ROS_RANK
     top = sorted((book[espn_id] for espn_id in starters if espn_id in book), reverse=True)
     scale = math.fsum(top) / len(top) if top else 1.0
     return MarketBook(
@@ -669,6 +672,8 @@ class TradeContext:
     settings: LeagueSettings
     now: datetime
     period: int
+    """The scoring period of the roster snapshot (``fm sync``'s last): what rosters, projections and ``p_active`` are
+    read for."""
     team_id: int
     team_names: Mapping[int, str]
     rosters: Mapping[int, frozenset[int]]
@@ -684,7 +689,15 @@ class TradeContext:
     untouchables: Mapping[int, str] = field(default_factory=dict)
     acceptance: AcceptanceParams = DEFAULT_ACCEPTANCE
     warnings: tuple[str, ...] = ()
+    current_period: int | None = None
+    """The scoring period current at ``now`` by the pro schedule (``None``: no schedule, or none at ``now``)."""
     cache: _Cache = field(default_factory=_Cache, repr=False, compare=False)
+
+    @property
+    def lock_period(self) -> int:
+        """The period roster locks, transaction cutoffs and proposal weeks are judged in: the current one, which is
+        ``period`` unless the last sync is from an earlier period (a stale period's cutoffs are all in the past)."""
+        return self.current_period if self.current_period is not None else self.period
 
     @property
     def other_teams(self) -> tuple[int, ...]:
@@ -847,6 +860,9 @@ def load_trade_context(
     schedule_note = _lock_note(settings, schedule)
     if schedule_note:
         warnings.append(schedule_note)
+    current_period, period_note = _current_period(league, schedule, period, now)
+    if period_note:
+        warnings.append(period_note)
     if matchups is None:
         warnings.append("no mMatchup schedule given: deals are judged on rest-of-season value, not title odds")
     p_active = engine_p_active(
@@ -877,7 +893,36 @@ def load_trade_context(
         untouchables=MappingProxyType(untouchables),
         acceptance=acceptance,
         warnings=tuple(warnings),
+        current_period=current_period,
     )
+
+
+def _current_period(
+    league: LeagueRow, schedule: ScheduleLike | None, period: int, now: datetime
+) -> tuple[int | None, str | None]:
+    """The scoring period current at ``now`` and a warning when it is not the roster's ``period`` (as the lineup CLI's
+    ``_period_warning`` does). ``(None, None)`` without a schedule; a schedule with no period at ``now`` (or one the
+    plugin cannot number) falls back to ``period`` with a warning."""
+    if schedule is None:
+        return None, None
+    try:
+        current = plugin_for(league.sport).scoring_period_at(now, schedule)
+    except ValueError as exc:
+        return (
+            None,
+            f"{league.key}: the pro schedule cannot say which scoring period it is ({exc}); locks use period {period}",
+        )
+    if current is None:
+        return None, (
+            f"{league.key}: the pro schedule has no scoring period at {now:%Y-%m-%d %H:%MZ}; "
+            f"locks are judged in the synced period {period}"
+        )
+    if current != period:
+        return current, (
+            f"{league.key}: roster synced for scoring period {period} but period {current} is current; "
+            f"locks and cutoffs are judged in period {current}, the rosters are stale: run fm sync"
+        )
+    return current, None
 
 
 def _current_matchup(settings: LeagueSettings, matchups: MatchupsView | None, period: int) -> int | None:
@@ -1232,7 +1277,7 @@ def _locked_players(ctx: TradeContext, ids: Iterable[int]) -> dict[int, str]:
             continue
         try:
             cutoff = plugin.transaction_cutoff(
-                player.pro_team_id, ctx.period, ctx.schedule, lock_type=settings.roster_lock_type
+                player.pro_team_id, ctx.lock_period, ctx.schedule, lock_type=settings.roster_lock_type
             )
         except ValueError:
             continue
@@ -1835,7 +1880,13 @@ def propose_trades(
         payload = spec.payload()
         if dry_run:
             verdict = evaluate(
-                store, config, ctx.league, ProposalKind.TRADE_PROPOSE, payload, scoring_period_id=ctx.period, now=at
+                store,
+                config,
+                ctx.league,
+                ProposalKind.TRADE_PROPOSE,
+                payload,
+                scoring_period_id=ctx.lock_period,
+                now=at,
             )
             blocked = None if verdict.allowed else "; ".join(verdict.reasons)
             outcomes.append(ProposedTrade(evaluation, blocked=blocked, dry=True))
@@ -1851,7 +1902,7 @@ def propose_trades(
                 ProposalKind.TRADE_PROPOSE,
                 payload,
                 created_by=TRADES_CREATED_BY,
-                scoring_period_id=ctx.period,
+                scoring_period_id=ctx.lock_period,
                 engine_numbers=engine_numbers(ctx, evaluation),
                 rationale=rationale(ctx, evaluation),
                 dedupe_key=key,

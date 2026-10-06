@@ -375,10 +375,31 @@ def test_market_values_prefer_fantasycalc_then_espn_rank_then_our_own_rank() -> 
     assert book.value(1) == 7000.0
     assert book.value(2) == pytest.approx(rank_value(10, 40))  # the draft rank under the league's type wins
     assert book.value(3) == pytest.approx(rank_value(40, 40))
-    assert book.value(4) == pytest.approx(rank_value(4, 4))  # last of four by our value
+    assert book.value(4) == pytest.approx(rank_value(4, 40))  # fourth by our value, on the feed's size
     assert book.value(99) == 0.0
     assert book.scale == pytest.approx((7000.0 + rank_value(10, 40)) / 2)
     assert build_market_book(None, values, rank_type="PPR").basis == dict.fromkeys(values, "ros_rank")
+
+
+def test_espn_ranked_and_fallback_players_are_valued_on_one_scale() -> None:
+    # 300 valued players; the ESPN feed ranks some of them up to 1000 deep (a universe longer than our own pool).
+    values = {espn_id: float(1000 - espn_id) for espn_id in range(1, 301)}  # id n is our n-th best
+    market = {
+        1: MarketValue(espn_id=1, name="a", espn_ranks={"PPR": 100}),
+        2: MarketValue(espn_id=2, name="b", espn_ranks={"PPR": 1000}),
+    }
+    book = build_market_book(market, values, rank_type="PPR")
+    assert book.basis[1] == "espn_rank" and book.basis[100] == "ros_rank"
+    assert book.value(1) == pytest.approx(rank_value(100, 1000))
+    # a fallback player who is 100th by our values is worth the ESPN-ranked 100th (about 5000, not about 1800)
+    assert book.value(100) == pytest.approx(book.value(1))
+    assert book.value(100) == pytest.approx(rank_value(100, 1000))
+    # a package of one of each: both bases agree, so it is worth what two 100th-ranked players are
+    assert package_value([book.value(1), book.value(100)]) == pytest.approx(
+        package_value([rank_value(100, 1000), rank_value(100, 1000)])
+    )
+    fallback = [book.value(espn_id) for espn_id in range(3, 301)]  # and our own order is kept among the fallback
+    assert fallback == sorted(fallback, reverse=True)
 
 
 def test_a_rank_is_a_value_on_fantasycalcs_scale() -> None:
@@ -830,6 +851,45 @@ def test_a_players_roster_lock_comes_from_his_teams_kickoff_under_an_individual_
     assert problems == ("T2 TE1 is locked: transactions closed at 2026-10-04 17:00Z",)  # only his game started
     elsewhere = TradeSpec(4, (pid(US, "RB2"),), (pid(4, "TE1"),))  # team 4's players kick off on Monday night
     assert check_legality(late, elsewhere).legal
+
+
+def two_week_schedule() -> ProSchedule:
+    """Weeks 4 and 5 for every pro team the league's players are on: everyone plays Sunday 1 p.m. ET in each."""
+    teams = []
+    for team in [*range(41, 47), *range(60, 66)]:
+        games = {}
+        for week, day in (
+            (WEEK, datetime(2026, 10, 4, 17, 0, tzinfo=UTC)),
+            (WEEK + 1, datetime(2026, 10, 11, 17, 0, tzinfo=UTC)),
+        ):
+            games[str(week)] = [
+                {
+                    "id": team * 10 + week,
+                    "date": int(day.timestamp() * 1000),
+                    "scoringPeriodId": week,
+                    "homeProTeamId": team,
+                    "awayProTeamId": 99,
+                }
+            ]
+        teams.append({"id": team, "proGamesByScoringPeriod": games})
+    return ProSchedule.model_validate({"proTeams": teams})
+
+
+def test_locks_are_judged_in_the_current_period_when_the_last_sync_is_older(store: Store) -> None:
+    league = seed_league(store)  # the roster snapshot is week 4
+    sunday_next = datetime(2026, 10, 11, 15, 0, tzinfo=UTC)  # week 5, 11 a.m. ET, before its games
+    ctx = load_trade_context(
+        store, league, now=sunday_next, schedule=two_week_schedule(), market=FakeMarket(), weights=EQUAL_WEIGHTS
+    )
+    assert ctx.period == WEEK and ctx.current_period == WEEK + 1 and ctx.lock_period == WEEK + 1
+    assert any(f"period {WEEK + 1} is current" in warning for warning in ctx.warnings)
+    # week 4's kickoffs are long past; judged there every player would be "transactions closed"
+    assert check_legality(ctx, swap_a_running_back_for_a_tight_end()).legal
+    assert find_trades(ctx, options=SearchOptions(runs=RUNS)).results
+    fresh = load_trade_context(
+        store, league, now=NOW, schedule=two_week_schedule(), market=FakeMarket(), weights=EQUAL_WEIGHTS
+    )
+    assert fresh.current_period == WEEK and not any("is current" in warning for warning in fresh.warnings)
 
 
 def test_a_first_game_lock_closes_every_trade_at_the_periods_first_kickoff(store: Store) -> None:
