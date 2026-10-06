@@ -41,8 +41,9 @@ of the roster's remaining value) and falling back to it entirely when the histor
 and the proposal's engine numbers say which. A bid is at least ESPN's minimum bid and never more than the budget left
 or :func:`fm.proposals.faab_bid_cap` (the policy's ``max_faab_pct_per_bid`` of the synced season budget, the cap
 :func:`fm.proposals.evaluate` enforces again). The budget left is the season budget less the spend the sync read and
-less the bids pledged by the league's still-open waiver proposals (:func:`_pending`), so successive runs together
-never overbid; a plan's later claims bid from what its earlier bids leave. Leagues without FAAB claim by waiver
+less the bids pledged by the league's unsettled waiver claims (:func:`_pending`: the open proposals, and the claims the
+executor submitted that stay pending on ESPN until their waiver run is synced), so successive runs together never
+overbid; a plan's later claims bid from what its earlier bids leave. Leagues without FAAB claim by waiver
 priority, with no bid (both real leagues).
 
 **Proposing** (:func:`decide_waivers`, registered as ``("nfl", "waivers")`` in :mod:`fm.decide.registry`). The plan
@@ -107,9 +108,9 @@ from fm.proposals import (
     parse_payload,
     propose,
 )
-from fm.proposals.policy import as_utc
+from fm.proposals.policy import ROLLING_WEEK, as_utc
 from fm.sports.base import ScheduleLike, fantasy_day, game_for, last_start, period_turn, plugin_for
-from fm.store import LeagueRow, ProposalRow, RosterEntryRow, Store
+from fm.store import OPEN_PROPOSAL_STATUSES, LeagueRow, ProposalRow, RosterEntryRow, Store
 
 WAIVERS_KIND: Final = "waivers"
 """The decision kind this module registers for ``nfl``."""
@@ -877,21 +878,46 @@ type PendingMove = tuple[int | None, int | None, int]
 before its add counts is two of them)."""
 
 
+def _in_flight(store: Store, league: LeagueRow, now: datetime) -> list[ProposalRow]:
+    """The league's acquisition proposals that have not settled on ESPN: the open ones, and the waiver claims the
+    executor submitted (``verified``) whose waiver run has not been read back yet.
+
+    A ``verified`` claim stays pending on ESPN until its run, so its bid is still pledged. The run is the proposal's
+    ``deadline`` (:func:`decide_waivers` sets a claim's to its waiver run; a claim stored without one is held for
+    :data:`fm.proposals.policy.ROLLING_WEEK` from its creation). The claim counts until a sync after the run: the
+    team's ``as_of`` (the sync that read the FAAB spend) past the run means the spend and the roster have it.
+    """
+    kinds = [kind.value for kind in ACQUISITION_KINDS]
+    team = store.teams.get(league.row_id, league.team_id)
+    synced_at = team.as_of if team is not None else None
+    rows: list[ProposalRow] = []
+    statuses = (*OPEN_PROPOSAL_STATUSES, "verified")
+    for row in store.proposals.find(league_id=league.row_id, statuses=statuses, kinds=kinds):
+        if row.status == "verified":
+            if row.kind != ProposalKind.WAIVER.value:
+                continue
+            run = row.deadline if row.deadline is not None else row.created_at + ROLLING_WEEK
+            if synced_at is not None and synced_at > run:
+                continue
+        elif row.status != "executing" and row.deadline is not None and row.deadline <= now:
+            continue
+        rows.append(row)
+    return rows
+
+
 def _pending(
     store: Store, league: LeagueRow, valuation: LeagueValuation, now: datetime
 ) -> tuple[tuple[PendingMove, ...], frozenset[int], int]:
-    """The moves the league's open add/drop and waiver proposals would make, for the valuer, every player they touch,
-    which new moves leave alone, and the FAAB dollars their waiver bids pledge (``payload.bid``), which new bids must
-    leave. A proposal past its deadline is not pending (it expires unexecuted) and pledges nothing; an add the
-    valuation cannot value (not on the wire it read) stays out of the valuer, its players still left alone and its bid
-    still pledged."""
-    kinds = {kind.value for kind in ACQUISITION_KINDS}
+    """The moves the league's unsettled add/drop and waiver proposals would make, for the valuer, every player they
+    touch, which new moves leave alone, and the FAAB dollars their waiver bids pledge (``payload.bid``), which new bids
+    must leave. Unsettled (:func:`_in_flight`) are the open proposals and the claims the executor already submitted
+    whose waiver run has not been synced yet: ESPN holds those bids until the run. A proposal past its deadline is not
+    pending (it expires unexecuted) and pledges nothing; an add the valuation cannot value (not on the wire it read)
+    stays out of the valuer, its players still left alone and its bid still pledged."""
     moves: list[PendingMove] = []
     players: set[int] = set()
     pledged = 0
-    for row in store.proposals.open(league.row_id):
-        if row.kind not in kinds or (row.status != "executing" and row.deadline is not None and row.deadline <= now):
-            continue
+    for row in _in_flight(store, league, now):
         payload = parse_payload(row)
         if not isinstance(payload, WaiverPayload | AddDropPayload):
             continue
@@ -961,7 +987,8 @@ def decide_waivers(
 
     In a league that bids, ``history`` (default: :func:`fm.decide.faab.load_bid_history`, the ``mTransactions2`` pages
     the sync captured) fits the winning-bid model the claims bid from; too little of it leaves the heuristic, with a
-    warning saying so. The bids of the league's open waiver proposals come off the budget left (the module docs).
+    warning saying so. The bids of the league's open waiver proposals and of the claims already submitted whose run is
+    not synced yet come off the budget left (the module docs).
     """
     at = as_utc(now)
     row = _league_row(store, league)
@@ -997,7 +1024,7 @@ def decide_waivers(
         settings, policy, spent=team.acquisition_budget_spent if team is not None else 0, pledged=pledged, model=model
     )
     if bidding is not None and pledged:
-        warnings.append(f"{row.key}: ${pledged} of the FAAB budget is pledged by open waiver proposals")
+        warnings.append(f"{row.key}: ${pledged} of the FAAB budget is pledged by open or submitted waiver claims")
 
     def slots_left(period: int) -> int:
         held = acquisitions_this_week(store, row, settings, scoring_period_id=period, now=at)

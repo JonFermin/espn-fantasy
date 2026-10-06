@@ -28,10 +28,20 @@ number) and the policy's ``max_transactions_per_week``, less the add/drop propos
 overrides it for what ESPN's own counter says). The season limit is not tracked: ESPN's counter is not in the store.
 Roster spots: a roster with no open spot drops someone for each add, and a league's position limits are kept.
 
-**Protected players** are never dropped: the policy's untouchables, players on IR, players in other open proposals,
-the league's ``core`` (the best ``core_size`` players by per-game value; default the league's active slots, so only
-bench-quality players are droppable), and any ``protected`` ESPN ids given. A player whose lock has passed cannot be
-dropped.
+**Protected players** are never dropped: the policy's untouchables, players on IR, players in other open proposals
+(add/drop and waiver claims, and the lineup proposals that move them), a player the plan cannot value (no ``players``
+row or no projection line: his value is unknown, not zero), the league's ``core`` (the best ``core_size`` players by
+per-game value; default the league's active slots, so only bench-quality players are droppable), and any ``protected``
+ESPN ids given. A player whose lock has passed cannot be dropped.
+
+**A drop costs what the player is worth beyond this matchup.** The matchup's lineups value a bench player who is OUT
+this week, or has one game, at about 0, so on the week alone any small gain would drop him. The rest of his season is
+priced the way the add's is: the add stays on the roster after the week, so a drop loses nothing when the add is at
+least as good per game (:attr:`fm.decide.lineup_daily.DayPlayer.per_game`, the rate the lineups scale by games and
+``p_active``), and a drop whose per-game value is *higher* than the add's gives up that difference for every game the
+team has left, which no matchup's streaming gain is taken to cover: such a pair is never planned
+(:func:`_additions`). The rule holds in the season's last matchup too, where it is stricter than needed; a stream that
+keeps the better player is just not made.
 
 **Timing.** Adds, drops and trades lock by the league's ``roster_lock_type`` (ESPN's ``rosterLocktimeType``, a setting
 of its own beside the lineup lock). The real NBA league's ``FIRSTGAME_SCORINGPERIOD`` closes them at the day's *first*
@@ -84,7 +94,7 @@ from fm.proposals import (
     parse_payload,
     propose,
 )
-from fm.proposals.payloads import WaiverPayload
+from fm.proposals.payloads import LineupPayload, WaiverPayload
 from fm.proposals.policy import as_utc, stored_settings
 from fm.sports.base import ScheduleLike, period_turn
 from fm.sports.nba import NBA
@@ -238,7 +248,8 @@ class _Problem:
 def _within_limits(problem: _Problem, roster: Collection[int]) -> bool:
     counts: dict[int, int] = {}
     for espn_id in roster:
-        position = problem.rows[espn_id].default_position_id
+        row = problem.rows.get(espn_id)  # a roster player without a players row is held in place, outside the limits
+        position = row.default_position_id if row is not None else None
         if position is not None:
             counts[position] = counts.get(position, 0) + 1
     for position, count in counts.items():
@@ -260,9 +271,10 @@ class _Values:
         cached = self._cache.get(key)
         if cached is None:
             problem = self.problem
-            per_game = {espn_id: problem.players[espn_id].day(day).value for espn_id in roster}
+            valued = sorted(espn_id for espn_id in roster if espn_id in problem.rows)
+            per_game = {espn_id: problem.players[espn_id].day(day).value for espn_id in valued}
             lineup = daily_lineup_value(
-                [problem.rows[espn_id] for espn_id in sorted(roster)],
+                [problem.rows[espn_id] for espn_id in valued],
                 per_game,
                 problem.settings,
                 problem.schedule,
@@ -331,6 +343,7 @@ def _additions(
                     for espn_id in current
                     if (espn_id in problem.droppable or espn_id in streamers)
                     and espn_id not in {m[1] for m in moves if m[0] == day}
+                    and problem.players[espn_id].per_game <= problem.players[add].per_game  # no rate lost for good
                 )
             )
             for drop in drops:
@@ -441,8 +454,10 @@ def acquisition_budget(
 
 
 def _committed(store: Store, league: LeagueRow, now: datetime) -> frozenset[int]:
-    """Players the league's open add/drop and waiver proposals touch: new moves leave them alone."""
-    kinds = {kind.value for kind in ACQUISITION_KINDS}
+    """Players the league's open proposals touch: new moves leave them alone. That is every player of an add/drop or
+    waiver proposal, and every player an open ``bench_inactive`` or ``lineup`` proposal moves (dropping him would leave
+    that proposal moving someone who is gone)."""
+    kinds = {kind.value for kind in ACQUISITION_KINDS} | {ProposalKind.BENCH_INACTIVE.value, ProposalKind.LINEUP.value}
     players: set[int] = set()
     for row in store.proposals.open(league.row_id):
         if row.kind not in kinds or (row.status != "executing" and row.deadline is not None and row.deadline <= now):
@@ -450,6 +465,8 @@ def _committed(store: Store, league: LeagueRow, now: datetime) -> frozenset[int]
         payload = parse_payload(row)
         if isinstance(payload, AddDropPayload | WaiverPayload):
             players.update(i for i in (payload.add_espn_id, payload.drop_espn_id) if i is not None)
+        elif isinstance(payload, LineupPayload):
+            players.update(move.espn_id for move in payload.moves)
     return frozenset(players)
 
 
@@ -710,9 +727,22 @@ def plan_streaming(
     ranked = rank_streamers(inputs, rows, screened, schedule, synced, baseline=baseline)
     top = {score.espn_id: screened[score.espn_id] for score in ranked[: max(0, candidates)] if score.value > 0}
     untouchable = find_untouchables(store, league.sport, rules, sorted(roster_ids))
-    per_game = {player.espn_id: player.per_game for player in inputs.players if player.slot_id != IR_SLOT}
+    unvalued = sorted(
+        player.espn_id
+        for player in inputs.players
+        if player.slot_id != IR_SLOT and (player.espn_id not in per_game_value or player.espn_id not in rows)
+    )
+    if unvalued:
+        labels = {player.espn_id: player.label for player in inputs.players}
+        names = ", ".join(f"{labels[i]} ({i})" for i in unvalued)
+        warnings.append(f"{names}: no players row or projection line, so his value is unknown; never dropped")
+    per_game = {
+        player.espn_id: player.per_game
+        for player in inputs.players
+        if player.slot_id != IR_SLOT and player.espn_id not in unvalued
+    }
     core = core_players(per_game, core_size if core_size is not None else synced.active_slot_count)
-    barred = frozenset(untouchable) | core | committed | frozenset(protected)
+    barred = frozenset(untouchable) | core | committed | frozenset(protected) | frozenset(unvalued)
     droppable = sorted(
         player.espn_id
         for player in inputs.players

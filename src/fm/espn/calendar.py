@@ -24,6 +24,7 @@ would resolve them against (:meth:`SeasonCalendar.matchup_days`), but nothing gu
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from functools import cache
@@ -35,6 +36,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from fm import paths
 from fm.espn.ids import Game
 from fm.espn.settings import LeagueSettings, ScheduleSettings
+
+logger = logging.getLogger(__name__)
 
 CALENDAR_DIR: Final = "calendars"
 """Where the per-season files live, under :func:`fm.paths.data_dir`."""
@@ -269,11 +272,17 @@ def load_calendar(game: Game | str, season: int, *, root: Path | None = None) ->
 def league_matchup_days(settings: LeagueSettings, *, root: Path | None = None) -> dict[int, tuple[int, ...]] | None:
     """The scoring periods of each of a league's matchup periods, or ``None`` when they cannot be told: the league
     lists its matchups in schedule periods the season's calendar has to resolve and there is no calendar file for the
-    season (or it lacks a period the league lists)."""
+    season (or it lacks a period the league lists). A calendar file that cannot be read or parsed is the same: a warning
+    is logged and the answer is ``None``, so a bad file never aborts a decision or the tick (:func:`load_calendar` and
+    :func:`find_calendar` still raise :class:`CalendarError`)."""
     schedule = settings.schedule
     if schedule.lists_scoring_periods:
         return dict(schedule.matchup_periods)
-    calendar = find_calendar(settings.game, settings.season, root=root)
+    try:
+        calendar = find_calendar(settings.game, settings.season, root=root)
+    except CalendarError as exc:
+        logger.warning("league %s matchup days unknown: %s", settings.league_id, exc)
+        return None
     if calendar is None:
         return None
     try:

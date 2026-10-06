@@ -30,6 +30,7 @@ from fm.commands import schedule as schedule_cmd
 from fm.config import Config, League
 from fm.decide.registry import DecisionRegistry
 from fm.espn.auth import EspnSession, NotLoggedInError
+from fm.espn.calendar import CalendarError
 from fm.espn.client import EspnClient
 from fm.espn.settings import load_league_settings
 from fm.executor import STALE_EXECUTION, ExecutorOptions
@@ -782,3 +783,32 @@ def test_the_real_tick_imports_register_the_nba_decisions_and_streaming_sees_the
     assert {entry.kind for entry in registry.registered("nba")} >= {"lineup_daily", "streaming"}
     assert {"lineup", "lineup_daily", "streaming"} <= tick_module.OPPONENT_DECISIONS
     assert "waivers" not in tick_module.OPPONENT_DECISIONS
+
+
+def test_the_opponent_is_read_once_per_league_and_tick_for_every_decision_that_needs_it(world: World) -> None:
+    seen: list[int | None] = []
+
+    def streaming(store: Store, config: Config, league: LeagueRow, *, opponent_team_id: int | None, **_: Any) -> Any:
+        seen.append(opponent_team_id)
+        return SimpleNamespace(proposals=(), blocked=(), warnings=())
+
+    world.registry.register("nfl", "streaming", streaming)
+    world.decision_payload = None
+    report = world.tick(now=datetime(2026, 9, 30, 12, 0, tzinfo=UTC))  # the period opening runs every decision
+    assert {"nfl:lineup", "nfl:streaming"} <= set(decisions(report))
+    assert seen == [2] and world.calls[0].kwargs["opponent_team_id"] == 2
+    assert world.api.reads("mMatchup") == 1
+
+
+def test_a_calendar_error_resolving_the_matchup_week_leaves_the_decision_without_an_opponent(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: Any, **_kwargs: Any) -> int:
+        raise CalendarError("/data/calendars/fba_2027.json: cannot be read (JSONDecodeError)")
+
+    monkeypatch.setattr(tick_module, "matchup_period_of", broken)
+    report = world.tick()
+    (run,) = next(lg for lg in report.leagues if lg.key == "nfl").decisions
+    assert run.error is None  # the decision still ran
+    assert world.calls[0].kwargs["opponent_team_id"] is None
+    assert any("no opponent (matchup week unknown" in warning for warning in report.warnings)

@@ -67,7 +67,7 @@ from fm.config import Config, League, Sport
 from fm.decide import registry as decide_registry
 from fm.decide.registry import DecisionRegistry, Registration
 from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus, load_session
-from fm.espn.calendar import matchup_period_of
+from fm.espn.calendar import CalendarError, matchup_period_of
 from fm.espn.client import EspnClient, EspnClientError
 from fm.espn.settings import LeagueSettings
 from fm.executor import (
@@ -614,6 +614,7 @@ class _Tick:
         self.alerts: list[str] = []
         self.warnings: list[str] = []
         self.schedules: dict[Sport, ScheduleLike] = {}
+        self.opponents: dict[str, int | None] = {}
         self.session = SessionCheck(SessionVerdict.MISSING, "not checked")
 
     # --- steps
@@ -850,7 +851,16 @@ class _Tick:
 
     def _opponent(self, ctx: LeagueContext) -> int | None:
         """Our opponent this matchup period, from ``mMatchup``; ``None`` without a session, on a bye, or when the read
-        fails (the lineup then plans for expected points)."""
+        fails or the matchup week cannot be placed on the calendar (the lineup then plans for expected points). Read
+        once per league per tick: the lineup and streaming decisions share it."""
+        if ctx.key in self.opponents:
+            return self.opponents[ctx.key]
+        opponent = self._read_opponent(ctx)
+        if ctx.client is not None:  # without a session nothing was read, and a later read might work
+            self.opponents[ctx.key] = opponent
+        return opponent
+
+    def _read_opponent(self, ctx: LeagueContext) -> int | None:
         if ctx.client is None:
             return None
         try:
@@ -858,7 +868,11 @@ class _Tick:
         except EspnClientError as exc:
             self.warnings.append(f"{ctx.key}: no opponent (matchups unreadable: {exc}); planning for expected points")
             return None
-        matchup_period = matchup_period_of(ctx.settings, ctx.period)  # the calendar resolves NBA weekly matchups
+        try:
+            matchup_period = matchup_period_of(ctx.settings, ctx.period)  # the calendar resolves NBA weekly matchups
+        except CalendarError as exc:
+            self.warnings.append(f"{ctx.key}: no opponent (matchup week unknown: {exc}); planning for expected points")
+            return None
         return opponent_from(matchups, ctx.row.team_id, matchup_period)
 
     def _notify_new(self, ctx: LeagueContext, warnings: list[str]) -> tuple[int, ...]:

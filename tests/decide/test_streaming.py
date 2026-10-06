@@ -39,7 +39,7 @@ from fm.decide.streaming import (
 from fm.decide.waivers import Wire, WireEntry, WireStatus
 from fm.espn.ids import FBA
 from fm.espn.settings import LeagueSettings, LockType, load_league_settings
-from fm.proposals import AddDropPayload, ProposalKind, parse_payload, propose
+from fm.proposals import AddDropPayload, LineupMove, LineupPayload, ProposalKind, parse_payload, propose
 from fm.sports.nba import NBA
 from fm.store import (
     LeagueRow,
@@ -386,6 +386,74 @@ def test_untouchables_and_protected_players_are_never_dropped(store: Store) -> N
     assert named.plan is None
     wide = decide(store, league, core_size=6)  # a smaller core frees more players to drop
     assert 107 not in wide.protected and 101 in wide.protected
+
+
+def test_a_player_the_plan_cannot_value_is_never_dropped(store: Store) -> None:
+    """A roster player with a ``players`` row but no projection line is frozen at 0 by the daily lineup: his value is
+    unknown, not zero, so he must not look like a free drop."""
+    league = seed(store)
+    store.db.execute("DELETE FROM projections WHERE espn_id = ?", (113,))
+    decision = decide(store, league)
+    assert 113 in decision.protected
+    assert decision.plan is not None and decision.plan.moves
+    assert all(move.drop != 113 for move in decision.plan.moves)
+    assert any("Bea Bench" in warning and "never dropped" in warning for warning in decision.warnings)
+    assert decision.inputs.values.per_game.get(113) is None
+
+
+def test_a_rostered_player_without_a_players_row_is_never_dropped(store: Store) -> None:
+    league = seed(store)
+    store.db.execute("DELETE FROM players WHERE espn_id = ?", (113,))
+    decision = decide(store, league)
+    assert 113 in decision.protected
+    assert decision.plan is None or all(move.drop != 113 for move in decision.plan.moves)
+
+
+def test_a_drop_is_refused_when_it_gives_up_a_better_player_per_game(store: Store) -> None:
+    """Ben is worth about 0 to this week (his team does not play) but 20 a game over the season: no streamer at 15 a
+    game is worth losing him for."""
+    everyone_but_ben = {day: teams - {11} for day, teams in WEEK.items()}
+    away = FakeSchedule(everyone_but_ben)
+    league = seed(store, lines={111: {"PTS": 20.0, "GP": 1.0}})
+    kept = [112, 113, 107, 108, 109, 110]  # only Ben is droppable
+    decision = decide(store, league, schedule=away, wire=pool(301), core_size=6, protected=kept)
+    assert decision.protected.isdisjoint({111}) and decision.ranked[0].value > 0
+    assert decision.plan is None and decision.drafts == ()
+    # the same week with a streamer better than Ben per game does drop him
+    better = seed(store, lines={111: {"PTS": 20.0, "GP": 1.0}, 301: {"PTS": 25.0, "GP": 1.0}})
+    decision = decide(store, better, schedule=away, wire=pool(301), core_size=6, protected=kept)
+    assert decision.plan is not None and [move.drop for move in decision.plan.moves] == [111]
+
+
+def test_players_in_open_lineup_proposals_are_protected_from_drops(store: Store) -> None:
+    league = seed(store)
+    config = config_for(real_points(), max_transactions_per_week=3)
+    lineup = LineupPayload(
+        moves=(
+            LineupMove(espn_id=113, from_slot_id=BENCH, to_slot_id=UTIL),
+            LineupMove(espn_id=110, from_slot_id=UTIL, to_slot_id=BENCH),
+        )
+    )
+    propose(
+        store,
+        config,
+        league,
+        ProposalKind.LINEUP,
+        lineup,
+        created_by="test",
+        scoring_period_id=DAY,
+        deadline=FIRST_TIP,
+        now=MORNING,
+    )
+    decision = decide(store, league, policy=config.league("nba").policy)
+    assert {110, 113} <= decision.protected
+    assert decision.plan is not None
+    assert all(move.drop not in {110, 113} for move in decision.plan.moves)
+    store.proposals.update(
+        store.proposals.open(league.row_id)[0].model_copy(update={"status": "rejected"})
+    )  # a settled proposal protects no one
+    free = decide(store, league, policy=config.league("nba").policy)
+    assert 113 not in free.protected
 
 
 def test_a_roster_spot_is_filled_without_a_drop(store: Store) -> None:
