@@ -74,7 +74,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - News triage → stored signals.
   - Phase 5: `fm.model.relevance.relevance_for` ranks a category league's free agents by a summed per-category z-score stand-in written before #24; `fm.model.categories.CategoryModel` now exists, so rank with it. Store triage output as the news signals `fm.model.availability.assess` reads: each needs a source URL and a finite value, is clamped to ±0.3 × confidence, and the latest signal of a kind supersedes earlier ones.
   AC: test command passes for tests/advisor/ with a stubbed client (parsed output stored; refusal/max_tokens handled; budget cap blocks calls)
-- IN PROGRESS [P1] [L] #31: NBA daily lineups and streaming — scope: src/fm/decide/lineup_daily.py, src/fm/decide/streaming.py, src/fm/espn/calendar.py, data/calendars/, tests/decide/test_lineup_daily.py, tests/decide/test_streaming.py — depends: #20 ✓, #24 ✓
+- DONE [P1] [L] #31: NBA daily lineups and streaming — scope: src/fm/decide/lineup_daily.py, src/fm/decide/streaming.py, src/fm/espn/calendar.py, data/calendars/, tests/decide/test_lineup_daily.py, tests/decide/test_streaming.py — depends: #20 ✓, #24 ✓
   - Daily lineups across the matchup week, honoring any games-played limit.
   - Open slot-day detection.
   - Add/drop sequence under the acquisition limit as a daily knapsack/DP; adds land before the day's first tip; core players protected.
