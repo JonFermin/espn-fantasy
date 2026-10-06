@@ -86,6 +86,7 @@ MODULES = (
     "fm.decide.faab",
     "fm.decide.rankings",
     "fm.eval.backtest",
+    "fm.eval.tune",
     "fm.espn.calendar",
     "fm.decide.lineup_daily",
     "fm.decide.streaming",
