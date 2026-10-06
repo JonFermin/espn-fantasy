@@ -99,7 +99,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
 - DONE [P2] [S] #39: Blend weight tuning — scope: src/fm/eval/tune.py, data/blend_weights.toml, tests/eval/test_tune.py — depends: #33 ✓
   - Fits per-(source, position) weights on held-out weeks.
   AC: test command passes for tests/eval/test_tune.py (held-out MAE ≤ equal-weight MAE on fixtures)
-- TODO [P2] [M] #40: MCP server — scope: src/fm/mcp_server.py, tests/test_mcp_server.py — depends: #8 ✓, #26 ✓
+- IN PROGRESS [P2] [M] #40: MCP server — scope: src/fm/mcp_server.py, tests/test_mcp_server.py — depends: #8 ✓, #26 ✓
   - FastMCP read tools (status, lineup, waivers, trade eval) plus `create_proposal`; no execute tool.
   - `create_proposal` is `fm.proposals.propose` (policy verdict and dedupe included); the server exposes no approve or execute path.
   AC: test command passes for tests/test_mcp_server.py (tool list has no write/execute tool; `create_proposal` stores a proposal)
