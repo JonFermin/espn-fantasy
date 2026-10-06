@@ -12,8 +12,8 @@ and returns a :class:`WorkerReply` whose ``status`` says whether the output may 
 - ``max_tokens``: the answer was cut off. Treated as a failure, never as partial data: the schema makes a truncated
   answer invalid anyway, and the SDK refuses to hand it over;
 - ``unparseable``: the answer came back whole but did not match the output type, or the SDK could not parse it;
-- ``stopped``: any other stop reason (``tool_use``, ``pause_turn``, ``stop_sequence``, ...), which no worker here
-  asks for.
+- ``stopped``: any other stop reason (``tool_use``, ``stop_sequence``, ...), which no worker here asks for, and a
+  ``pause_turn`` that was still paused after the resumes below.
 
 The API's ``stop_reason`` is checked before the parsed output is read (CLAUDE.md), whatever the SDK attached to it.
 
@@ -25,6 +25,22 @@ the requested one: a ``fallback_message`` entry in ``usage.iterations`` says so,
 under the model that answered (``response.model``), logged. A final ``stop_reason`` of ``refusal`` still means the
 whole chain refused and takes the refusal path above. The Batches API rejects ``fallbacks``, so batch requests never
 carry it; a batch refusal is logged and skipped.
+
+**Server tools.** A :class:`Prompt` may carry ``tools`` (server-side tools such as web search; the advisor never
+defines a client-side tool, so ``tool_use`` is never answered). A call with tools goes through ``messages.create``
+(``beta.messages.create`` for the refusal fallback) with the schema in ``output_config.format``, and the answer is
+parsed here from the final text block: ``messages.parse`` validates *every* text block as the output type, which a
+pre-search remark or a paused turn's partial text would fail. A call without tools is unchanged. Tools render before
+``system`` in the cache prefix, so a stable tool list keeps the cached system blocks warm; keep it stable across a
+worker's calls. The ``web_search_result`` URLs the answer's ``web_search_tool_result`` blocks held come back as
+``search_urls`` (a failed search, an error object instead of a list, contributes none).
+
+**Pause and resume.** ``stop_reason: "pause_turn"`` means the server-side search loop hit its iteration limit.
+:meth:`AdvisorClient.ask` then re-sends the same messages with the assistant's whole content appended (no "continue"
+user message), up to ``max_resumes`` times (:data:`MAX_PAUSE_RESUMES`, 2). Every round is recorded in ``llm_usage``,
+so each counts toward the daily cap, which is checked before every resume; the reply's ``usage`` is the last round
+and ``usages`` all of them, and ``search_urls`` are the URLs of all rounds. A call still paused after the cap, or one
+whose budget ran out in between, is ``stopped``: no output is read.
 
 **Cost.** Every call that reached the API is recorded in ``llm_usage`` (:class:`fm.store.LlmUsageRow`) with its
 tokens, the cost at the model's :class:`Pricing` and whether it ran in a batch (half price). A call is refused with
@@ -46,7 +62,7 @@ The SDK is reached only through a :class:`Transport`: :class:`SdkTransport` wrap
 production, and tests pass their own, so no unit test holds a key or opens a socket (``tests/conftest.py``). The
 transport raises :class:`AdvisorError` for a transport or API failure; nothing is recorded for a call that never
 got an answer. The advisor has no write path to ESPN: this module imports nothing from ``fm.browser`` or
-``fm.executor``, and the SDK's tools are never enabled.
+``fm.executor``, and the only tools a prompt can carry are server-side ones that run on Anthropic's side.
 """
 
 from __future__ import annotations
@@ -54,10 +70,10 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Final, Literal, TypedDict, cast
+from typing import Any, Final, Literal, NotRequired, TypedDict, cast
 
 import anthropic
 from anthropic import transform_schema
@@ -99,6 +115,9 @@ MTOK: Final = 1_000_000
 
 MAX_BATCH_REQUESTS: Final = 10_000
 """The Message Batches API's limit on requests per batch."""
+
+MAX_PAUSE_RESUMES: Final = 2
+"""How often :meth:`AdvisorClient.ask` re-sends a ``pause_turn`` answer before giving up on it."""
 
 FALLBACK_BETA: Final = "server-side-fallback-2026-07-01"
 """The beta header the ``fallbacks="default"`` scalar form requires (the ``-2026-06-01`` header is the older array
@@ -203,6 +222,8 @@ class CallParams(TypedDict):
     system: list[TextBlockParam]
     messages: list[MessageParam]
     output_config: OutputConfigParam
+    tools: NotRequired[list[dict[str, Any]]]
+    """Server tools, present only when the prompt has some: ``{"type": "web_search_20260209", ...}`` and the like."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +231,7 @@ class Prompt:
     """One worker call. ``system`` is the worker's instructions and ``context`` the league context, both sent as
     cached system blocks (stable across the worker's calls, in that order); ``user`` is the question. ``effort``
     is the worker's (:func:`effort_for`) and ``max_tokens`` bounds the answer; ``league_id`` is recorded with the
-    usage."""
+    usage. ``tools`` are server tool definitions, sent as given and in order (keep them stable: module docs)."""
 
     system: str
     user: str
@@ -218,6 +239,7 @@ class Prompt:
     effort: Effort
     context: str | None = None
     league_id: int | None = None
+    tools: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.system.strip() or not self.user.strip():
@@ -232,13 +254,16 @@ class Prompt:
         ]
         if self.context is not None and self.context.strip():
             system.append({"type": "text", "text": self.context, "cache_control": {"type": "ephemeral"}})
-        return {
+        params: CallParams = {
             "model": model,
             "max_tokens": self.max_tokens,
             "system": system,
             "messages": [{"role": "user", "content": [{"type": "text", "text": self.user}]}],
             "output_config": {"effort": self.effort},
         }
+        if self.tools:
+            params["tools"] = [dict(tool) for tool in self.tools]
+        return params
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,7 +274,9 @@ class RawReply:
     structured output when the SDK could parse one (it is read only when ``stop_reason`` is ``end_turn``);
     ``detail`` is the refusal's explanation or the parse error. A transport that could not parse the answer returns
     ``output=None`` with the ``detail``, and ``stop_reason=None`` with zero usage when the SDK raised before handing
-    the message over (it validates the output before returning).
+    the message over (it validates the output before returning). ``search_urls`` are the ``web_search_result`` URLs
+    the answer's search blocks held; ``resume_content`` is the answer's content as request blocks, kept only for a
+    ``pause_turn`` (what :meth:`AdvisorClient.ask` appends as the assistant turn to resume).
     """
 
     request_id: str | None
@@ -259,12 +286,16 @@ class RawReply:
     output: object = None
     detail: str | None = None
     fallback: bool = False
+    search_urls: tuple[str, ...] = ()
+    resume_content: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerReply[T]:
     """A worker's answer. ``output`` is set only when ``status`` is ``ok``; ``usage`` is the ``llm_usage`` row
-    recorded for the call (``id`` set when it was stored); ``detail`` explains a refusal or a parse failure."""
+    recorded for the call (``id`` set when it was stored; the last round of a resumed call); ``detail`` explains a
+    refusal or a parse failure. ``usages`` holds every round's row (one unless the call was resumed after a
+    ``pause_turn``) and ``search_urls`` the search result URLs of all rounds, in the order they came."""
 
     worker: str
     status: ReplyStatus
@@ -272,6 +303,17 @@ class WorkerReply[T]:
     stop_reason: str | None
     usage: LlmUsageRow
     detail: str | None = None
+    search_urls: tuple[str, ...] = ()
+    usages: tuple[LlmUsageRow, ...] = ()
+
+    @property
+    def rounds(self) -> int:
+        return max(1, len(self.usages))
+
+    @property
+    def cost_usd(self) -> float:
+        """What the call cost over all its rounds."""
+        return math.fsum(row.cost_usd for row in self.usages) if self.usages else self.usage.cost_usd
 
     @property
     def ok(self) -> bool:
@@ -284,6 +326,8 @@ class WorkerReply[T]:
         if usage.cache_read_input_tokens:
             tokens += f", {usage.cache_read_input_tokens:,} cached"
         what = f"{self.worker}: {self.status} ({self.stop_reason or 'no answer'}), {tokens}, ${usage.cost_usd:.4f}"
+        if self.rounds > 1:
+            what += f" (last of {self.rounds} rounds; ${self.cost_usd:.4f} in all)"
         return what if self.detail is None else f"{what}: {self.detail}"
 
 
@@ -350,11 +394,37 @@ def output_format(output: type[BaseModel]) -> JSONOutputFormatParam:
     return {"type": "json_schema", "schema": transform_schema(TypeAdapter(output).json_schema())}
 
 
-def _first_text(content: Iterable[Any]) -> str | None:
+def _final_text(content: Iterable[Any]) -> str | None:
+    """The last text block: after a web search the answer follows the searching, and a plain answer has just one."""
+    text: str | None = None
     for block in content:
         if getattr(block, "type", None) == "text":
-            return str(block.text)
-    return None
+            text = str(block.text)
+    return text
+
+
+def search_urls_of(message: Any) -> tuple[str, ...]:
+    """The ``web_search_result`` URLs in a message's ``web_search_tool_result`` blocks, in order. Server-tool errors
+    do not raise: such a block's ``content`` is one error object (``error_code``) instead of a list, which is logged
+    and contributes nothing."""
+    urls: list[str] = []
+    for block in getattr(message, "content", None) or ():
+        if getattr(block, "type", None) != "web_search_tool_result":
+            continue
+        results = block.content
+        if not isinstance(results, list):
+            logger.warning("advisor: web search failed: %s", getattr(results, "error_code", None) or "unknown error")
+            continue
+        for result in results:
+            url = getattr(result, "url", None)
+            if getattr(result, "type", None) == "web_search_result" and isinstance(url, str) and url:
+                urls.append(url)
+    return tuple(urls)
+
+
+def _resume_content(message: Any) -> tuple[dict[str, Any], ...]:
+    """A paused message's content as request blocks (what the API wants echoed back to resume)."""
+    return tuple(block.model_dump(mode="json", exclude_none=True) for block in message.content)
 
 
 def _refusal_detail(message: Any) -> str | None:
@@ -373,14 +443,14 @@ def served_by_fallback(message: Any) -> bool:
 
 
 def reply_from_message(message: Any, output: type[BaseModel]) -> RawReply:
-    """A :class:`RawReply` from an SDK message, plain or parsed, beta or not. A plain message's first text block is
+    """A :class:`RawReply` from an SDK message, plain or parsed, beta or not. A plain message's last text block is
     parsed into ``output`` here (batch results come back unparsed); a parse failure becomes the ``detail``. ``model``
     is the model that answered, which a refusal fallback can change."""
     parsed: object = getattr(message, "parsed_output", None)
     detail = _refusal_detail(message)
     already_parsed = isinstance(message, ParsedMessage | ParsedBetaMessage)
     if parsed is None and message.stop_reason == "end_turn" and not already_parsed:
-        text = _first_text(message.content)
+        text = _final_text(message.content)
         if text is not None:
             try:
                 parsed = TypeAdapter(output).validate_json(text)
@@ -394,6 +464,8 @@ def reply_from_message(message: Any, output: type[BaseModel]) -> RawReply:
         output=parsed,
         detail=detail,
         fallback=served_by_fallback(message),
+        search_urls=search_urls_of(message),
+        resume_content=_resume_content(message) if message.stop_reason == "pause_turn" else (),
     )
 
 
@@ -413,7 +485,9 @@ class SdkTransport(Transport):
     def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
         try:
             message: Any
-            if fallback:
+            if params.get("tools"):
+                message = self._create_with_tools(params, output, fallback=fallback)
+            elif fallback:
                 # The beta messages surface: the same parameters (the beta param types are structurally the same
                 # TypedDicts) plus the fallback header and the "default" fallback chain, which only this form takes.
                 message = self._sdk.beta.messages.parse(
@@ -448,6 +522,21 @@ class SdkTransport(Transport):
         except anthropic.APIError as exc:
             raise AdvisorError(f"Claude API call failed: {exc}") from exc
         return reply_from_message(message, output)
+
+    def _create_with_tools(self, params: CallParams, output: type[BaseModel], *, fallback: bool) -> Any:
+        """A call with server tools: ``create`` with the schema in ``output_config.format``; the answer is parsed
+        from its final text block by :func:`reply_from_message` (see the module docs for why not ``parse``)."""
+        kwargs: dict[str, Any] = {
+            "model": params["model"],
+            "max_tokens": params["max_tokens"],
+            "system": params["system"],
+            "messages": params["messages"],
+            "output_config": {**params["output_config"], "format": output_format(output)},
+            "tools": params.get("tools", []),
+        }
+        if fallback:
+            return self._sdk.beta.messages.create(**kwargs, betas=[FALLBACK_BETA], fallbacks="default")
+        return self._sdk.messages.create(**kwargs)
 
     def create_batch(self, requests: Sequence[BatchRequest]) -> str:
         body: list[BatchRequestParam] = [{"custom_id": r.custom_id, "params": r.params} for r in requests]
@@ -528,7 +617,8 @@ def day_start(now: datetime) -> datetime:
 class AdvisorClient:
     """The workers' way to Claude (see the module docs). ``llm`` gives the model and the daily cap; ``transport``
     is the SDK or a fake; ``pricing`` defaults to the model's listed price; ``refusal_fallback`` (on by default)
-    asks the API for the server-side refusal fallback on live calls."""
+    asks the API for the server-side refusal fallback on live calls; ``max_resumes`` caps the re-sends of a
+    ``pause_turn`` answer."""
 
     def __init__(
         self,
@@ -538,12 +628,16 @@ class AdvisorClient:
         *,
         pricing: Pricing | None = None,
         refusal_fallback: bool = True,
+        max_resumes: int = MAX_PAUSE_RESUMES,
     ) -> None:
+        if max_resumes < 0:
+            raise ValueError(f"max_resumes must not be negative, got {max_resumes!r}")
         self.store = store
         self.model: str = llm.model
         self.daily_budget_usd: float = llm.daily_budget_usd
         self.pricing: Pricing = pricing if pricing is not None else pricing_for(llm.model)
         self.refusal_fallback: bool = refusal_fallback
+        self.max_resumes: int = max_resumes
         self._transport = transport
 
     @classmethod
@@ -583,11 +677,42 @@ class AdvisorClient:
     ) -> WorkerReply[T]:
         """Send ``prompt`` as ``worker`` and parse the answer into ``output`` (see the module docs for the statuses).
         Raises :class:`BudgetExceededError` before sending once the day's cap is reached and :class:`AdvisorError`
-        when the API could not be reached; the call is recorded in ``llm_usage`` whenever it got an answer."""
+        when the API could not be reached; every round that got an answer is recorded in ``llm_usage``. A
+        ``pause_turn`` answer is resumed up to ``max_resumes`` times (module docs)."""
         self.check_budget(worker, now)
         params = prompt.params(self.model)
-        raw = self._transport.parse(params, output, fallback=self.refusal_fallback)
-        return self._reply(worker, raw, output, league_id=prompt.league_id, batch=False, now=now)
+        urls: list[str] = []
+        rows: list[LlmUsageRow] = []
+        resumes = 0
+        while True:
+            raw = self._transport.parse(params, output, fallback=self.refusal_fallback)
+            urls.extend(url for url in raw.search_urls if url not in urls)
+            row = self._record(worker, raw, league_id=prompt.league_id, batch=False, now=now)
+            rows.append(row)
+            if raw.stop_reason != "pause_turn" or not raw.resume_content:
+                note = None
+                break
+            if resumes >= self.max_resumes:
+                note = f"still paused (pause_turn) after {resumes} resumes; not used"
+                break
+            try:
+                self.check_budget(worker, now)
+            except BudgetExceededError as exc:
+                note = f"paused (pause_turn) and not resumed: {exc}"
+                break
+            resumes += 1
+            logger.info("advisor: %s paused (pause_turn); resuming (%d of %d)", worker, resumes, self.max_resumes)
+            params = cast(
+                CallParams,
+                {
+                    **params,
+                    "messages": [*params["messages"], {"role": "assistant", "content": list(raw.resume_content)}],
+                },
+            )
+        reply = self._reply(
+            worker, raw, output, row, league_id=prompt.league_id, search_urls=tuple(urls), usages=tuple(rows)
+        )
+        return reply if note is None else replace(reply, detail=note)
 
     # --- batches ---
 
@@ -613,18 +738,16 @@ class AdvisorClient:
         requests: list[BatchRequest] = []
         for custom_id, prompt in prompts.items():
             params = prompt.params(self.model)
-            requests.append(
-                BatchRequest(
-                    custom_id,
-                    MessageCreateParamsNonStreaming(
-                        model=params["model"],
-                        max_tokens=params["max_tokens"],
-                        system=params["system"],
-                        messages=params["messages"],
-                        output_config={**params["output_config"], "format": schema},
-                    ),
-                )
+            body = MessageCreateParamsNonStreaming(
+                model=params["model"],
+                max_tokens=params["max_tokens"],
+                system=params["system"],
+                messages=params["messages"],
+                output_config={**params["output_config"], "format": schema},
             )
+            if "tools" in params:  # server tools ride along; a batch never resumes a pause_turn
+                body["tools"] = cast(Any, params["tools"])
+            requests.append(BatchRequest(custom_id, body))
         batch_id = self._transport.create_batch(requests)
         logger.info("advisor: %s submitted batch %s with %d requests", worker, batch_id, len(requests))
         return SubmittedBatch(
@@ -655,8 +778,9 @@ class AdvisorClient:
             if result.reply is None:
                 failed[result.custom_id] = result.error or "no result"
                 continue
+            row = self._record(submitted.worker, result.reply, league_id=submitted.league_id, batch=True, now=now)
             replies[result.custom_id] = self._reply(
-                submitted.worker, result.reply, output, league_id=submitted.league_id, batch=True, now=now
+                submitted.worker, result.reply, output, row, league_id=submitted.league_id
             )
         for custom_id in submitted.custom_ids:
             if custom_id not in replies and custom_id not in failed:
@@ -667,17 +791,10 @@ class AdvisorClient:
 
     # --- recording ---
 
-    def _reply[T: BaseModel](
-        self,
-        worker: str,
-        raw: RawReply,
-        output: type[T],
-        *,
-        league_id: int | None,
-        batch: bool,
-        now: datetime | None,
-    ) -> WorkerReply[T]:
-        status, detail = _status_of(raw, output)
+    def _record(
+        self, worker: str, raw: RawReply, *, league_id: int | None, batch: bool, now: datetime | None
+    ) -> LlmUsageRow:
+        """Store one answer's ``llm_usage`` row (one per round of a resumed call)."""
         # Recorded and priced under the model that answered: a refusal fallback can serve another model.
         pricing = self.pricing if raw.model == self.model else pricing_for(raw.model)
         usage = LlmUsageRow(
@@ -703,8 +820,31 @@ class AdvisorClient:
                 raw.model,
                 raw.request_id,
             )
+        return usage
+
+    def _reply[T: BaseModel](
+        self,
+        worker: str,
+        raw: RawReply,
+        output: type[T],
+        usage: LlmUsageRow,
+        *,
+        league_id: int | None,
+        search_urls: tuple[str, ...] | None = None,
+        usages: tuple[LlmUsageRow, ...] | None = None,
+    ) -> WorkerReply[T]:
+        status, detail = _status_of(raw, output)
         parsed = raw.output if status == "ok" and isinstance(raw.output, output) else None
-        reply = WorkerReply(worker, status, parsed, raw.stop_reason, usage, detail)
+        reply = WorkerReply(
+            worker,
+            status,
+            parsed,
+            raw.stop_reason,
+            usage,
+            detail,
+            search_urls=raw.search_urls if search_urls is None else search_urls,
+            usages=(usage,) if usages is None else usages,
+        )
         level = logging.INFO if reply.ok else logging.WARNING
         logger.log(level, "advisor: %s", reply.describe())
         return reply
@@ -721,6 +861,8 @@ def _status_of(raw: RawReply, output: type[BaseModel]) -> tuple[ReplyStatus, str
             return "refusal", raw.detail or "the model declined to answer"
         case "max_tokens":
             return "max_tokens", raw.detail or "the answer was cut off at max_tokens; not used"
+        case "pause_turn":
+            return "stopped", raw.detail or "paused (pause_turn) and not resumed; no output read"
         case None:
             return "unparseable", raw.detail or "no answer was parsed"
         case other:

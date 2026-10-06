@@ -382,6 +382,8 @@ class FakeMessages:
             raise self.outcome
         return self.outcome
 
+    create = parse  # a call with server tools goes through ``create``; the fake answers both the same way
+
 
 class FakeBeta:
     def __init__(self, outcome: object) -> None:
@@ -578,3 +580,150 @@ def test_a_fallback_message_iteration_marks_the_served_model() -> None:
     reply = reply_from_message(message, Answer)
     assert reply == RawReply("msg_beta", "claude-sonnet-5", "end_turn", TokenUsage(40, 9, 0, 0), answer, fallback=True)
     assert served_by_fallback(sdk_message("end_turn", answer.model_dump_json())) is False
+
+
+# --- server tools ---
+
+SEARCH_TOOL: dict[str, Any] = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
+PAUSED_BLOCK: dict[str, Any] = {
+    "type": "server_tool_use",
+    "id": "srvtoolu_1",
+    "name": "web_search",
+    "input": {"q": "x"},
+}
+
+
+def test_tools_are_in_the_params_only_when_the_prompt_has_them() -> None:
+    plain = prompt().params(DEFAULT_MODEL)
+    assert "tools" not in plain  # a call without tools is the call it always was
+    assert plain == prompt(tools=()).params(DEFAULT_MODEL)
+    with_tools = prompt(tools=(SEARCH_TOOL,)).params(DEFAULT_MODEL)
+    assert with_tools.get("tools") == [SEARCH_TOOL]
+    assert {k: v for k, v in with_tools.items() if k != "tools"} == plain  # the cached prefix is unchanged
+    assert prompt(tools=(SEARCH_TOOL,)).params(DEFAULT_MODEL) == with_tools  # stable across calls
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_sdk_transport_sends_the_tools_and_the_schema_on_both_surfaces(fallback: bool) -> None:
+    answer = Answer(verdict="sit", score=0.2)
+    sdk = FakeSdk(sdk_message("end_turn", answer.model_dump_json()))
+    transport = SdkTransport(cast(anthropic.Anthropic, sdk))
+
+    reply = transport.parse(prompt(tools=(SEARCH_TOOL,)).params(DEFAULT_MODEL), Answer, fallback=fallback)
+
+    sent = (sdk.beta if fallback else sdk).messages.kwargs
+    other = (sdk if fallback else sdk.beta).messages.kwargs
+    assert other == {}
+    assert sent["tools"] == [SEARCH_TOOL]
+    assert sent["output_config"] == {"effort": "low", "format": output_format(Answer)}
+    assert "output_format" not in sent  # create, not parse: the answer is read from the final text block
+    assert (sent.get("fallbacks") == "default") is fallback and (sent.get("betas") == [FALLBACK_BETA]) is fallback
+    assert reply.output == answer and reply.stop_reason == "end_turn"
+
+
+def test_a_call_without_tools_still_goes_through_parse() -> None:
+    answer = Answer(verdict="sit", score=0.2)
+    sdk = FakeSdk(sdk_message("end_turn", answer.model_dump_json(), parsed=answer))
+    SdkTransport(cast(anthropic.Anthropic, sdk)).parse(prompt().params(DEFAULT_MODEL), Answer)
+    assert "tools" not in sdk.messages.kwargs and sdk.messages.kwargs["output_format"] is Answer
+
+
+def search_message(content: list[dict[str, Any]], stop_reason: str = "end_turn") -> Message:
+    return Message.model_validate(
+        {
+            "id": "msg_s",
+            "type": "message",
+            "role": "assistant",
+            "model": DEFAULT_MODEL,
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 5, "output_tokens": 2},
+            "content": content,
+        }
+    )
+
+
+def test_search_urls_come_from_the_result_blocks_and_an_error_object_adds_none() -> None:
+    answer = Answer(verdict="start", score=0.9)
+    result = {"type": "web_search_result", "url": "https://a.test/1", "title": "t", "encrypted_content": "e"}
+    ok = {
+        "type": "web_search_tool_result",
+        "tool_use_id": "s1",
+        "content": [result, {**result, "url": "https://a.test/2"}],
+    }
+    failed = {
+        "type": "web_search_tool_result",
+        "tool_use_id": "s2",
+        "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+    }
+    text = {"type": "text", "text": answer.model_dump_json()}
+    reply = reply_from_message(search_message([PAUSED_BLOCK, ok, failed, text]), Answer)
+    assert reply.output == answer and reply.search_urls == ("https://a.test/1", "https://a.test/2")
+    assert reply.resume_content == ()  # kept only for a pause_turn
+    assert reply_from_message(search_message([failed, text]), Answer).search_urls == ()
+    assert reply_from_message(sdk_message("end_turn", answer.model_dump_json()), Answer).search_urls == ()
+
+
+def test_a_paused_reply_keeps_its_content_as_request_blocks() -> None:
+    message = search_message([{"type": "text", "text": "Searching."}, PAUSED_BLOCK], "pause_turn")
+    reply = reply_from_message(message, Answer)
+    assert reply.stop_reason == "pause_turn" and reply.output is None
+    assert reply.resume_content == ({"type": "text", "text": "Searching."}, PAUSED_BLOCK)
+
+
+def paused(content: tuple[dict[str, Any], ...] = (PAUSED_BLOCK,), urls: tuple[str, ...] = ()) -> RawReply:
+    return RawReply("msg_p", DEFAULT_MODEL, "pause_turn", TokenUsage(1000, 200, 0, 0), None, None, False, urls, content)
+
+
+def test_pause_turn_is_resumed_with_the_assistant_content_and_every_round_is_recorded(store: Store) -> None:
+    answer = Answer(verdict="start", score=0.9)
+    client, transport = make_client(store, paused(urls=("https://a.test/1",)), raw(output=answer))
+
+    reply = client.ask("close_call", prompt(tools=(SEARCH_TOOL,)), Answer, now=NOW)
+
+    assert reply.ok and reply.output == answer and reply.rounds == 2
+    first, second = (params for params, _ in transport.calls)
+    assert second["messages"] == [*first["messages"], {"role": "assistant", "content": [PAUSED_BLOCK]}]
+    assert second.get("tools") == first.get("tools") == [SEARCH_TOOL]
+    assert len(first["messages"]) == 1  # the first request was not touched
+    assert reply.search_urls == ("https://a.test/1",)
+    rows = store.llm_usage.since(NOW - timedelta(days=1))
+    assert [row.stop_reason for row in rows] == ["pause_turn", "end_turn"]
+    assert reply.usages == tuple(rows) and reply.usage == rows[-1]
+    assert reply.cost_usd == pytest.approx(0.016) and client.spent_today(NOW) == pytest.approx(0.016)
+    assert "last of 2 rounds" in reply.describe()
+
+
+def test_resumes_are_capped_and_each_round_still_counts(store: Store) -> None:
+    client, transport = make_client(store, paused(), paused(), paused(), paused())
+    reply = client.ask("close_call", prompt(tools=(SEARCH_TOOL,)), Answer, now=NOW)
+    assert reply.status == "stopped" and reply.output is None and reply.rounds == 3
+    assert reply.detail == "still paused (pause_turn) after 2 resumes; not used"
+    assert len(transport.calls) == 3 and len(store.llm_usage.since(NOW - timedelta(days=1))) == 3
+
+    single = AdvisorClient(store, Llm(), FakeTransport(paused(), paused()), max_resumes=0)
+    assert single.ask("close_call", prompt(), Answer, now=NOW).detail == (
+        "still paused (pause_turn) after 0 resumes; not used"
+    )
+    with pytest.raises(ValueError, match="max_resumes"):
+        AdvisorClient(store, Llm(), FakeTransport(), max_resumes=-1)
+
+
+def test_the_budget_is_checked_before_every_resume(store: Store) -> None:
+    client, transport = make_client(store, paused(), raw(output=Answer(verdict="x", score=0.0)), budget=0.005)
+    reply = client.ask("close_call", prompt(tools=(SEARCH_TOOL,)), Answer, now=NOW)  # round 1 costs $0.008
+    assert reply.status == "stopped" and reply.output is None and reply.rounds == 1
+    assert reply.detail is not None and "not resumed" in reply.detail and "daily Claude budget reached" in reply.detail
+    assert len(transport.calls) == 1
+
+
+def test_a_pause_with_nothing_to_resume_from_is_not_resumed(store: Store) -> None:
+    client, transport = make_client(store, paused(content=()), raw(output=Answer(verdict="x", score=0.0)))
+    reply = client.ask("close_call", prompt(), Answer, now=NOW)
+    assert reply.status == "stopped" and len(transport.calls) == 1
+
+
+def test_a_batch_request_carries_the_prompts_tools(store: Store) -> None:
+    client, transport = make_client(store)
+    client.submit_batch("close_call", {"a": prompt(tools=(SEARCH_TOOL,)), "b": prompt()}, Answer, now=NOW)
+    a, b = transport.batches["msgbatch_1"]
+    assert a.params.get("tools") == [SEARCH_TOOL] and "tools" not in b.params
