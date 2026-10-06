@@ -89,7 +89,9 @@ def _game_state(data: Any, game: str) -> None:
 def _write(data: Any, game: str) -> None:
     body = data["body"]
     assert data["method"] == "POST" and body["isLeagueManager"] is False
-    assert {"teamId", "type", "memberId", "scoringPeriodId", "executionType"} <= set(body)
+    assert {"teamId", "type", "scoringPeriodId", "executionType"} <= set(body)
+    # The player list's one-click Add sends no memberId; every other captured flow does.
+    assert body.get("memberId", "{00000000-0000-0000-0000-000000000001}").startswith("{00000000-")
 
 
 def _webclient(data: Any, game: None) -> None:
