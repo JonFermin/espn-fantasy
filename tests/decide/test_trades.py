@@ -173,8 +173,9 @@ def round_robin(teams: tuple[int, ...], periods: range) -> list[tuple[int, int, 
     return [(period, home, away) for n, period in enumerate(periods) for home, away in rounds[n % len(rounds)]]
 
 
-def schedule_view(settings: LeagueSettings, *, current: int = WEEK) -> MatchupsView:
-    """A regular season for the six teams, undecided from ``current`` on (earlier weeks: the higher id wins)."""
+def schedule_json(settings: LeagueSettings, *, current: int = WEEK) -> dict[str, Any]:
+    """A regular season for the six teams as an ``mMatchup`` view, undecided from ``current`` on (earlier weeks: the
+    higher id wins)."""
     entries = []
     for number, (period, home, away) in enumerate(
         round_robin(TEAMS, range(1, settings.schedule.regular_season_matchups + 1)), start=1
@@ -189,7 +190,11 @@ def schedule_view(settings: LeagueSettings, *, current: int = WEEK) -> MatchupsV
                 "away": {"teamId": away, "totalPoints": 100.0 + away if decided else 0.0},
             }
         )
-    return MatchupsView.model_validate({"schedule": entries, "status": {"currentMatchupPeriod": current}})
+    return {"schedule": entries, "status": {"currentMatchupPeriod": current}}
+
+
+def schedule_view(settings: LeagueSettings, *, current: int = WEEK) -> MatchupsView:
+    return MatchupsView.model_validate(schedule_json(settings, current=current))
 
 
 def seed_league(
@@ -749,17 +754,85 @@ def test_a_player_whose_game_has_started_is_locked_under_an_individual_game_lock
     assert not legality.legal and "T2 TE1 is locked: his game has started" in legality.problems
 
 
-def test_lock_cutoffs_come_from_the_pro_schedule_and_the_leagues_lock_type(store: Store) -> None:
-    schedule = ProSchedule.model_validate(load(FIXTURES / "sports" / "ffl_pro_schedule_2026.json"))
+def pro_schedule(kickoffs: Mapping[int, datetime]) -> ProSchedule:
+    """Week 4 for every pro team the league's players are on (``40 + team`` and ``60 + n``): each plays at its
+    ``kickoffs`` time, the others on Monday night."""
+    monday = datetime(2026, 10, 5, 23, 0, tzinfo=UTC)
+    teams = []
+    for team in [*range(41, 47), *range(60, 66)]:
+        when = kickoffs.get(team, monday)
+        game = {
+            "id": team,
+            "date": int(when.timestamp() * 1000),
+            "scoringPeriodId": WEEK,
+            "homeProTeamId": team,
+            "awayProTeamId": 99,
+        }
+        teams.append({"id": team, "proGamesByScoringPeriod": {str(WEEK): [game]}})
+    return ProSchedule.model_validate({"proTeams": teams})
+
+
+def test_a_players_roster_lock_comes_from_his_teams_kickoff_under_an_individual_game_lock(store: Store) -> None:
     league = seed_league(store)
-    started = datetime(2026, 10, 6, 6, 0, tzinfo=UTC)  # after Monday night
+    kickoff = datetime(2026, 10, 4, 17, 0, tzinfo=UTC)  # team 2's players (pro team 42) kick off at 1 p.m. ET
+    schedule = pro_schedule({42: kickoff})
+    spec = swap_a_running_back_for_a_tight_end()
+    early = load_trade_context(store, league, now=NOW, schedule=schedule, market=FakeMarket(), weights=EQUAL_WEIGHTS)
+    assert early.settings.roster_lock_type is LockType.INDIVIDUAL_GAME
+    assert check_legality(early, spec).legal  # 11 a.m.: nobody has started
+    late = replace(early, now=kickoff.replace(hour=18))
+    problems = check_legality(late, spec).problems
+    assert problems == ("T2 TE1 is locked: transactions closed at 2026-10-04 17:00Z",)  # only his game started
+    elsewhere = TradeSpec(4, (pid(US, "RB2"),), (pid(4, "TE1"),))  # team 4's players kick off on Monday night
+    assert check_legality(late, elsewhere).legal
+
+
+def test_a_first_game_lock_closes_every_trade_at_the_periods_first_kickoff(store: Store) -> None:
+    league = seed_league(store)
+    kickoff = datetime(2026, 10, 4, 17, 0, tzinfo=UTC)
+    schedule = pro_schedule({42: kickoff})
+    spec = swap_a_running_back_for_a_tight_end()
     ctx = load_trade_context(store, league, now=NOW, schedule=schedule, market=FakeMarket(), weights=EQUAL_WEIGHTS)
-    assert not any("locked" in why for why in check_legality(ctx, swap_a_running_back_for_a_tight_end()).problems)
-    late = replace(ctx, now=started)
-    problems = check_legality(late, swap_a_running_back_for_a_tight_end()).problems
-    assert any("transactions closed" in why for why in problems) or problems == ()  # only teams the schedule lists lock
+    first_game = replace(
+        ctx, settings=ctx.settings.model_copy(update={"roster_lock_type": LockType.FIRSTGAME_SCORINGPERIOD})
+    )
+    assert check_legality(first_game, spec).legal
+    after = replace(first_game, now=kickoff.replace(hour=18))
+    problems = check_legality(after, spec).problems
+    assert len(problems) == 2 and all(
+        "transactions closed at 2026-10-04 17:00Z" in why for why in problems
+    )  # both players
+
+
+def test_a_lock_type_the_plugins_will_not_read_is_not_guessed(store: Store) -> None:
+    league = seed_league(store)
+    kickoff = datetime(2026, 10, 4, 17, 0, tzinfo=UTC)
+    ctx = load_trade_context(
+        store,
+        league,
+        now=kickoff.replace(hour=18),
+        schedule=pro_schedule({42: kickoff}),
+        market=FakeMarket(),
+        weights=EQUAL_WEIGHTS,
+    )
     unknown = replace(ctx, settings=ctx.settings.model_copy(update={"roster_lock_type": LockType.UNKNOWN}))
-    assert check_legality(unknown, swap_a_running_back_for_a_tight_end()).legal
+    assert check_legality(
+        unknown, swap_a_running_back_for_a_tight_end()
+    ).legal  # the executor re-checks the live league
+    assert any("lock type" in warning for warning in _lock_warnings(store, league, kickoff))
+
+
+def _lock_warnings(store: Store, league: LeagueRow, kickoff: datetime) -> tuple[str, ...]:
+    settings = ppr().model_copy(
+        update={"roster_lock_type": LockType.UNKNOWN, "roster_lock_type_raw": "FIRSTGAME_WEEKLY"}
+    )
+    store.settings.upsert(
+        LeagueSettingsRow(league_id=league.row_id, settings=settings.model_dump(mode="json"), as_of=NOW)
+    )
+    again = load_trade_context(
+        store, league, now=NOW, schedule=pro_schedule({42: kickoff}), market=FakeMarket(), weights=EQUAL_WEIGHTS
+    )
+    return again.warnings
 
 
 def test_a_player_in_the_ir_slot_lands_in_ir_when_there_is_room(store: Store) -> None:
@@ -930,7 +1003,7 @@ def test_one_open_offer_per_team_and_a_repeat_is_the_same_proposal(store: Store)
     assert again[0].proposal is not None and not again[0].existing
     repeat = propose_trades(store, config_for(), ctx, [first, second])
     assert repeat[0].existing and repeat[0].proposal == again[0].proposal
-    assert repeat[1].proposal is None and "already has an open offer" in (repeat[1].blocked or "")
+    assert repeat[1].proposal is None and "one offer a team" in (repeat[1].blocked or "")
     assert len(store.proposals.open(ctx.league.row_id)) == 1
 
 
@@ -1384,3 +1457,225 @@ def test_a_player_the_engine_has_ruled_out_is_flagged_and_never_asked_for(store:
     assert any("is ruled out now" in warning for warning in found.warnings)
     search = find_trades(ctx, opponents=[4], options=SearchOptions(runs=RUNS, min_gain=0.0, limit=50, finalists=50))
     assert all(nba_id(4, 0) not in found.spec.get for found in search.results)
+
+
+# --- roster size, the weekly cap and the command line -----------------------------------------------------------------
+
+
+def test_a_roster_already_past_the_limit_is_not_the_trades_doing(store: Store) -> None:
+    fillers = tuple((2, f"Filler {n}", "WR", BENCH, 7700 + n, 1.0) for n in range(3))
+    ctx = context(store, extra=fillers)  # team 2 holds 17 of 16 (a league whose bench is unlimited can do that)
+    even = check_legality(ctx, TradeSpec(2, (pid(US, "RB4"),), (pid(2, "TE2"),)))
+    assert even.legal and even.drops_theirs == ()
+    more = check_legality(ctx, TradeSpec(2, (pid(US, "RB4"), pid(US, "WR4")), (pid(2, "TE2"),)))
+    assert more.legal and len(more.drops_theirs) == 1  # one more than they held
+
+
+def test_the_weekly_cap_counts_offers_already_made(store: Store) -> None:
+    ctx = context(store)
+    config = config_for()
+    for team in (4, 5):
+        spec = TradeSpec(team, (pid(US, "TE2"),), (pid(team, "TE2"),))
+        propose_trades(store, config, ctx, [evaluate_trade(ctx, spec, runs=RUNS)])
+    open_before = len(store.proposals.open(ctx.league.row_id))
+    wanted = evaluate_trade(ctx, swap_a_running_back_for_a_tight_end(), runs=RUNS)
+    capped = propose_trades(store, config, ctx, [wanted], weekly_cap=open_before)
+    assert capped[0].proposal is None and "weekly cap of 2 offers" in (capped[0].blocked or "")
+    allowed = propose_trades(store, config, ctx, [wanted], weekly_cap=open_before + 1)
+    assert allowed[0].proposal is not None
+    later = replace(ctx, now=NOW.replace(day=20))  # sixteen days on, those offers no longer count toward the week
+    fresh = evaluate_trade(later, TradeSpec(6, (pid(US, "TE2"),), (pid(6, "TE2"),)), runs=RUNS)
+    assert propose_trades(store, config, later, [fresh], weekly_cap=1, now=later.now)[0].proposal is not None
+
+
+def write_config(*, untouchables: Iterable[str] = ()) -> None:
+    """The league's ``config.toml`` in the test's private config dir, where the commands read it."""
+    from fm import paths
+
+    names = ", ".join(json.dumps(name) for name in untouchables)
+    paths.config_dir().mkdir(parents=True, exist_ok=True)
+    (paths.config_dir() / "config.toml").write_text(
+        "\n".join(
+            [
+                "[[league]]",
+                'key = "nfl"',
+                'sport = "nfl"',
+                f"espn_league_id = {LEAGUE_ID}",
+                f"season = {SEASON}",
+                f"team_id = {US}",
+                "[league.policy]",
+                f"untouchables = [{names}]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def matchups_file(tmp_path: Path) -> Iterator[Path]:
+    """A config dir with ``config.toml`` and a synced six-team league in the state database, and the recorded
+    ``mMatchup`` view (``--matchups``) beside it."""
+    from fm import paths
+
+    write_config()
+    with Store.open() as opened:
+        seed_league(opened)
+    matchups = tmp_path / "matchups.json"
+    matchups.write_text(json.dumps(schedule_json(ppr())), encoding="utf-8")
+    yield matchups
+    assert paths.config_dir().exists()
+
+
+class _FakeSource:
+    def __init__(self, market: FakeMarket) -> None:
+        self.market = market
+
+    def __enter__(self) -> FakeMarket:
+        return self.market
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def fm(*args: str, expect: int = 0) -> str:
+    from fm.cli import app
+
+    result = runner.invoke(app, list(args))
+    assert result.exit_code == expect, result.output
+    return result.output
+
+
+AS_OF = "2026-10-04T15:00Z"
+
+
+def test_the_trade_commands_are_discovered_and_have_help() -> None:
+    assert "trade" in fm("--help")
+    assert "eval" in fm("trade", "--help") and "find" in fm("trade", "--help")
+    assert "give A, B get C" in fm("trade", "eval", "--help")
+    assert "--propose" in fm("trade", "find", "--help")
+
+
+def test_fm_trade_eval_judges_a_deal_named_by_players(matchups_file: Path) -> None:
+    out = fm(
+        "trade", "eval", "give T3 RB2 get T2 TE1", "--no-market", "--matchups", str(matchups_file), "--as-of", AS_OF,
+        "--runs", "2000",
+    )  # fmt: skip
+    assert out.startswith("nfl: trade with Team 2 (as of 2026-10-04 15:00Z)")
+    assert "give: T3 RB2 (RB)" in out and "get:  T2 TE1 (TE)" in out
+    assert "ACCEPT: it improves our title odds" in out and "legal: yes" in out
+    assert "Team 3" in out and "Team 2" in out and "title" in out
+    assert "simulated 2000 seasons (seed 38)" in out and "P(accept)" in out
+    assert "warning: no market source: P(accept) uses our own rest-of-season ranks" in out
+
+
+def test_fm_trade_eval_without_matchups_says_the_numbers_are_values(matchups_file: Path) -> None:
+    out = fm("trade", "eval", "give T3 RB2 get T2 TE1", "--no-market", "--as-of", AS_OF)
+    assert "no season simulation: judged on rest-of-season value (points)" in out
+    assert "warning: no mMatchup schedule" in out or "no mMatchup schedule is captured" in out
+
+
+def test_fm_trade_eval_reports_what_it_cannot_read_or_do(matchups_file: Path) -> None:
+    assert "no player named 'Nobody' on our roster" in fm(
+        "trade", "eval", "give Nobody get T2 TE1", "--no-market", "--as-of", AS_OF, expect=1
+    )
+    assert "write it as: give A, B get C" in fm("trade", "eval", "hello", "--no-market", "--as-of", AS_OF, expect=1)
+    late = fm("trade", "eval", "give T3 RB2 get T2 TE1", "--no-market", "--as-of", "2027-01-01T00:00Z")
+    assert "DECLINE: not legal: the league's trade deadline" in late and "legal: NO" in late
+    assert "no league 'nope' in config.toml" in fm(
+        "trade", "eval", "give T3 RB2 get T2 TE1", "-l", "nope", "--no-market", expect=1
+    )
+
+
+def test_fm_trade_eval_asks_the_market_with_the_leagues_rank_type(
+    matchups_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fm.commands import trade as trade_command
+
+    market = FakeMarket()
+    monkeypatch.setattr(trade_command, "market_source", lambda: _FakeSource(market))
+    out = fm(
+        "trade", "eval", "give T3 RB2 get T2 TE1", "--matchups", str(matchups_file), "--as-of", AS_OF, "--runs", "500"
+    )
+    assert [rank_type for _, rank_type in market.calls] == ["PPR"]
+    assert "market 6,000 to them for 5,600 from them" in out
+    assert "no market source" not in out
+
+
+def test_fm_trade_find_ranks_deals_and_can_be_pointed_at_one_team(matchups_file: Path) -> None:
+    out = fm(
+        "trade",
+        "find",
+        "--no-market",
+        "--matchups",
+        str(matchups_file),
+        "--as-of",
+        AS_OF,
+        "--top",
+        "4",
+        "--runs",
+        "1500",
+    )
+    lines = out.splitlines()
+    assert lines[0].startswith("nfl: trades for Team 3 (as of 2026-10-04 15:00Z); ") and "re-scored" in lines[0]
+    table = [line for line in lines if line.strip().startswith(tuple("1234"))]
+    assert len(table) == 4 and "score: our change in title odds" in out
+    assert "P(accept)" in out and "with" in lines[1]
+    only = fm(
+        "trade",
+        "find",
+        "--no-market",
+        "--matchups",
+        str(matchups_file),
+        "--as-of",
+        AS_OF,
+        "--with",
+        "2",
+        "--runs",
+        "1500",
+    )
+    rows = [line for line in only.splitlines() if line.strip()[:1].isdigit()]
+    assert rows and all("Team 2" in row for row in rows)
+    assert fm("trade", "find", "--no-market", "--with", "99", "--as-of", AS_OF, expect=1).startswith("error:")
+
+
+def test_fm_trade_find_propose_stores_approve_only_offers_and_dry_run_stores_nothing(matchups_file: Path) -> None:
+    args = ("trade", "find", "--no-market", "--matchups", str(matchups_file), "--as-of", AS_OF, "--runs", "1500")
+    dry = fm(*args, "--propose", "--dry-run", "--max-offers", "2")
+    assert dry.count("would be proposed") == 2 and "--dry-run stored nothing" in dry
+    with Store.open() as opened:
+        assert opened.proposals.find() == []
+    stored = fm(*args, "--propose", "--max-offers", "2")
+    assert stored.count("proposed as #") == 2 and "fm proposals approve" in stored
+    with Store.open() as opened:
+        rows = opened.proposals.find()
+    assert [(row.kind, row.status, row.policy, row.created_by) for row in rows] == [
+        ("trade_propose", "proposed", "approve", TRADES_CREATED_BY)
+    ] * 2
+    again = fm(*args, "--propose", "--max-offers", "2")
+    assert "already open as #" in again or "already has an open offer from us" in again
+    assert "applies to --propose" in fm(*args, "--dry-run", expect=1)
+
+
+def test_fm_trade_find_respects_the_configured_untouchables(matchups_file: Path) -> None:
+    write_config(untouchables=["T3 RB1", "T3 RB2", "T3 RB3", "T3 QB2"])
+    out = fm(
+        "trade",
+        "find",
+        "--no-market",
+        "--matchups",
+        str(matchups_file),
+        "--as-of",
+        AS_OF,
+        "--runs",
+        "1500",
+        "--top",
+        "20",
+    )
+    assert "T3 RB1" not in out and "T3 RB2" not in out and "T3 RB3" not in out and "T3 QB2" not in out
+
+
+def test_fm_trade_says_when_the_league_is_not_synced(tmp_path: Path) -> None:
+    write_config()
+    assert "nfl: not synced; run fm sync" in fm("trade", "find", "--no-market", "--as-of", AS_OF)
+    assert "not synced; run fm sync" in fm("trade", "eval", "give a get b", "--no-market", "--as-of", AS_OF, expect=1)

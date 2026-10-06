@@ -418,8 +418,8 @@ def search_lines(
             "with",
             "give",
             "get",
-            f"our {unit}",
-            "their",
+            "ours",
+            "theirs",
             "title" if simulated else "",
             "P(accept)",
             "score",
@@ -442,6 +442,7 @@ def search_lines(
             )
         lines.extend(columns(rows, align=("<", "<", "<", "<", ">", ">", ">", ">", ">")))
         basis = "title odds (points of probability) times P(accept)" if simulated else "starter seasons times P(accept)"
+        lines.append(f"{INDENT}ours, theirs: change in lineup {unit}; title: our change in title odds, in points")
         lines.append(f"{INDENT}score: our change in {basis}")
     for outcome in proposed:
         lines.append(f"{INDENT}{_proposed_line(ctx, outcome)}")

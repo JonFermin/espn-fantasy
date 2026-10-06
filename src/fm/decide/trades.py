@@ -65,7 +65,8 @@ import re
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import cached_property
 from types import MappingProxyType
 from typing import Any, Final, Protocol
 
@@ -139,6 +140,8 @@ EDGE_TITLE: Final = 0.002
 """The change in title odds below which a deal is a wash."""
 EDGE_ROS: Final = 0.02
 """The same in starter seasons when the simulation is unavailable."""
+WEEKLY_OFFERS: Final = 3
+"""Offers :func:`propose_trades` lets the league hold in any seven days (DESIGN 9.4: a weekly cap)."""
 COUNTER_ACCEPT: Final = 0.6
 """P(accept) from which a deal that does not help us is worth countering: the other manager likes it enough to give
 something back."""
@@ -381,10 +384,11 @@ def build_market_book(
     warnings: Iterable[str] = (),
     as_of: datetime | None = None,
 ) -> MarketBook:
-    """Market values for every player in ``values`` (our model's rest-of-season value by ESPN id). A player's market
-    value is FantasyCalc's trade value when it has one, else his ESPN rank under ``rank_type`` (draft rank, then
-    the season's total ranking), else his rank by our own value: all on :func:`rank_value`'s scale, so a package can mix
-    them. ``starters`` are the ESPN ids that set :attr:`MarketBook.scale`."""
+    """Market values for every player in ``values`` (what the fallback ranks by: our rest-of-season value over
+    replacement, by ESPN id). A player's market value is FantasyCalc's trade value when it has one, else his ESPN rank
+    under ``rank_type`` (draft rank, then the season's total ranking), else his rank by ``values``: all on
+    :func:`rank_value`'s scale, so a package can mix them. ``starters`` are the ESPN ids that set
+    :attr:`MarketBook.scale`."""
     found = market or {}
     ordered = sorted(values, key=lambda espn_id: (-values[espn_id], espn_id))
     ours = {espn_id: position for position, espn_id in enumerate(ordered, start=1)}
@@ -705,7 +709,7 @@ class TradeContext:
     def owner(self, espn_id: int) -> int | None:
         return next((team for team, roster in self.rosters.items() if espn_id in roster), None)
 
-    @property
+    @cached_property
     def scale(self) -> float:
         """One starter's rest-of-season value: the mean value of the best ``teams x active slots`` rostered players."""
         rostered = {espn_id for roster in self.rosters.values() for espn_id in roster}
@@ -922,7 +926,13 @@ def _market_book(
         elif fetched.stale:
             notes.append("market values are stale (the refresh failed)")
     warnings.extend(notes)
-    valued = {espn_id: value for espn_id, value in model.values.items() if espn_id in players}
+    # Where the market has no number the fallback is our own rank by value over replacement, not by raw value: a manager
+    # prices scarcity, so a backup who would never start is not worth a starter however many points he is projected.
+    valued = {
+        espn_id: value - min((model.replacement.get(slot, 0.0) for slot in model.eligible[espn_id]), default=0.0)
+        for espn_id, value in model.values.items()
+        if espn_id in players
+    }
     scale_ids = sorted(
         (espn_id for espn_id in rostered if espn_id in valued), key=lambda espn_id: (-valued[espn_id], espn_id)
     )[: max(1, len(rosters) * settings.active_slot_count)]
@@ -1271,30 +1281,23 @@ def check_legality(ctx: TradeContext, spec: TradeSpec) -> TradeLegality:
         problems.append(f"{ctx.name(espn_id)} is locked: {why}")
     after_ours = _after(ctx, ctx.team_id, spec.give, spec.get)
     after_theirs = _after(ctx, other, spec.get, spec.give)
-    drops_ours = drops_theirs = ()
+    drops: dict[int, tuple[int, ...]] = {}
     limit = ctx.settings.roster_size
-    for who, team, after, out_ids in (
-        ("we", ctx.team_id, after_ours, spec.give),
-        ("they", other, after_theirs, spec.get),
-    ):
-        over = after.held - limit
+    for team, after in ((ctx.team_id, after_ours), (other, after_theirs)):
+        held = len(ctx.rosters[team] - ctx.ir.get(team, frozenset()))
+        over = after.held - max(limit, held)  # a roster already past the limit is not the trade's doing
         if over <= 0:
             continue
-        keep = {*spec.give, *spec.get}
-        chosen = _droppable(ctx, team, after, keep, over)
-        name = "we" if who == "we" else ctx.team_name(other)
+        name = "we" if team == ctx.team_id else ctx.team_name(team)
+        chosen = _droppable(ctx, team, after, {*spec.give, *spec.get}, over)
         if len(chosen) < over:
             problems.append(
                 f"{name} would hold {after.held} players outside IR and the league allows {limit}, "
                 "and nobody could be dropped to make room"
             )
             continue
+        drops[team] = chosen
         notes.append(f"{name} must drop {_names(ctx, chosen)} to make room ({after.held} of {limit} roster spots)")
-        if who == "we":
-            drops_ours = chosen
-        else:
-            drops_theirs = chosen
-        del out_ids
     problems.extend(_position_problems(ctx, "we", ours - ctx.ir.get(ctx.team_id, frozenset()), after_ours))
     problems.extend(
         _position_problems(ctx, ctx.team_name(other), theirs - ctx.ir.get(other, frozenset()), after_theirs)
@@ -1302,7 +1305,7 @@ def check_legality(ctx: TradeContext, spec: TradeSpec) -> TradeLegality:
     for espn_id in (*spec.give, *spec.get):
         if espn_id in {held for team in ctx.ir.values() for held in team}:
             notes.append(f"{ctx.name(espn_id)} is in an IR slot")
-    return TradeLegality(tuple(problems), tuple(notes), drops_ours, drops_theirs)
+    return TradeLegality(tuple(problems), tuple(notes), drops.get(ctx.team_id, ()), drops.get(other, ()))
 
 
 def _names(ctx: TradeContext, ids: Iterable[int]) -> str:
@@ -1468,7 +1471,7 @@ def evaluate_trade(
         drops=len(legality.drops_theirs),
         params=ctx.acceptance,
     )
-    warnings = _evaluation_warnings(ctx, spec, base is not None or not simulate)
+    warnings = _evaluation_warnings(ctx, spec, failed=simulate and base is None and ctx.matchups is not None)
     title = mine.delta_title
     basis = BASIS_TITLE if title is not None else BASIS_ROS
     gain = title if title is not None else mine.delta_ros / scale
@@ -1493,7 +1496,7 @@ def evaluate_trade(
     )
 
 
-def _evaluation_warnings(ctx: TradeContext, spec: TradeSpec, simulated_or_skipped: bool) -> tuple[str, ...]:
+def _evaluation_warnings(ctx: TradeContext, spec: TradeSpec, *, failed: bool) -> tuple[str, ...]:
     warnings: list[str] = []
     for espn_id in (*spec.give, *spec.get):
         name = ctx.name(espn_id)
@@ -1503,7 +1506,7 @@ def _evaluation_warnings(ctx: TradeContext, spec: TradeSpec, simulated_or_skippe
             warnings.append(
                 f"{name} is ruled out now (engine p_active {ctx.p_active[espn_id]:.0%}); his games count in full"
             )
-    if not simulated_or_skipped:
+    if failed:  # a simulation was asked for and the season could not be simulated: say why
         warnings.extend(ctx.cache.notes)
     return tuple(dict.fromkeys(warnings))
 
@@ -1682,7 +1685,7 @@ def find_trades(
     results: list[TradeEvaluation] = []
     for item in legal:
         evaluation = evaluate_trade(ctx, item.spec, runs=options.runs, seed=options.seed)
-        if evaluation.score is None or evaluation.gain <= (0.0 if evaluation.simulated else 0.0):
+        if evaluation.score is None or evaluation.gain <= 0.0:
             continue
         if evaluation.acceptance.p_accept < options.min_accept:
             continue
@@ -1770,16 +1773,18 @@ def propose_trades(
     evaluations: Iterable[TradeEvaluation],
     *,
     max_offers: int = 3,
+    weekly_cap: int = WEEKLY_OFFERS,
     dry_run: bool = False,
     now: datetime | None = None,
 ) -> list[ProposedTrade]:
     """Draft ``trade_propose`` proposals for the best of ``evaluations`` through :func:`fm.proposals.propose`.
 
     Trades are approval-only whatever the config says, and nothing here executes one. Etiquette (DESIGN 9.4): at most
-    one open offer per team (a team with an open ``trade_propose`` proposal is skipped, as is a deal that
-    duplicates one) and at most ``max_offers`` new offers per call. A deal that is not legal, needs a drop on our side
-    (a payload cannot carry one) or has no positive score is skipped. A policy refusal is reported in ``blocked``, never
-    raised; with ``dry_run`` policy is evaluated and nothing is stored.
+    one open offer per team (a team with an open ``trade_propose`` proposal is skipped, as is a deal that duplicates
+    one), at most ``max_offers`` new offers per call and ``weekly_cap`` in any seven days (offers the league's
+    proposals already hold count, whatever their status, unless rejected or expired). A deal that is not legal, needs a
+    drop on our side (a payload cannot carry one) or has no positive score is skipped. A policy refusal is reported in
+    ``blocked``, never raised; with ``dry_run`` policy is evaluated and nothing is stored.
     """
     at = now if now is not None else ctx.now
     open_teams: set[int] = set()
@@ -1792,16 +1797,23 @@ def propose_trades(
             open_teams.add(other)
         if row.dedupe_key:
             open_keys[row.dedupe_key] = row
+    recent = [
+        row
+        for row in store.proposals.find(league_id=ctx.league.row_id, kinds=[ProposalKind.TRADE_PROPOSE.value])
+        if row.status not in ("rejected", "expired") and at - row.created_at < timedelta(days=7)
+    ]
+    room = min(max_offers, max(0, weekly_cap - len(recent)))
     outcomes: list[ProposedTrade] = []
     fresh = 0
     for evaluation in evaluations:
         spec = evaluation.spec
-        if evaluation.score is None or evaluation.score <= 0 or evaluation.legality.drops_ours:
-            reason = (
-                "needs a drop on our side, which a trade payload cannot carry"
-                if evaluation.legality.drops_ours
-                else ("not legal or no gain")
-            )
+        if not evaluation.legal or evaluation.score is None or evaluation.score <= 0 or evaluation.legality.drops_ours:
+            if not evaluation.legal:
+                reason = "not legal: " + "; ".join(evaluation.legality.problems)
+            elif evaluation.legality.drops_ours:
+                reason = "needs a drop on our side, which a trade payload cannot carry"
+            else:
+                reason = "it does not help us"
             outcomes.append(ProposedTrade(evaluation, blocked=reason, dry=dry_run))
             continue
         key = f"{ctx.league.key}:{spec.key}"
@@ -1812,13 +1824,14 @@ def propose_trades(
             outcomes.append(
                 ProposedTrade(
                     evaluation,
-                    blocked=f"{ctx.team_name(spec.other_team_id)} already has an open offer from us",
+                    blocked=f"one offer a team: {ctx.team_name(spec.other_team_id)} already has one from us",
                     dry=dry_run,
                 )
             )
             continue
-        if fresh >= max_offers:
-            outcomes.append(ProposedTrade(evaluation, blocked=f"already proposed {max_offers} offers", dry=dry_run))
+        if fresh >= room:
+            cap = f"the weekly cap of {weekly_cap} offers" if room < max_offers else f"{max_offers} offers a call"
+            outcomes.append(ProposedTrade(evaluation, blocked=f"already at {cap}", dry=dry_run))
             continue
         payload = spec.payload()
         if dry_run:
