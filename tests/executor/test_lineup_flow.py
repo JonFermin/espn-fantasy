@@ -355,7 +355,8 @@ def test_team_page_address_and_slot_labels() -> None:
 def test_every_roster_selector_resolves_as_its_presence_says(nba: League) -> None:
     """A canary over the fake team page: what the flow clicks and what the registry promises agree."""
     registered = selectors.selectors_for(selectors.WebPage.ROSTER)
-    assert registered == selectors.registered_selectors() and len({s.key for s in registered}) == len(registered)
+    everything = selectors.registered_selectors()  # the player list and roster-fix pages (#27) register here too
+    assert all(entry in everything for entry in registered) and len({s.key for s in everything}) == len(everything)
     assert selectors.selector("roster.here").after == "roster.move"
     with pytest.raises(KeyError, match="no selector 'roster.nope'"):
         selectors.selector("roster.nope")
