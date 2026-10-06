@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>RotoWire.com Latest NBA News</title>
+    <copyright>Copyright (c) 2026 Roto Sports, Inc, All rights reserved.</copyright>
+    <description>Fantasy Sports from RotoWire.com</description>
+    <category>Fantasy Sports</category>
+    <language>en-us</language>
+    <ttl>10</ttl>
+    <image>
+      <title>RotoWire.com Fantasy Sports</title>
+      <width>120</width>
+      <height>30</height>
+      <link>https://www.rotowire.com</link>
+      <url>https://assets.rotowire.com/images/logo_roto_small.gif</url>
+    </image>
+    <link>https://www.rotowire.com</link>
+    <item>
+        <guid>nba533240</guid>
+        <title>Zach Edey: Not starting Monday</title>
+        <link>https://www.rotowire.com//basketball/player/zach-edey-6263</link>
+        <description>Edey is not in the starting lineup for Monday's preseason game against the Hawks, Damichael Cole of The Memphis Commercial Appeal reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:43:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nba533238</guid>
+        <title>Kingston Flemings: Gets starting nod in preseason opener</title>
+        <link>https://www.rotowire.com//basketball/player/kingston-flemings-6927</link>
+        <description>Flemings will start Monday's preseason game against the Grizzlies, Kevin Chouinard of the Hawks' official site reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:38:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nba533234</guid>
+        <title>Max Strus: Will be re-evaluated in four weeks</title>
+        <link>https://www.rotowire.com//basketball/player/max-strus-4947</link>
+        <description>Strus has been diagnosed with a partially torn plantar fascia in his right foot and he will be re-evaluated in four weeks, Ohm Youngmisuk of ESPN.com reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:21:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nba533228</guid>
+        <title>Oso Ighodaro: Starting Monday</title>
+        <link>https://www.rotowire.com//basketball/player/oso-ighodaro-6293</link>
+        <description>Ighodaro will be in the starting lineup for Monday's preseason opener against the Pistons, Duane Rankin of The Arizona Republic reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 2:47:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nba533224</guid>
+        <title>Jalen Duren: Won't play Monday</title>
+        <link>https://www.rotowire.com//basketball/player/jalen-duren-5703</link>
+        <description>Duren (rest) won't play in Monday's preseason game against the Suns, Hunter Patterson of The Athletic reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 2:30:00 PM PDT</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,362 @@
+{
+ "header": "NFL News",
+ "link": {
+  "href": "https://www.espn.com/nfl/",
+  "text": "All NFL News"
+ },
+ "articles": [
+  {
+   "id": 50112664,
+   "nowId": "1-50112664",
+   "type": "HeadlineNews",
+   "headline": "Cowboys' Tyler Smith hoping to be ready to face Bucs",
+   "description": "Cowboys Pro Bowl guard Tyler Smith hopes to make his season debut Thursday against the Buccaneers after having surgery last month on his left thumb.",
+   "lastModified": "2026-10-05T22:34:13Z",
+   "published": "2026-10-05T22:34:13Z",
+   "categories": [
+    {
+     "id": 9572,
+     "type": "league",
+     "uid": "s:20~l:28",
+     "description": "NFL",
+     "sportId": 28,
+     "leagueId": 28
+    },
+    {
+     "id": 1298,
+     "type": "team",
+     "uid": "s:20~l:28~t:6",
+     "description": "Dallas Cowboys",
+     "sportId": 28,
+     "teamId": 6,
+     "team": {
+      "id": 6,
+      "description": "Dallas Cowboys",
+      "abbreviation": "DAL"
+     }
+    },
+    {
+     "id": 409224,
+     "type": "topic",
+     "description": "news",
+     "sportId": 0,
+     "topicId": 781
+    },
+    {
+     "id": 529379,
+     "type": "athlete",
+     "uid": "s:20~l:28~a:4568652",
+     "description": "Tyler Smith",
+     "sportId": 28,
+     "athleteId": 4568652,
+     "athlete": {
+      "id": 4568652,
+      "description": "Tyler Smith"
+     }
+    },
+    {
+     "id": 696310,
+     "type": "contributor",
+     "description": "Todd Archer",
+     "contributor": {
+      "id": 1915,
+      "description": "Todd Archer"
+     }
+    }
+   ],
+   "byline": "Todd Archer",
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/50112664/cowboys-tyler-smith-hoping-ready-face-bucs"
+    }
+   },
+   "premium": false
+  },
+  {
+   "id": 50112533,
+   "nowId": "1-50112533",
+   "type": "HeadlineNews",
+   "headline": "Cardinals LT Paris Johnson out for season after tearing biceps",
+   "description": "Cardinals starting left tackle Paris Johnson Jr. is out for the season after tearing his left biceps in a 36-24 loss to the New York Giants on Sunday.",
+   "lastModified": "2026-10-05T22:28:06Z",
+   "published": "2026-10-05T22:28:06Z",
+   "categories": [
+    {
+     "id": 9572,
+     "type": "league",
+     "uid": "s:20~l:28",
+     "description": "NFL",
+     "sportId": 28,
+     "leagueId": 28
+    },
+    {
+     "id": 1583,
+     "type": "team",
+     "uid": "s:20~l:28~t:22",
+     "description": "Arizona Cardinals",
+     "sportId": 28,
+     "teamId": 22,
+     "team": {
+      "id": 22,
+      "description": "Arizona Cardinals",
+      "abbreviation": "ARI"
+     }
+    },
+    {
+     "id": 438551,
+     "type": "athlete",
+     "uid": "s:20~l:28~a:4428991",
+     "description": "Paris Johnson Jr",
+     "sportId": 28,
+     "athleteId": 4428991,
+     "athlete": {
+      "id": 4428991,
+      "description": "Paris Johnson Jr"
+     }
+    },
+    {
+     "id": 1352,
+     "type": "team",
+     "uid": "s:20~l:28~t:19",
+     "description": "New York Giants",
+     "sportId": 28,
+     "teamId": 19,
+     "team": {
+      "id": 19,
+      "description": "New York Giants",
+      "abbreviation": "NYG"
+     }
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/50112533/cardinals-lt-paris-johnson-season-tearing-biceps"
+    }
+   },
+   "premium": false
+  },
+  {
+   "id": 50112493,
+   "nowId": "1-50112493",
+   "type": "HeadlineNews",
+   "headline": "Seahawks signing RB Joe Mixon after workout, source says",
+   "description": "The Seahawks are signing running back Joe Mixon after he worked out for the team Monday, a source told NFL Network's Mike Garafolo.",
+   "lastModified": "2026-10-05T22:34:07Z",
+   "published": "2026-10-05T22:34:07Z",
+   "categories": [
+    {
+     "id": 409224,
+     "type": "topic",
+     "description": "news",
+     "sportId": 0,
+     "topicId": 781
+    },
+    {
+     "id": 9572,
+     "type": "league",
+     "uid": "s:20~l:28",
+     "description": "NFL",
+     "sportId": 28,
+     "leagueId": 28
+    },
+    {
+     "id": 1693,
+     "type": "team",
+     "uid": "s:20~l:28~t:26",
+     "description": "Seattle Seahawks",
+     "sportId": 28,
+     "teamId": 26,
+     "team": {
+      "id": 26,
+      "description": "Seattle Seahawks",
+      "abbreviation": "SEA"
+     }
+    },
+    {
+     "id": 166948,
+     "type": "athlete",
+     "uid": "s:20~l:28~a:3116385",
+     "description": "Joe Mixon",
+     "sportId": 28,
+     "athleteId": 3116385,
+     "athlete": {
+      "id": 3116385,
+      "description": "Joe Mixon"
+     }
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/50112493/seahawks-signing-rb-joe-mixon-workout-source-says"
+    }
+   },
+   "premium": false
+  },
+  {
+   "id": 50108832,
+   "nowId": "1-50108832",
+   "type": "Story",
+   "headline": "Fantasy football free agent pickups: Kirk Cousins, Keon Coleman lead top options",
+   "description": "Eric Karabell lists who he thinks are the top available players worth adding for the week ahead.",
+   "lastModified": "2026-10-05T22:00:33Z",
+   "published": "2026-10-05T22:00:33Z",
+   "categories": [
+    {
+     "id": 12024,
+     "type": "league",
+     "uid": "s:20~l:3080",
+     "description": "Fantasy NFL",
+     "sportId": 3080,
+     "leagueId": 3080
+    },
+    {
+     "id": 129297,
+     "type": "topic",
+     "description": "news - nfl",
+     "sportId": 0,
+     "topicId": 121
+    },
+    {
+     "id": 9572,
+     "type": "league",
+     "uid": "s:20~l:28",
+     "description": "NFL",
+     "sportId": 28,
+     "leagueId": 28
+    },
+    {
+     "id": 103992,
+     "type": "athlete",
+     "uid": "s:20~l:28~a:14880",
+     "description": "Kirk Cousins",
+     "sportId": 28,
+     "athleteId": 14880,
+     "athlete": {
+      "id": 14880,
+      "description": "Kirk Cousins"
+     }
+    },
+    {
+     "id": 502551,
+     "type": "athlete",
+     "uid": "s:20~l:28~a:4887558",
+     "description": "Emanuel Wilson",
+     "sportId": 28,
+     "athleteId": 4887558,
+     "athlete": {
+      "id": 4887558,
+      "description": "Emanuel Wilson"
+     }
+    },
+    {
+     "id": 492861,
+     "type": "athlete",
+     "uid": "s:20~l:28~a:4635008",
+     "description": "Keon Coleman",
+     "sportId": 28,
+     "athleteId": 4635008,
+     "athlete": {
+      "id": 4635008,
+      "description": "Keon Coleman"
+     }
+    },
+    {
+     "id": 529855,
+     "type": "athlete",
+     "uid": "s:20~l:28~a:4373626",
+     "description": "Tyler Allgeier",
+     "sportId": 28,
+     "athleteId": 4373626,
+     "athlete": {
+      "id": 4373626,
+      "description": "Tyler Allgeier"
+     }
+    },
+    {
+     "id": 696457,
+     "type": "contributor",
+     "description": "Eric Karabell",
+     "contributor": {
+      "id": 907,
+      "description": "Eric Karabell"
+     }
+    }
+   ],
+   "byline": "Eric Karabell",
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/fantasy/football/story/_/page/FFWaiverWirePickUp-50108832/fantasy-football-waiver-wire-free-agent-pickups-nfl-week-5"
+    }
+   },
+   "premium": false
+  },
+  {
+   "id": 50112291,
+   "nowId": "1-50112291",
+   "type": "HeadlineNews",
+   "headline": "McVay: Rams coaches will 'learn' from incident with Eagles fans",
+   "description": "Rams coach Sean McVay says his assistant coaches will learn from their viral interaction with Eagles fans during Sunday's win over Philadelphia.",
+   "lastModified": "2026-10-05T22:32:59Z",
+   "published": "2026-10-05T22:32:59Z",
+   "categories": [
+    {
+     "id": 409224,
+     "type": "topic",
+     "description": "news",
+     "sportId": 0,
+     "topicId": 781
+    },
+    {
+     "id": 9572,
+     "type": "league",
+     "uid": "s:20~l:28",
+     "description": "NFL",
+     "sportId": 28,
+     "leagueId": 28
+    },
+    {
+     "id": 1519,
+     "type": "team",
+     "uid": "s:20~l:28~t:14",
+     "description": "Los Angeles Rams",
+     "sportId": 28,
+     "teamId": 14,
+     "team": {
+      "id": 14,
+      "description": "Los Angeles Rams",
+      "abbreviation": "LAR"
+     }
+    },
+    {
+     "id": 1407,
+     "type": "team",
+     "uid": "s:20~l:28~t:21",
+     "description": "Philadelphia Eagles",
+     "sportId": 28,
+     "teamId": 21,
+     "team": {
+      "id": 21,
+      "description": "Philadelphia Eagles",
+      "abbreviation": "PHI"
+     }
+    },
+    {
+     "id": 696392,
+     "type": "contributor",
+     "description": "Sarah Barshop",
+     "contributor": {
+      "id": 2722,
+      "description": "Sarah Barshop"
+     }
+    }
+   ],
+   "byline": "Sarah Barshop",
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nfl/story/_/id/50112291/mcvay-rams-coaches-learn-incident-eagles-fans"
+    }
+   },
+   "premium": false
+  }
+ ]
+}

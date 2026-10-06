@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>RotoWire.com Latest NFL News</title>
+    <copyright>Copyright (c) 2026 Roto Sports, Inc, All rights reserved.</copyright>
+    <description>Fantasy Sports from RotoWire.com</description>
+    <category>Fantasy Sports</category>
+    <language>en-us</language>
+    <ttl>10</ttl>
+    <image>
+      <title>RotoWire.com Fantasy Sports</title>
+      <width>120</width>
+      <height>30</height>
+      <link>https://www.rotowire.com</link>
+      <url>https://assets.rotowire.com/images/logo_roto_small.gif</url>
+    </image>
+    <link>https://www.rotowire.com</link>
+    <item>
+        <guid>nfl640907</guid>
+        <title>Ladd McConkey: Termed 'week-to-week'</title>
+        <link>https://www.rotowire.com//football/player/ladd-mcconkey-17724</link>
+        <description>McConkey (foot), per head coach Jim Harbaugh, is "week-to-week," Alex Insdorf of BoltBeat.com reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:42:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nfl640906</guid>
+        <title>Rachaad White: In line to practice this week</title>
+        <link>https://www.rotowire.com//football/player/rachaad-white-15802</link>
+        <description>Coach Dan Quinn said Monday that White (shoulder) "should" practice this week, Tashan Reed of The Washington Post reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:41:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nfl640905</guid>
+        <title>Terry McLaurin: Wednesday activity TBD</title>
+        <link>https://www.rotowire.com//football/player/terry-mclaurin-13536</link>
+        <description>Coach Dan Quinn said Monday that the Commanders continue to assess what McLaurin (hamstring) may be able to do at Wednesday's practice, John Keim of ESPN.com reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:37:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nfl640904</guid>
+        <title>Jayden Daniels: Return to action imminent?</title>
+        <link>https://www.rotowire.com//football/player/jayden-daniels-17692</link>
+        <description>Coach Dan Quinn said Monday that the Commanders are aiming for Daniels (left elbow) to have a full practice week and then start Sunday's game against the Giants, Zach Selby of the Commanders' official site reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:30:00 PM PDT</pubDate>
+    </item>
+    <item>
+        <guid>nfl640903</guid>
+        <title>Marcus Mariota: MCL sprain confirmed</title>
+        <link>https://www.rotowire.com//football/player/marcus-mariota-10074</link>
+        <description>Coach Dan Quinn confirmed Monday that Mariota has been diagnosed with a sprained MCL in his right knee, and the quarterback's recovery timeline is to be determined, Ben Standig of The Team 980 Washington D.C. reports.
+
+        Visit RotoWire.com for more analysis on this update.</description>
+        <pubDate>Mon, 05 Oct 2026 3:24:00 PM PDT</pubDate>
+    </item>
+  </channel>
+</rss>

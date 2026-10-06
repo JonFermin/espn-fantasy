@@ -56,3 +56,28 @@ fixtures carry none because the parser never reads them.
 Stadium coordinates for the weather lookups live in the repo's `data/stadiums.csv` (hand-entered from public stadium
 locations, accurate well inside the 0.01-degree cell Open-Meteo is queried at; the `greerreNFL/stadiums` CSV named in
 DESIGN section 7 was not reachable when the file was built).
+
+## `news/` (`fm.sources.news`, ROADMAP #23)
+
+ESPN's NFL and NBA news feeds and RotoWire's NFL and NBA RSS feeds, read offline by `tests/sources/test_news.py`
+and `tests/model/test_relevance.py` (`fm.model.relevance`). Captured 2026-10-05 around 22:45 UTC (NFL week 5, NBA
+preseason) with a browser user agent; no cookies, tokens or keys were sent or kept, and no league, team or manager
+data appears. Player and team names are public figures; the text is the sources' own headlines and blurbs.
+
+| File | Request | Trimming |
+|---|---|---|
+| `espn_news_nfl.json` | `GET https://site.api.espn.com/apis/site/v2/sports/football/nfl/news?limit=6` | 5 of 6 articles (Rashawn Slater's dropped): Tyler Smith, Paris Johnson Jr (tagged without the period), Joe Mixon, the free-agent pickups story and McVay's team-only story. The pickups story keeps 4 of its 19 athlete tags (Kirk Cousins, Emanuel Wilson, Keon Coleman, Tyler Allgeier; Allgeier is on team 1's roster in `tests/fixtures/espn/ffl_rosters_week4.json`). `images`, `contentKey`, `dataSourceIdentifier`, the category `guid`s, nested link blocks and all but the first `topic` category per article were removed; `links` keeps `web.href` |
+| `espn_news_nba.json` | `GET https://site.api.espn.com/apis/site/v2/sports/basketball/nba/news?limit=4` | 3 of 4 articles (the long-running "preseason buzz" story dropped): Max Strus, Jordan Hawkins and the league-only smart-basketball story; trimmed like the NFL file |
+| `rotowire_nfl.xml` | `GET https://www.rotowire.com/rss/news.php?sport=NFL` | None: the whole feed, which carried five items (Ladd McConkey, Rachaad White, Terry McLaurin, Jayden Daniels, Marcus Mariota) |
+| `rotowire_nba.xml` | `GET https://www.rotowire.com/rss/news.php?sport=NBA` | None: five items (Zach Edey, Kingston Flemings, Max Strus, Oso Ighodaro, Jalen Duren) |
+
+What the captures pin:
+
+- RotoWire's `pubDate` is a 12-hour clock in US Pacific time (`Mon, 05 Oct 2026 3:42:00 PM PDT`, 22:42 UTC).
+  feedparser's `published_parsed` reads it as 03:42 with no offset, so the adapter parses the raw string.
+- RotoWire names a player only in its title (`Ladd McConkey: Termed 'week-to-week'`) and links his RotoWire page;
+  ESPN tags athletes with their ESPN ids, the fantasy player ids.
+- The same event, reported by both: RotoWire's "Max Strus: Will be re-evaluated in four weeks" (22:21 UTC) and ESPN's
+  "Sources: Clippers' Max Strus (foot) out at least 4 weeks" (22:41 UTC). Different words, so both are kept.
+- ESPN's per-player fantasy feed (`site.api.espn.com/apis/fantasy/v2/games/ffl/news/players`) answered HTTP 500
+  (`{"code":1008,...}`) without a `playerId` and HTTP 400 for two ids, so it is no feed and has no fixture.

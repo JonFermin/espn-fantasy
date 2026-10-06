@@ -1,0 +1,165 @@
+{
+ "header": "NBA News",
+ "link": {
+  "href": "https://www.espn.com/nba/",
+  "text": "All NBA News"
+ },
+ "articles": [
+  {
+   "id": 50112557,
+   "nowId": "1-50112557",
+   "type": "HeadlineNews",
+   "headline": "Sources: Clippers' Max Strus (foot) out at least 4 weeks",
+   "description": "Clippers wing Max Strus suffered a partial tear of the plantar fascia in his right foot and will be reevaluated in four weeks, league sources told ESPN.",
+   "lastModified": "2026-10-05T22:41:42Z",
+   "published": "2026-10-05T22:41:42Z",
+   "categories": [
+    {
+     "id": 409224,
+     "type": "topic",
+     "description": "news",
+     "sportId": 0,
+     "topicId": 781
+    },
+    {
+     "id": 9577,
+     "type": "league",
+     "uid": "s:40~l:46",
+     "description": "NBA",
+     "sportId": 46,
+     "leagueId": 46
+    },
+    {
+     "id": 154798,
+     "type": "team",
+     "uid": "s:40~l:46~t:12",
+     "description": "LA Clippers",
+     "sportId": 46,
+     "teamId": 12,
+     "team": {
+      "id": 12,
+      "description": "LA Clippers",
+      "abbreviation": "LAC"
+     }
+    },
+    {
+     "id": 388962,
+     "type": "athlete",
+     "uid": "s:40~l:46~a:4065778",
+     "description": "Max Strus",
+     "sportId": 46,
+     "athleteId": 4065778,
+     "athlete": {
+      "id": 4065778,
+      "description": "Max Strus"
+     }
+    },
+    {
+     "id": 737429,
+     "type": "contributor",
+     "description": "Anthony Slater",
+     "contributor": {
+      "id": 4252,
+      "description": "Anthony Slater"
+     }
+    }
+   ],
+   "byline": "Anthony Slater",
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nba/story/_/id/50112557/sources-clippers-max-strus-foot-least-4-weeks"
+    }
+   },
+   "premium": false
+  },
+  {
+   "id": 50112444,
+   "nowId": "1-50112444",
+   "type": "HeadlineNews",
+   "headline": "Sources: Jordan Hawkins to join Bulls on two-way deal",
+   "description": "Former lottery pick Jordan Hawkins is signing a two-way deal with the Chicago Bulls, sources told ESPN's Shams Charania on Monday.",
+   "lastModified": "2026-10-05T22:10:45Z",
+   "published": "2026-10-05T22:10:45Z",
+   "categories": [
+    {
+     "id": 409224,
+     "type": "topic",
+     "description": "news",
+     "sportId": 0,
+     "topicId": 781
+    },
+    {
+     "id": 4392,
+     "type": "team",
+     "uid": "s:40~l:46~t:4",
+     "description": "Chicago Bulls",
+     "sportId": 46,
+     "teamId": 4,
+     "team": {
+      "id": 4,
+      "description": "Chicago Bulls",
+      "abbreviation": "CHI"
+     }
+    },
+    {
+     "id": 9577,
+     "type": "league",
+     "uid": "s:40~l:46",
+     "description": "NBA",
+     "sportId": 46,
+     "leagueId": 46
+    },
+    {
+     "id": 508965,
+     "type": "athlete",
+     "uid": "s:40~l:46~a:4683750",
+     "description": "Jordan Hawkins",
+     "sportId": 46,
+     "athleteId": 4683750,
+     "athlete": {
+      "id": 4683750,
+      "description": "Jordan Hawkins"
+     }
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nba/story/_/id/50112444/sources-jordan-hawkins-join-bulls-two-way-deal"
+    }
+   },
+   "premium": false
+  },
+  {
+   "id": 50112238,
+   "nowId": "1-50112238",
+   "type": "HeadlineNews",
+   "headline": "NBA testing smart basketballs, wrist wearables in preseason",
+   "description": "The NBA is experimenting with smart basketballs and wrist wearables for officials in select preseason games in order to collect data on the review process.",
+   "lastModified": "2026-10-05T21:47:57Z",
+   "published": "2026-10-05T21:47:57Z",
+   "categories": [
+    {
+     "id": 9577,
+     "type": "league",
+     "uid": "s:40~l:46",
+     "description": "NBA",
+     "sportId": 46,
+     "leagueId": 46
+    },
+    {
+     "id": 409224,
+     "type": "topic",
+     "description": "news",
+     "sportId": 0,
+     "topicId": 781
+    }
+   ],
+   "links": {
+    "web": {
+     "href": "https://www.espn.com/nba/story/_/id/50112238/nba-testing-smart-basketballs-wrist-wearables-preseason"
+    }
+   },
+   "premium": false
+  }
+ ]
+}
