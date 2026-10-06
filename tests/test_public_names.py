@@ -78,6 +78,7 @@ MODULES = (
     "fm.jobs.tick",
     "fm.jobs.deadlines",
     "fm.jobs.scheduler_windows",
+    "fm.jobs.report",
     "fm.advisor.client",
     "fm.advisor.news_triage",
     "fm.advisor.close_call",
