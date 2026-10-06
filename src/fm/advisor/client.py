@@ -6,8 +6,9 @@ effort the worker runs at and a token limit) and a Pydantic output type. :meth:`
 and returns a :class:`WorkerReply` whose ``status`` says whether the output may be read:
 
 - ``ok``: ``stop_reason`` was ``end_turn`` and the output parsed into the type;
-- ``refusal``: the model declined (``stop_reason`` ``refusal``, the API's own refusal classifier included); the reply
-  carries the explanation when the API gave one and no output. The worker falls back to the engine without Claude;
+- ``refusal``: the whole chain declined (``stop_reason`` ``refusal``, the API's own refusal classifier included); the
+  reply carries the explanation when the API gave one and no output. The worker falls back to the engine without
+  Claude;
 - ``max_tokens``: the answer was cut off. Treated as a failure, never as partial data: the schema makes a truncated
   answer invalid anyway, and the SDK refuses to hand it over;
 - ``unparseable``: the answer came back whole but did not match the output type, or the SDK could not parse it;
@@ -15,6 +16,15 @@ and returns a :class:`WorkerReply` whose ``status`` says whether the output may 
   asks for.
 
 The API's ``stop_reason`` is checked before the parsed output is read (CLAUDE.md), whatever the SDK attached to it.
+
+**Refusal fallback.** By default (``AdvisorClient(refusal_fallback=True)``) a live call opts into the server-side
+refusal fallback for ``claude-opus-5-5``: it goes through ``client.beta.messages.parse`` with
+``betas=[FALLBACK_BETA]`` and ``fallbacks="default"``, so a refusal by the requested model is retried by the API on
+the fallback model for that refusal category instead of coming back empty. The served model can then differ from
+the requested one: a ``fallback_message`` entry in ``usage.iterations`` says so, and the call is recorded and priced
+under the model that answered (``response.model``), logged. A final ``stop_reason`` of ``refusal`` still means the
+whole chain refused and takes the refusal path above. The Batches API rejects ``fallbacks``, so batch requests never
+carry it; a batch refusal is logged and skipped.
 
 **Cost.** Every call that reached the API is recorded in ``llm_usage`` (:class:`fm.store.LlmUsageRow`) with its
 tokens, the cost at the model's :class:`Pricing` and whether it ran in a batch (half price). A call is refused with
@@ -47,11 +57,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Final, Literal, TypedDict
+from typing import Any, Final, Literal, TypedDict, cast
 
 import anthropic
 from anthropic import transform_schema
 from anthropic.types import JSONOutputFormatParam, MessageParam, OutputConfigParam, ParsedMessage, TextBlockParam, Usage
+from anthropic.types.beta import BetaUsage
+from anthropic.types.beta.parsed_beta_message import ParsedBetaMessage
 from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 from anthropic.types.messages import MessageBatchIndividualResponse
 from anthropic.types.messages.batch_create_params import Request as BatchRequestParam
@@ -87,6 +99,10 @@ MTOK: Final = 1_000_000
 
 MAX_BATCH_REQUESTS: Final = 10_000
 """The Message Batches API's limit on requests per batch."""
+
+FALLBACK_BETA: Final = "server-side-fallback-2026-07-01"
+"""The beta header the ``fallbacks="default"`` scalar form requires (the ``-2026-06-01`` header is the older array
+form; the two are never mixed)."""
 
 
 class AdvisorError(RuntimeError):
@@ -126,7 +142,7 @@ class TokenUsage:
     cache_read_input_tokens: int = 0
 
     @classmethod
-    def from_sdk(cls, usage: Usage) -> TokenUsage:
+    def from_sdk(cls, usage: Usage | BetaUsage) -> TokenUsage:
         return cls(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
@@ -157,9 +173,13 @@ class Pricing:
         return total * self.batch_multiplier if batch else total
 
 
-PRICING: Mapping[str, Pricing] = MappingProxyType({DEFAULT_MODEL: Pricing(input_per_mtok=5.0, output_per_mtok=25.0)})
-"""List prices by model id, at the time of writing: update this table when the price sheet changes. Spend is
-recorded at these numbers, so the daily cap is only as right as they are."""
+PRICING: Mapping[str, Pricing] = MappingProxyType(
+    {DEFAULT_MODEL: Pricing(input_per_mtok=4.0, output_per_mtok=20.0, cache_read_multiplier=0.05)}
+)
+"""List prices by model id, from the Claude API reference as cached on 2026-09-25: ``claude-opus-5-5`` is $4.00 in,
+$20.00 out, $0.20 per cache read (0.05x) and 1.25x per 5-minute cache write, per million tokens; Batch is half.
+Update this table when the price sheet changes: spend is recorded at these numbers, so the daily cap is only as
+right as they are."""
 
 
 def pricing_for(model: str) -> Pricing:
@@ -225,10 +245,11 @@ class Prompt:
 class RawReply:
     """What one request came back with, independent of the SDK's types: the :class:`Transport`'s output.
 
-    ``output`` is the parsed structured output when the SDK could parse one (it is read only when ``stop_reason`` is
-    ``end_turn``); ``detail`` is the refusal's explanation or the parse error. A transport that could not parse the
-    answer returns ``output=None`` with the ``detail``, and ``stop_reason=None`` with zero usage when the SDK raised
-    before handing the message over (it validates the output before returning).
+    ``model`` is the model that answered (a fallback model when ``fallback`` is true); ``output`` is the parsed
+    structured output when the SDK could parse one (it is read only when ``stop_reason`` is ``end_turn``);
+    ``detail`` is the refusal's explanation or the parse error. A transport that could not parse the answer returns
+    ``output=None`` with the ``detail``, and ``stop_reason=None`` with zero usage when the SDK raised before handing
+    the message over (it validates the output before returning).
     """
 
     request_id: str | None
@@ -237,6 +258,7 @@ class RawReply:
     usage: TokenUsage
     output: object = None
     detail: str | None = None
+    fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +329,8 @@ class Transport:
     """The SDK surface the client needs. :class:`SdkTransport` implements it over ``anthropic.Anthropic``; a test
     passes a fake. Every method raises :class:`AdvisorError` when the API cannot be reached or answers an error."""
 
-    def parse(self, params: CallParams, output: type[BaseModel]) -> RawReply:
+    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
+        """One call; with ``fallback`` the server-side refusal fallback is requested (see the module docs)."""
         raise NotImplementedError
 
     def create_batch(self, requests: Sequence[BatchRequest]) -> str:
@@ -342,12 +365,21 @@ def _refusal_detail(message: Any) -> str | None:
     return ": ".join(str(part) for part in parts) if parts else None
 
 
+def served_by_fallback(message: Any) -> bool:
+    """True when a fallback model served the answer: a ``fallback_message`` entry in ``usage.iterations`` (the
+    API's signal; ``fallback`` content blocks only mark the hops that declined)."""
+    iterations = getattr(message.usage, "iterations", None) or ()
+    return any(getattr(entry, "type", None) == "fallback_message" for entry in iterations)
+
+
 def reply_from_message(message: Any, output: type[BaseModel]) -> RawReply:
-    """A :class:`RawReply` from an SDK ``Message`` or ``ParsedMessage``. A plain message's first text block is
-    parsed into ``output`` here (batch results come back unparsed); a parse failure becomes the ``detail``."""
+    """A :class:`RawReply` from an SDK message, plain or parsed, beta or not. A plain message's first text block is
+    parsed into ``output`` here (batch results come back unparsed); a parse failure becomes the ``detail``. ``model``
+    is the model that answered, which a refusal fallback can change."""
     parsed: object = getattr(message, "parsed_output", None)
     detail = _refusal_detail(message)
-    if parsed is None and message.stop_reason == "end_turn" and not isinstance(message, ParsedMessage):
+    already_parsed = isinstance(message, ParsedMessage | ParsedBetaMessage)
+    if parsed is None and message.stop_reason == "end_turn" and not already_parsed:
         text = _first_text(message.content)
         if text is not None:
             try:
@@ -361,6 +393,7 @@ def reply_from_message(message: Any, output: type[BaseModel]) -> RawReply:
         usage=TokenUsage.from_sdk(message.usage),
         output=parsed,
         detail=detail,
+        fallback=served_by_fallback(message),
     )
 
 
@@ -377,16 +410,31 @@ class SdkTransport(Transport):
             raise AdvisorError("ANTHROPIC_API_KEY is blank")
         return cls(anthropic.Anthropic(api_key=key, timeout=timeout, max_retries=max_retries))
 
-    def parse(self, params: CallParams, output: type[BaseModel]) -> RawReply:
+    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
         try:
-            message = self._sdk.messages.parse(
-                model=params["model"],
-                max_tokens=params["max_tokens"],
-                system=params["system"],
-                messages=params["messages"],
-                output_config=params["output_config"],
-                output_format=output,
-            )
+            message: Any
+            if fallback:
+                # The beta messages surface: the same parameters (the beta param types are structurally the same
+                # TypedDicts) plus the fallback header and the "default" fallback chain, which only this form takes.
+                message = self._sdk.beta.messages.parse(
+                    model=params["model"],
+                    max_tokens=params["max_tokens"],
+                    system=cast(Any, params["system"]),
+                    messages=cast(Any, params["messages"]),
+                    output_config=cast(Any, params["output_config"]),
+                    output_format=output,
+                    betas=[FALLBACK_BETA],
+                    fallbacks="default",
+                )
+            else:
+                message = self._sdk.messages.parse(
+                    model=params["model"],
+                    max_tokens=params["max_tokens"],
+                    system=params["system"],
+                    messages=params["messages"],
+                    output_config=params["output_config"],
+                    output_format=output,
+                )
         except ValidationError as exc:
             # The SDK validates the text against the schema before returning the message, so a truncated or
             # off-schema answer surfaces here, without the message (and its usage) it came in.
@@ -479,7 +527,8 @@ def day_start(now: datetime) -> datetime:
 
 class AdvisorClient:
     """The workers' way to Claude (see the module docs). ``llm`` gives the model and the daily cap; ``transport``
-    is the SDK or a fake; ``pricing`` defaults to the model's listed price."""
+    is the SDK or a fake; ``pricing`` defaults to the model's listed price; ``refusal_fallback`` (on by default)
+    asks the API for the server-side refusal fallback on live calls."""
 
     def __init__(
         self,
@@ -488,11 +537,13 @@ class AdvisorClient:
         transport: Transport,
         *,
         pricing: Pricing | None = None,
+        refusal_fallback: bool = True,
     ) -> None:
         self.store = store
         self.model: str = llm.model
         self.daily_budget_usd: float = llm.daily_budget_usd
         self.pricing: Pricing = pricing if pricing is not None else pricing_for(llm.model)
+        self.refusal_fallback: bool = refusal_fallback
         self._transport = transport
 
     @classmethod
@@ -535,7 +586,7 @@ class AdvisorClient:
         when the API could not be reached; the call is recorded in ``llm_usage`` whenever it got an answer."""
         self.check_budget(worker, now)
         params = prompt.params(self.model)
-        raw = self._transport.parse(params, output)
+        raw = self._transport.parse(params, output, fallback=self.refusal_fallback)
         return self._reply(worker, raw, output, league_id=prompt.league_id, batch=False, now=now)
 
     # --- batches ---
@@ -550,7 +601,8 @@ class AdvisorClient:
         now: datetime | None = None,
     ) -> SubmittedBatch:
         """Send ``prompts`` (by the caller's ids) as one batch for ``worker``; nothing is recorded until the results
-        are collected. Raises :class:`BudgetExceededError` when the cap is already reached, ``ValueError`` for an
+        are collected. The requests never carry ``fallbacks`` (the Batches API rejects it), so a batch refusal is
+        just a refusal. Raises :class:`BudgetExceededError` when the cap is already reached, ``ValueError`` for an
         empty or oversized batch."""
         if not prompts:
             raise ValueError("a batch needs at least one prompt")
@@ -626,6 +678,8 @@ class AdvisorClient:
         now: datetime | None,
     ) -> WorkerReply[T]:
         status, detail = _status_of(raw, output)
+        # Recorded and priced under the model that answered: a refusal fallback can serve another model.
+        pricing = self.pricing if raw.model == self.model else pricing_for(raw.model)
         usage = LlmUsageRow(
             called_at=now if now is not None else utc_now(),
             worker=worker,
@@ -634,13 +688,21 @@ class AdvisorClient:
             output_tokens=raw.usage.output_tokens,
             cache_creation_input_tokens=raw.usage.cache_creation_input_tokens,
             cache_read_input_tokens=raw.usage.cache_read_input_tokens,
-            cost_usd=self.pricing.cost(raw.usage, batch=batch),
+            cost_usd=pricing.cost(raw.usage, batch=batch),
             batch=batch,
             stop_reason=raw.stop_reason,
             request_id=raw.request_id,
             league_id=league_id,
         )
         usage = self.store.llm_usage.insert(usage)
+        if raw.fallback:
+            logger.info(
+                "advisor: %s: %s declined; served by the fallback model %s (request %s)",
+                worker,
+                self.model,
+                raw.model,
+                raw.request_id,
+            )
         parsed = raw.output if status == "ok" and isinstance(raw.output, output) else None
         reply = WorkerReply(worker, status, parsed, raw.stop_reason, usage, detail)
         level = logging.INFO if reply.ok else logging.WARNING

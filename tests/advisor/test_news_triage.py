@@ -60,7 +60,7 @@ class FakeTransport(Transport):
         self.status: BatchStatus | None = None
         self.results: list[BatchResult] = []
 
-    def parse(self, params: CallParams, output: type[BaseModel]) -> RawReply:
+    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
         assert output is TriageOutput
         self.calls.append(params)
         reply = self.replies.pop(0)

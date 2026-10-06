@@ -13,11 +13,13 @@ import anthropic
 import httpx
 import pytest
 from anthropic.types import Message, ParsedMessage, ParsedTextBlock, TextBlock, Usage
+from anthropic.types.beta import BetaMessage
 from anthropic.types.messages import MessageBatchIndividualResponse
 from pydantic import BaseModel, ValidationError
 
 from fm.advisor.client import (
     EFFORT_BY_WORKER,
+    FALLBACK_BETA,
     AdvisorClient,
     AdvisorError,
     BatchRequest,
@@ -36,6 +38,7 @@ from fm.advisor.client import (
     output_format,
     pricing_for,
     reply_from_message,
+    served_by_fallback,
     spend_report,
 )
 from fm.config import DEFAULT_MODEL, Config, Llm
@@ -55,12 +58,14 @@ class FakeTransport(Transport):
     def __init__(self, *replies: RawReply) -> None:
         self.replies = list(replies)
         self.calls: list[tuple[CallParams, type[BaseModel]]] = []
+        self.fallbacks: list[bool] = []
         self.batches: dict[str, list[BatchRequest]] = {}
         self.status: BatchStatus | None = None
         self.results: list[BatchResult] = []
 
-    def parse(self, params: CallParams, output: type[BaseModel]) -> RawReply:
+    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
         self.calls.append((params, output))
+        self.fallbacks.append(fallback)
         return self.replies.pop(0)
 
     def create_batch(self, requests: Sequence[BatchRequest]) -> str:
@@ -137,10 +142,11 @@ def test_an_end_turn_answer_is_parsed_and_recorded(store: Store) -> None:
         100,
         400,
     )
-    # (1000 x 5 + 200 x 25 + 100 x 5 x 1.25 + 400 x 5 x 0.1) per million tokens
-    assert row.cost_usd == pytest.approx(0.010825)
+    # (1000 x 4 + 200 x 20 + 100 x 4 x 1.25 + 400 x 4 x 0.05) per million tokens
+    assert row.cost_usd == pytest.approx(0.00858)
     assert row.called_at == NOW
-    assert "close_call: ok (end_turn), 1,000 in / 200 out, 400 cached, $0.0108" == reply.describe()
+    assert "close_call: ok (end_turn), 1,000 in / 200 out, 400 cached, $0.0086" == reply.describe()
+    assert transport.fallbacks == [True]  # the refusal fallback is on by default
 
 
 def test_the_request_carries_the_cached_prefix_the_effort_and_the_schema(store: Store) -> None:
@@ -262,10 +268,11 @@ def test_spend_report_sums_the_day_by_worker(store: Store) -> None:
 
 
 def test_pricing_and_batch_discount(caplog: pytest.LogCaptureFixture) -> None:
-    pricing = Pricing(input_per_mtok=5.0, output_per_mtok=25.0)
+    pricing = Pricing(input_per_mtok=4.0, output_per_mtok=20.0, cache_read_multiplier=0.05)
     usage = TokenUsage(1_000_000, 100_000, 0, 0)
-    assert pricing.cost(usage) == pytest.approx(7.5)
-    assert pricing.cost(usage, batch=True) == pytest.approx(3.75)
+    assert pricing.cost(usage) == pytest.approx(6.0)
+    assert pricing.cost(usage, batch=True) == pytest.approx(3.0)
+    assert pricing.cost(TokenUsage(0, 0, 1_000_000, 1_000_000)) == pytest.approx(5.0 + 0.2)  # write 1.25x, read $0.20
     assert pricing_for(DEFAULT_MODEL) == pricing
     with caplog.at_level(logging.WARNING, logger="fm.advisor.client"):
         assert pricing_for("claude-unlisted") == pricing
@@ -334,8 +341,9 @@ def test_a_batch_is_submitted_with_the_schema_and_collected_at_half_price(store:
     assert dict(collected.failed) == {"b": "errored: invalid request", "c": "missing from the results"}
     (row,) = store.llm_usage.since(NOW - timedelta(days=1))
     assert row.batch is True and row.league_id == league.row_id and row.request_id == "msg_a"
-    assert row.cost_usd == pytest.approx(0.01 / 2)
-    assert collected.describe() == "batch msgbatch_1: 1 ok, 0 not usable, 2 unanswered, $0.0050"
+    assert row.cost_usd == pytest.approx(0.008 / 2)
+    assert collected.describe() == "batch msgbatch_1: 1 ok, 0 not usable, 2 unanswered, $0.0040"
+    assert all("fallbacks" not in r.params and "betas" not in r.params for r in requests)  # Batches reject it
 
 
 def test_an_empty_batch_is_refused(store: Store) -> None:
@@ -375,9 +383,17 @@ class FakeMessages:
         return self.outcome
 
 
-class FakeSdk:
+class FakeBeta:
     def __init__(self, outcome: object) -> None:
         self.messages = FakeMessages(outcome)
+
+
+class FakeSdk:
+    """``messages.parse`` and ``beta.messages.parse``, both answering ``outcome``."""
+
+    def __init__(self, outcome: object) -> None:
+        self.messages = FakeMessages(outcome)
+        self.beta = FakeBeta(outcome)
 
 
 def test_sdk_transport_sends_parse_and_reads_the_parsed_message() -> None:
@@ -476,3 +492,89 @@ def test_from_config_needs_a_key_unless_a_transport_is_given(store: Store) -> No
         SdkTransport.with_key(" ")
     real = AdvisorClient.from_config(store, config(ANTHROPIC_API_KEY="sk-ant-test"))
     assert isinstance(real._transport, SdkTransport)  # built, never called
+    assert real.refusal_fallback is True
+
+
+# --- the refusal fallback ---
+
+
+def test_a_fallback_served_answer_is_recorded_under_the_served_model(
+    store: Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    answer = Answer(verdict="start", score=0.7)
+    served = RawReply("msg_fb", "claude-sonnet-5", "end_turn", TokenUsage(1000, 200, 0, 0), answer, fallback=True)
+    client, transport = make_client(store, served)
+    with caplog.at_level(logging.INFO, logger="fm.advisor.client"):
+        reply = client.ask("explain", prompt(), Answer, now=NOW)
+
+    assert reply.ok and reply.output == answer
+    assert transport.fallbacks == [True]
+    assert reply.usage.model == "claude-sonnet-5" and reply.usage.request_id == "msg_fb"
+    assert reply.usage.cost_usd == pytest.approx(pricing_for("claude-sonnet-5").cost(TokenUsage(1000, 200, 0, 0)))
+    assert (
+        f"explain: {DEFAULT_MODEL} declined; served by the fallback model claude-sonnet-5 (request msg_fb)"
+        in caplog.text
+    )
+
+
+def test_a_whole_chain_refusal_is_still_a_refusal(store: Store) -> None:
+    client, transport = make_client(store, raw("refusal", detail="general_harms: every hop declined"))
+    reply = client.ask("explain", prompt(), Answer, now=NOW)
+    assert reply.status == "refusal" and reply.output is None
+    assert reply.detail == "general_harms: every hop declined"
+    assert transport.fallbacks == [True]
+
+
+def test_the_fallback_is_a_client_setting(store: Store) -> None:
+    transport = FakeTransport(raw(output=Answer(verdict="x", score=0.0)))
+    client = AdvisorClient(store, Llm(), transport, refusal_fallback=False)
+    assert client.ask("explain", prompt(), Answer, now=NOW).ok
+    assert transport.fallbacks == [False]
+
+
+def test_sdk_transport_asks_the_beta_surface_for_the_fallback() -> None:
+    answer = Answer(verdict="sit", score=0.2)
+    sdk = FakeSdk(sdk_message("end_turn", answer.model_dump_json(), parsed=answer))
+    transport = SdkTransport(cast(anthropic.Anthropic, sdk))
+
+    reply = transport.parse(prompt().params(DEFAULT_MODEL), Answer, fallback=True)
+
+    assert sdk.messages.kwargs == {}  # the plain surface is not used
+    kwargs = sdk.beta.messages.kwargs
+    assert kwargs["betas"] == [FALLBACK_BETA] == ["server-side-fallback-2026-07-01"]
+    assert kwargs["fallbacks"] == "default"
+    assert kwargs["output_format"] is Answer and kwargs["output_config"] == {"effort": "low"}
+    assert kwargs["model"] == DEFAULT_MODEL and kwargs["max_tokens"] == 256
+    assert reply.output == answer and reply.fallback is False
+
+
+def test_a_fallback_message_iteration_marks_the_served_model() -> None:
+    answer = Answer(verdict="start", score=0.9)
+    message = BetaMessage.model_validate(
+        {
+            "id": "msg_beta",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": answer.model_dump_json()}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 40,
+                "output_tokens": 9,
+                "iterations": [
+                    {
+                        "type": "fallback_message",
+                        "model": "claude-sonnet-5",
+                        "input_tokens": 40,
+                        "output_tokens": 9,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    }
+                ],
+            },
+        }
+    )
+    assert served_by_fallback(message) is True
+    reply = reply_from_message(message, Answer)
+    assert reply == RawReply("msg_beta", "claude-sonnet-5", "end_turn", TokenUsage(40, 9, 0, 0), answer, fallback=True)
+    assert served_by_fallback(sdk_message("end_turn", answer.model_dump_json())) is False
