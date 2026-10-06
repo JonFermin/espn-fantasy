@@ -303,7 +303,7 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def write_report(client: AdvisorClient, inputs: StrategyInputs, *, now: datetime | None = None) -> StrategyReport:
+def write_strategy(client: AdvisorClient, inputs: StrategyInputs, *, now: datetime | None = None) -> StrategyReport:
     """The report: Claude's summary, priorities and target notes laid over the template, or the template when Claude
     cannot be used (see the module docs). Never raises for a spent budget or an unreachable API."""
     base = template_report(inputs)
@@ -478,6 +478,6 @@ def run_strategist(
     """Write the weekly report and draft its targets as proposals (module docs). The report's ``targets`` are exactly
     the engine's eligible ideas: Claude's text never changes which are proposed."""
     at = now if now is not None else utc_now()
-    report = write_report(client, inputs, now=at)
+    report = write_strategy(client, inputs, now=at)
     proposals = propose_targets(store, config, league, report.targets, max_offers=max_offers, dry_run=dry_run, now=at)
     return StrategyResult(report, tuple(proposals))

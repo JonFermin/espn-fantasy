@@ -27,7 +27,7 @@ from fm.advisor.strategist import (
     run_strategist,
     strategy_text,
     template_report,
-    write_report,
+    write_strategy,
 )
 from fm.config import DEFAULT_MODEL, Config, Llm
 from fm.decide.trades import Acceptance, SideImpact, TradeEvaluation, TradeLegality, TradeSpec
@@ -220,7 +220,7 @@ def test_claude_words_the_report_and_cannot_change_the_punts_or_targets(store: S
         [TargetNote(idea=1, note="Helps PTS."), TargetNote(idea=9, note="Not shown."), TargetNote(idea=1, note="dup")],
     )
     client, transport = make_client(store, reply)
-    report = write_report(client, ours, now=NOW)
+    report = write_strategy(client, ours, now=NOW)
     assert report.source == "claude" and report.summary == "We are even this week."
     assert report.priorities == ("Win PTS", "Also punt STL")  # Claude's words, but...
     assert report.punts == ("BLK",) and report.contest == ("PTS", "REB")  # ...the engine's punts
@@ -243,23 +243,23 @@ def test_the_bounds_on_claudes_text_are_applied() -> None:
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens", "pause_turn", None])
 def test_an_unusable_answer_keeps_the_template(store: Store, stop_reason: str | None) -> None:
     client, _ = make_client(store, raw(stop_reason, StrategyOutput(summary="not read")))
-    report = write_report(client, inputs(), now=NOW)
+    report = write_strategy(client, inputs(), now=NOW)
     assert report.source == "fallback" and report.detail and report.summary == template_report(inputs()).summary
     assert report.punts == ("BLK",)
 
 
 def test_an_empty_summary_an_unreachable_api_and_a_spent_budget_fall_back(store: Store) -> None:
     client, _ = make_client(store, said("  "), AdvisorError("Claude API call failed: down"))
-    assert write_report(client, inputs(), now=NOW).detail == "empty summary"
-    assert "Claude API call failed" in (write_report(client, inputs(), now=NOW).detail or "")
+    assert write_strategy(client, inputs(), now=NOW).detail == "empty summary"
+    assert "Claude API call failed" in (write_strategy(client, inputs(), now=NOW).detail or "")
     broke, transport = make_client(store, said(), budget=0.0)
-    report = write_report(broke, inputs(), now=NOW)
+    report = write_strategy(broke, inputs(), now=NOW)
     assert report.source == "fallback" and (report.detail or "").startswith("blocked: ") and transport.calls == []
 
 
 def test_with_nothing_to_say_there_is_no_call(store: Store) -> None:
     client, transport = make_client(store)
-    report = write_report(client, inputs(plan=None, our_odds=None, ideas=()), now=NOW)
+    report = write_strategy(client, inputs(plan=None, our_odds=None, ideas=()), now=NOW)
     assert report.source == "template" and "Nothing to plan" in report.summary and transport.calls == []
 
 
