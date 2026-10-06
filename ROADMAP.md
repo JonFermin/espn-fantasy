@@ -110,7 +110,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   - Shares × implied team total × regressed efficiency, registered as a projection source.
   - ESPN removes the scoreboard `odds` block at kickoff, so implied team totals must be captured while `ScoreboardGame.state == "pre"` (the scoreboard TTL is 10 minutes); have the sync job (#16) snapshot pregame lines if the baseline needs them after the fact.
   AC: test command passes; the backtest on fixtures shows the blend with the baseline no worse than without it
-- IN PROGRESS [P2] [M] #43: NBA minutes baseline — scope: src/fm/model/baseline_nba.py, tests/model/test_baseline_nba.py — depends: #11 ✓, #24 ✓, #33 ✓
+- DONE [P2] [M] #43: NBA minutes baseline — scope: src/fm/model/baseline_nba.py, tests/model/test_baseline_nba.py — depends: #11 ✓, #24 ✓, #33 ✓
   - Minutes × per-minute rates, registered as a projection source.
   - Teammates-out redistribution from without-player splits + on/off data, with DARKO minutes as the prior; blowout risk and back-to-back rest risk.
   - `fm.sources.nba_stats` works live (#17 smoke test, 2026-10-05: `game_logs("2025-26")` 26,651 rows, `player_splits("2025-26", "Base")` 582 rows). Its `leaguedashplayerstats` fixtures are hand-built from nba_api's expected_data (`CFID`, `CFPARAMS`); live stats.nba.com sends `NICKNAME`, `WNBA_FANTASY_PTS`, `FP_HIGH_SCORE`, their ranks and `TEAM_COUNT` instead. The adapter's required columns are present either way, and live game logs match their fixture.
