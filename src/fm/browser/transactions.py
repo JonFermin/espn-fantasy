@@ -3,15 +3,19 @@
 ESPN's web app writes every move through one endpoint, ``POST https://lm-api-writes.fantasy.espn.com/apis/v3/games/
 {ffl|fba}/seasons/{season}/segments/0/leagues/{id}/transactions/``, with one JSON envelope (DESIGN 6.3,
 docs/espn-api.md section 4). This module builds that request the way the web client's own code does. The code is
-saved verbatim in ``tests/fixtures/espn/real/webclient.json``, and ``tests/fixtures/espn/real/test_real_fixtures.py``
-pins each rule below against it:
+saved verbatim in ``tests/fixtures/espn/real/webclient.json``, the requests the web app sent for a lineup move, a
+waiver claim and two free-agent adds are saved in ``tests/fixtures/espn/real/{ffl,fba}/write_*.json`` (captured under
+the write guard, so none reached ESPN), and ``tests/executor/test_transactions.py`` rebuilds each capture from the
+builders below, body for body. The rules:
 
 - :class:`Envelope` is the transaction model; :meth:`Envelope.body` is its serializer (``get()``). The body always
   starts ``{isLeagueManager: false, teamId, type}``, then ``memberId`` (the signed-in SWID) and ``scoringPeriodId``
   when set, ``executionType`` (``EXECUTE``, or ``CANCEL`` to withdraw a claim or offer) and ``items`` when there are
-  any. Type-specific keys follow: ``bidAmount`` with ``WAIVER``, ``expirationDate`` and ``comment`` with
-  ``TRADE_PROPOSAL``, ``comment`` with ``TRADE_DECLINE``, and ``relatedTransactionId`` with a cancel or a trade
-  response. ``isLeagueManager`` is always false, so the league-manager keys never appear.
+  any. Type-specific keys follow: ``bidAmount`` with ``WAIVER`` (``null`` on a claim without a bid: the real league
+  without FAAB sent exactly that), ``expirationDate`` and ``comment`` with ``TRADE_PROPOSAL``, ``comment`` with
+  ``TRADE_DECLINE``, and ``relatedTransactionId`` with a cancel or a trade response. ``isLeagueManager`` is always
+  false, so the league-manager keys never appear. ``memberId`` is optional on the wire: the player list's one-click
+  Add sent none (``fba/write_FREEAGENT_1.json``), every other captured flow sent the SWID.
 - The item builders (:func:`lineup_item`, :func:`add_item`, :func:`drop_item`, :func:`trade_item`) follow the
   client's: ``{playerId, type}``, then the team ids when they are set (0 is free agency, and the client leaves it
   out), then the lineup slots. ``LINEUP`` items carry slots and no team ids.
@@ -19,8 +23,11 @@ pins each rule below against it:
   (``status.latestScoringPeriod``) is ``ROSTER``; a move for a later one is ``FUTURE_ROSTER`` with that period. Real
   records match this in both games (``ROSTER`` for NBA day 1, ``FUTURE_ROSTER`` for days 2, 3 and 5).
 - :func:`transaction_request` wraps an envelope in a :class:`fm.browser.flows.WriteRequest` for this league's
-  endpoint, with the headers the client adds (:data:`WEB_CLIENT_HEADERS`). The client's ``platformVersion`` query
-  parameter names its own build, which we cannot know, so it is left out.
+  endpoint, with the headers the client adds (:data:`WEB_CLIENT_HEADERS`). Every captured request carried exactly
+  ``x-fantasy-source: kona``, ``x-fantasy-platform: espn-fantasy-web``, ``accept`` and ``content-type``
+  (``application/json``), which is what this request plus the transport sends. The client's ``platformVersion``
+  query parameter (``?platformVersion=<build sha>``, the same value on every capture) names its own build, which we
+  cannot know, so it is left out; whether ESPN requires it is untested, since no request of ours has been sent.
 
 Sending is the executor's job. It sends a request exactly once from inside the logged-in browser context
 (``fm.executor.transport.PlaywrightTransport`` over ``BrowserContext.request``, so it carries the same cookies and
@@ -51,8 +58,9 @@ from fm.store import LeagueRow
 WEB_CLIENT_HEADERS: Mapping[str, str] = MappingProxyType(
     {"X-Fantasy-Source": "kona", "X-Fantasy-Platform": "espn-fantasy-web"}
 )
-"""Headers the web client adds to every request (``requestDefaults``, ``requestConfig``; docs/espn-api.md section 2).
-The transport adds ``Content-Type`` and ``Accept``, and the browser session adds the cookies."""
+"""Headers the web client adds to every request (``requestDefaults``, ``requestConfig``; docs/espn-api.md section 2),
+with the values every captured write carried (``tests/fixtures/espn/real/*/write_*.json``). The transport adds
+``Content-Type`` and ``Accept``, and the browser session adds the cookies."""
 HTTP_TOO_MANY_REQUESTS = 429
 
 
@@ -167,7 +175,8 @@ class Envelope:
     items: tuple[Mapping[str, Any], ...] = ()
     execution_type: ExecutionType = ExecutionType.EXECUTE
     bid_amount: int | None = None
-    """``WAIVER`` only: the FAAB bid (0 in a league without FAAB). ``None`` leaves it out, as a cancel does."""
+    """``WAIVER`` only: the FAAB bid. ``None`` is sent as ``bidAmount: null`` on a claim (what the web app sent for
+    the real league without FAAB, ``ffl/write_WAIVER_1.json``) and left out of a cancel, whose model never sets it."""
     related_transaction_id: str | None = None
     """The claim or offer a cancel or trade response refers to."""
     expiration_date: int | None = None
@@ -212,8 +221,8 @@ class Envelope:
         if self.items:
             body["items"] = [dict(item) for item in self.items]
         if kind is TransactionType.WAIVER:
-            if self.bid_amount is not None:
-                body["bidAmount"] = self.bid_amount
+            if self.bid_amount is not None or ExecutionType(self.execution_type) is ExecutionType.EXECUTE:
+                body["bidAmount"] = self.bid_amount  # a claim without a bid sends null, as the real capture did
             if self.related_transaction_id:
                 body["relatedTransactionId"] = self.related_transaction_id
         if kind is TransactionType.TRADE_PROPOSAL and self.expiration_date is not None:

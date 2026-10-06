@@ -1,0 +1,22 @@
+nfl: Fixture League (PPR), waivers and free agents for scoring period 4 (as of 2026-10-04 15:00Z; wire of 4 synced 2026-10-04 15:00Z)
+  waiver: proposed as #1 (policy approve); fm proposals approve 1; due 2026-10-05 16:40Z
+    Claim Jaylen Warren (RB) off waivers: +83.7 rest-of-season points from period 5; bid $17 (cap $35, $77 left).
+    gain +83.7 from period 5; add Jaylen Warren (RB) ROS 177.3 (VOR +0.0)
+    bid $17: 25% of the roster's ROS value buys the $77 left; cap $35, minimum $0
+  add_drop: proposed as #2 (policy approve); fm proposals approve 2; due 2026-10-05 00:20Z
+    Add Rico Dowdle (RB) from free agency: +5.5 rest-of-season points from period 4.
+    gain +5.5 from period 4; add Rico Dowdle (RB) ROS 169.2 (VOR +0.0)
+
+  top 10 of 18 ranked pairs (rest-of-season points):
+   # move  add                drop                  gain add ROS    VOR drop ROS bid due
+   1 claim Jaylen Warren (RB) -                    +83.7   177.3   +0.0        - $17 2026-10-05 16:40Z
+   2 add   Rico Dowdle (RB)   Tyler Allgeier (RB)  +82.6   169.2  -19.5     98.8   - 2026-10-05 00:20Z
+   3 claim Jaylen Warren (RB) Tyler Allgeier (RB)  +78.6   177.3   +0.0     98.8 $16 2026-10-05 16:40Z
+   4 add   Rico Dowdle (RB)   -                    +76.9   169.2  -19.5        -   - 2026-10-05 00:20Z
+   5 add   Isaiah Likely (TE) -                    +62.0   160.8   +0.0        -   - 2026-10-04 17:00Z
+   6 add   Isaiah Likely (TE) Tyler Allgeier (RB)  +62.0   160.8   +0.0     98.8   - 2026-10-04 17:00Z
+   7 add   Ray Davis (RB)     -                     +0.0    84.2 -104.4        -   - 2026-10-04 17:00Z
+   8 add   Ray Davis (RB)     Tyler Allgeier (RB)  -14.6    84.2 -104.4     98.8   - 2026-10-04 17:00Z
+   9 add   Rico Dowdle (RB)   Trey McBride (TE)    -49.6   169.2  -19.5    278.1   - 2026-10-04 17:00Z
+  10 add   Isaiah Likely (TE) Trey McBride (TE)   -117.3   160.8   +0.0    278.1   - 2026-10-04 17:00Z
+  replacement level: QB nobody 0.0, RB Jaylen Warren 188.6, WR nobody 0.0, TE Isaiah Likely 160.8, D/ST nobody 0.0, K nobody 0.0, RB/WR/TE Jaylen Warren 188.6
