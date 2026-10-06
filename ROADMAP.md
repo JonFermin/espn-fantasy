@@ -69,7 +69,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - A waiver claim's proposal carries the `scoring_period_id` of the week its run falls in (the NFL league's Wednesday run is next week's) and counts against that week's `max_transactions_per_week`; `decide_waivers` budgets slots per matchup period to agree with `evaluate()`, so a Wednesday claim never blocks this week's adds and vice versa.
   - Availability inputs (#22) are not written by anything yet. For NFL, fetch `NflverseSource.injuries(season)` a few times a week and call `assess_stored(..., practice=practice_from_nflverse(frame, Crosswalk.from_store(store), season=..., week=..., observed=fetched.as_of).by_player)`; for NBA pass `official=NbaInjuriesSource.official_report(day).data`. Pass `schedule=` (the sport's `ProSchedule`) as well: without it `assess` assumes every player has a game (`has_game=True`, no `game_time`, so no `resolves_at` for `plan_pivots`). The lineup planner reads `has_game` from its own schedule, never the row (phase 5 review), so a schedule-less row cannot start a bye player, but it still loses the game time. NBA projections (#24) are not blended in production either: after the NBA crosswalk is saved, call `fm.model.value_nba.blend_day(store, season, current_day, weights=BlendWeights.load())` per NBA league (importing `fm.model.value_nba` attaches the DARKO loader; `blend_day`, not `blend_period`, reads ESPN's stored season line as the day's per-game rate). Either the sync job or the tick can own both.
   AC: test command passes for test_tick and test_scheduler_windows (rendered commands only, nothing installed); `uv run fm schedule show` exits 0
-- IN PROGRESS [P1] [M] #30: Advisor client and news triage — scope: src/fm/advisor/client.py, src/fm/advisor/news_triage.py, src/fm/advisor/prompts/, tests/advisor/test_client.py, tests/advisor/test_news_triage.py — depends: #2 ✓, #23 ✓
+- DONE [P1] [M] #30: Advisor client and news triage — scope: src/fm/advisor/client.py, src/fm/advisor/news_triage.py, src/fm/advisor/prompts/, tests/advisor/test_client.py, tests/advisor/test_news_triage.py — depends: #2 ✓, #23 ✓
   - anthropic SDK client (`claude-opus-5-5`, effort per worker, structured outputs via `messages.parse`, `stop_reason` checks, refusal fallback, prompt caching, Batches for overnight work, `llm_usage` tracking, daily budget cap).
   - News triage → stored signals.
   - Phase 5: `fm.model.relevance.relevance_for` ranks a category league's free agents by a summed per-category z-score stand-in written before #24; `fm.model.categories.CategoryModel` now exists, so rank with it. Store triage output as the news signals `fm.model.availability.assess` reads: each needs a source URL and a finite value, is clamped to ±0.3 × confidence, and the latest signal of a kind supersedes earlier ones.
@@ -100,7 +100,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   AC: `uv run fm rankings --fixtures tests/fixtures/espn` writes a CSV per league; test command passes
 
 ## Phase 7
-- TODO [P1] [M] #36: Close-call and explain workers — scope: src/fm/advisor/close_call.py, src/fm/advisor/explain.py, tests/advisor/test_close_call.py, tests/advisor/test_explain.py — depends: #20 ✓, #30
+- TODO [P1] [M] #36: Close-call and explain workers — scope: src/fm/advisor/close_call.py, src/fm/advisor/explain.py, tests/advisor/test_close_call.py, tests/advisor/test_explain.py — depends: #20 ✓, #30 ✓
   - Near-tie tie-break with the web search tool over a domain allowlist and cited sources.
   - Rationale per non-trivial proposal; trivial moves use templates.
   AC: test command passes for both tests with a stubbed client (allowlist configured; templated path makes no API call)
@@ -144,7 +144,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - Open offers: ESPN leaves an expired offer `PENDING` and closes it with a separate CANCEL record that still says `isPending`; `EspnClient.pending_offers` keeps only open ones (docs/espn-api.md §1 #2). Offers come from `mTransactions2`, not `mPendingTransactions`, and expire 48 h after `proposedDate`.
   - Phase 5: `fm.browser.transactions` (#25) builds the TRADE item and the envelope (`isLeagueManager` false, impossible combinations refused) and `fm.browser.selectors` is the registry to extend; `fm.model.relevance` (#23) already reads open trade proposals for its trade targets.
   AC: test command passes for both tests (fake page; `auto` policy rejected for trade kinds; duplicate offers and locked-player trades blocked)
-- TODO [P1] [M] #45: Trade pitch and weekly strategist workers — scope: src/fm/advisor/pitch.py, src/fm/advisor/strategist.py, tests/advisor/test_pitch.py, tests/advisor/test_strategist.py — depends: #30, #32, #38
+- TODO [P1] [M] #45: Trade pitch and weekly strategist workers — scope: src/fm/advisor/pitch.py, src/fm/advisor/strategist.py, tests/advisor/test_pitch.py, tests/advisor/test_strategist.py — depends: #30 ✓, #32, #38
   - Pitch draft per approved trade idea.
   - Weekly priorities, punts, and targets → proposals.
   AC: test command passes for both tests with a stubbed client
