@@ -41,7 +41,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final
@@ -55,6 +55,7 @@ from fm.espn.settings import LeagueSettings, SettingsParseError, load_league_set
 from fm.model.projections import BLEND, ESPN, BlendWeights, blend, position_for
 from fm.model.scoring import Scorer
 from fm.model.valuation import eligible_active_slots
+from fm.sports.base import ScheduleLike, last_start
 from fm.store import LeagueRow, PlayerRow, ProjectionRow, Store
 
 FIXTURE_FORMAT: Final = 1
@@ -115,6 +116,8 @@ class BacktestData:
     players: Mapping[int, PlayerRow]
     weeks: tuple[BacktestWeek, ...]
     projections: Mapping[str, tuple[ProjectionRow, ...]] = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
+    """Notes from loading (periods left out and why); they carry into the report's warnings."""
 
     def __post_init__(self) -> None:
         if _GAME_SPORT[self.settings.game] != self.sport:
@@ -553,7 +556,7 @@ def run_backtest(
         baseline=_baseline_report(replay, optimal),
         sources=MappingProxyType(reports),
         restricted_to_common=shared is not None,
-        warnings=tuple(warnings),
+        warnings=tuple(dict.fromkeys([*data.warnings, *warnings])),
     )
 
 
@@ -661,6 +664,34 @@ def load_fixture(directory: Path | str, *, settings: LeagueSettings | None = Non
     )
 
 
+FINAL_GAME_LENGTH: Final = timedelta(hours=4)
+"""How long after its last kickoff a period's final game is taken to be over: the actuals of a period are final only
+when the sync that read them ran this long after it. Longer than any NFL or NBA game, so a sync during the last game
+is never mistaken for a final one."""
+
+
+def _unfinished(
+    period: int, actuals: Sequence[ProjectionRow], current: int | None, schedule: ScheduleLike | None
+) -> str | None:
+    """Why ``period``'s stored actuals cannot be replayed as the final result, or ``None`` when nothing says so: the
+    period is the current one or later, or the sync that last wrote its actuals ran before its final game was over (the
+    schedule says when). With no schedule the second cannot be checked and the period is kept."""
+    if current is not None and period >= current:
+        return f"period {period} is the current scoring period ({current}) or later; its actuals are not final"
+    if schedule is None:
+        return None
+    last = last_start(schedule, period)
+    if last is None:
+        return None
+    synced = max(row.as_of for row in actuals)
+    if synced < last + FINAL_GAME_LENGTH:
+        return (
+            f"period {period}'s actuals were last synced {synced:%Y-%m-%d %H:%M} UTC, before its final game "
+            f"({last:%Y-%m-%d %H:%M} UTC) was over; they are truncated"
+        )
+    return None
+
+
 def load_store_data(
     store: Store,
     league: LeagueRow,
@@ -668,14 +699,20 @@ def load_store_data(
     *,
     periods: Iterable[int] | None = None,
     actual_source: str = ESPN,
+    current_period: int | None = None,
+    schedule: ScheduleLike | None = None,
 ) -> BacktestData:
     """Replay the periods the state database holds for ``league``: the manager's roster snapshot, every source's
     stored projected lines (stored ``blend`` rows are left out: blend them fresh with :func:`with_blend`) and
     ``actual_source``'s actual lines. By default the periods are those with both a roster snapshot of our team and at
-    least one actual line, so the weeks that have not been played are skipped. History is only as deep as the sync job
-    captured: ESPN overwrites a past week's projection with the result. Pool players without a ``players`` row are
-    dropped. Raises :class:`BacktestError` when no period qualifies or a rostered player is missing from the
-    ``players`` table."""
+    least one actual line, so the weeks that have not been played are skipped; so are the weeks whose actuals are not
+    final: the current scoring period and later (``current_period``, default the settings' ``current_scoring_period``)
+    and, when the pro ``schedule`` is given, a period whose actuals were last synced before its final game was over
+    (:data:`FINAL_GAME_LENGTH`). Each is reported in the data's ``warnings``, and so is a load that cannot check this
+    for want of a schedule. (A sync run at the turn of each period would capture the final lines; the sync job does
+    not yet.) History is only as deep as the sync job captured: ESPN overwrites a past week's projection with the
+    result. Pool players without a ``players`` row are dropped. Raises :class:`BacktestError` when no period qualifies
+    or a rostered player is missing from the ``players`` table."""
     league_id = league.row_id
     sport = league.sport
     cursor = store.db.all(
@@ -687,6 +724,8 @@ def load_store_data(
     if periods is not None:
         wanted = set(periods)
         candidates = [period for period in candidates if period in wanted]
+    current = current_period if current_period is not None else settings.current_scoring_period or None
+    notes: list[str] = []
     weeks: list[BacktestWeek] = []
     by_source: dict[str, list[ProjectionRow]] = defaultdict(list)
     seen: set[int] = set()
@@ -697,6 +736,10 @@ def load_store_data(
             if row.source == actual_source
         ]
         if not actual_rows:
+            continue
+        unfinished = _unfinished(period, actual_rows, current, schedule)
+        if unfinished is not None:
+            notes.append(f"{unfinished}; left out of the replay")
             continue
         roster = store.rosters.team(league_id, period, league.team_id)
         weeks.append(
@@ -712,10 +755,13 @@ def load_store_data(
             if row.source != BLEND:
                 by_source[row.source].append(row)
                 seen.add(row.espn_id)
+    if schedule is None and weeks:
+        notes.append("no pro schedule: whether each period's actuals were synced after its final game is unchecked")
     if not weeks:
+        left = f" ({'; '.join(notes)})" if notes else ""
         raise BacktestError(
             f"league {league.key!r} has no played period with a roster snapshot and {actual_source} actuals in the "
-            "store; use --fixtures, or let fm sync run through a week first"
+            f"store{left}; use --fixtures, or let fm sync run through a week first"
         )
     rows = {player.espn_id: player for player in store.players.many(sport, seen)}
     unknown = sorted(espn_id for week in weeks for espn_id in week.lineup if espn_id not in rows)
@@ -739,4 +785,5 @@ def load_store_data(
                 for source, source_rows in by_source.items()
             }
         ),
+        warnings=tuple(notes),
     )

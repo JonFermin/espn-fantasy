@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fm.cli import app
+from fm.espn.models import ProSchedule
 from fm.espn.settings import LeagueSettings, load_league_settings
 from fm.eval.backtest import (
     BASELINE,
@@ -410,45 +411,103 @@ def test_load_fixture_errors_name_the_problem(tmp_path: Path) -> None:
 # --- the state database -----------------------------------------------------------------------------------------------
 
 
-def test_store_data_replays_played_periods(settings: LeagueSettings, hand: BacktestData, tmp_path: Path) -> None:
-    with Store.open(tmp_path / "state.db") as store:
-        league = store.leagues.upsert(
-            LeagueRow(key="nfl", sport="nfl", espn_league_id=1234567, season=2026, team_id=1, as_of=AS_OF)
-        )
-        store.teams.upsert(TeamRow(league_id=league.row_id, team_id=1, name="Fixture Team 1", as_of=AS_OF))
-        store.players.upsert_many(hand.players.values())
-        for week in hand.weeks:
-            store.rosters.replace(
-                league.row_id,
-                week.period,
-                1,
-                [
-                    RosterEntryRow(
-                        league_id=league.row_id,
-                        scoring_period_id=week.period,
-                        team_id=1,
-                        espn_id=espn_id,
-                        lineup_slot_id=slot_id,
-                        as_of=AS_OF,
-                    )
-                    for espn_id, slot_id in week.lineup.items()
-                ],
-            )
-            store.projections.upsert_many(
-                ProjectionRow(
-                    sport="nfl",
-                    espn_id=espn_id,
-                    source="espn",
-                    kind="actual",
-                    season=2026,
+def _seed_history(store: Store, hand: BacktestData, *, synced: Mapping[int, datetime] | None = None) -> LeagueRow:
+    """The hand-made weeks as ``fm sync`` stores them; ``synced`` (period -> when its actuals were last written)
+    overrides ``AS_OF``."""
+    league = store.leagues.upsert(
+        LeagueRow(key="nfl", sport="nfl", espn_league_id=1234567, season=2026, team_id=1, as_of=AS_OF)
+    )
+    store.teams.upsert(TeamRow(league_id=league.row_id, team_id=1, name="Fixture Team 1", as_of=AS_OF))
+    store.players.upsert_many(hand.players.values())
+    for week in hand.weeks:
+        store.rosters.replace(
+            league.row_id,
+            week.period,
+            1,
+            [
+                RosterEntryRow(
+                    league_id=league.row_id,
                     scoring_period_id=week.period,
-                    stats=dict(stats),
+                    team_id=1,
+                    espn_id=espn_id,
+                    lineup_slot_id=slot_id,
                     as_of=AS_OF,
                 )
-                for espn_id, stats in week.actuals.items()
+                for espn_id, slot_id in week.lineup.items()
+            ],
+        )
+        store.projections.upsert_many(
+            ProjectionRow(
+                sport="nfl",
+                espn_id=espn_id,
+                source="espn",
+                kind="actual",
+                season=2026,
+                scoring_period_id=week.period,
+                stats=dict(stats),
+                as_of=(synced or {}).get(week.period, AS_OF),
             )
-        for source, source_rows in hand.projections.items():
-            store.projections.upsert_many(row.model_copy(update={"source": source}) for row in source_rows)
+            for espn_id, stats in week.actuals.items()
+        )
+    for source, source_rows in hand.projections.items():
+        store.projections.upsert_many(row.model_copy(update={"source": source}) for row in source_rows)
+    return league
+
+
+def _nfl_schedule(kickoffs: Mapping[int, datetime]) -> ProSchedule:
+    """One game in each period (``kickoffs``: period -> kickoff) for pro team 1."""
+    games = {
+        str(period): [
+            {
+                "id": period,
+                "date": int(at.timestamp() * 1000),
+                "scoringPeriodId": period,
+                "homeProTeamId": 1,
+                "awayProTeamId": 2,
+            }
+        ]
+        for period, at in kickoffs.items()
+    }
+    return ProSchedule.model_validate({"proTeams": [{"id": 1, "proGamesByScoringPeriod": games}]})
+
+
+def test_store_data_leaves_out_the_current_and_unfinished_periods(
+    settings: LeagueSettings, hand: BacktestData, tmp_path: Path
+) -> None:
+    """A period still being played, or synced before its last game ended, holds truncated actuals."""
+    first_game, second_game = datetime(2026, 9, 6, 17, tzinfo=UTC), datetime(2026, 9, 13, 17, tzinfo=UTC)
+    schedule = _nfl_schedule({1: first_game, 2: second_game})
+    with Store.open(tmp_path / "state.db") as store:
+        league = _seed_history(
+            store, hand, synced={1: first_game + timedelta(days=2), 2: second_game + timedelta(hours=1)}
+        )
+        # period 2 was synced an hour after its kickoff: a game in progress
+        loaded = load_store_data(store, league, settings, schedule=schedule)
+        assert loaded.periods == (1,)
+        assert any("period 2's actuals were last synced" in note for note in loaded.warnings)
+        assert not any("no pro schedule" in note for note in loaded.warnings)
+        # the same data is whole once a sync after the final game has run
+        store.projections.upsert_many(
+            row.model_copy(update={"as_of": second_game + timedelta(days=1)})
+            for row in store.projections.for_period("nfl", 2026, 2, kind="actual")
+        )
+        assert load_store_data(store, league, settings, schedule=schedule).periods == (1, 2)
+        # the current period (ESPN's scoringPeriodId in the settings, or given) is never replayed
+        current = load_store_data(store, league, settings, schedule=schedule, current_period=2)
+        assert current.periods == (1,)
+        assert any("period 2 is the current scoring period (2)" in note for note in current.warnings)
+        # without a schedule only the current period can be told: the rest is warned about, not guessed
+        unchecked = load_store_data(store, league, settings)
+        assert unchecked.periods == (1, 2)
+        assert any("no pro schedule" in note for note in unchecked.warnings)
+        assert any("no pro schedule" in note for note in run_backtest(unchecked).warnings)
+        with pytest.raises(BacktestError, match="current scoring period"):
+            load_store_data(store, league, settings, current_period=1)
+
+
+def test_store_data_replays_played_periods(settings: LeagueSettings, hand: BacktestData, tmp_path: Path) -> None:
+    with Store.open(tmp_path / "state.db") as store:
+        league = _seed_history(store, hand)
         # a stored blend is ignored (it is blended fresh), and so is a period nobody has played yet
         store.projections.upsert(
             ProjectionRow(sport="nfl", espn_id=Q, source=BLEND, season=2026, scoring_period_id=1, stats={}, as_of=AS_OF)
