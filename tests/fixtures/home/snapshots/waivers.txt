@@ -20,3 +20,4 @@ nfl: Fixture League (PPR), waivers and free agents for scoring period 4 (as of 2
    9 add   Rico Dowdle (RB)   Trey McBride (TE)    -49.6   169.2  -19.5    278.1   - 2026-10-04 17:00Z
   10 add   Isaiah Likely (TE) Trey McBride (TE)   -117.3   160.8   +0.0    278.1   - 2026-10-04 17:00Z
   replacement level: QB nobody 0.0, RB Jaylen Warren 188.6, WR nobody 0.0, TE Isaiah Likely 160.8, D/ST nobody 0.0, K nobody 0.0, RB/WR/TE Jaylen Warren 188.6
+  warning: nfl: no FAAB bid model (only 0 winning bids in the history (need 5)); bids use the heuristic

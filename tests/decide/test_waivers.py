@@ -26,6 +26,7 @@ from hypothesis import strategies as st
 from fm import paths
 from fm.config import Config, League, Policy
 from fm.decide import registry
+from fm.decide.faab import MIN_WINNING_BIDS, bid_strength, fit_bid_model, modeled_bid
 from fm.decide.waivers import (
     POOL_KIND,
     STARTED_REASON,
@@ -45,7 +46,7 @@ from fm.decide.waivers import (
 )
 from fm.espn.client import FILTER_HEADER, EspnClient
 from fm.espn.ids import FFL
-from fm.espn.models import PlayersView, PoolEntry, ProSchedule
+from fm.espn.models import PlayersView, PoolEntry, ProSchedule, Transaction
 from fm.espn.settings import LeagueSettings, LockType, load_league_settings
 from fm.jobs.sync import sync_league
 from fm.model.projections import ESPN, BlendWeights
@@ -221,6 +222,10 @@ def store(tmp_path: Path) -> Iterator[Store]:
         yield opened
 
 
+NO_BID_MODEL = "nfl: no FAAB bid model (only 0 winning bids in the history (need 5)); bids use the heuristic"
+"""The warning a $100 FAAB league without captured transaction history gets: its claims bid the heuristic."""
+
+
 def fixture_config(**policy: Any) -> Config:
     league = {"key": "nfl", "sport": "nfl", "espn_league_id": LEAGUE_ID, "season": SEASON, "team_id": OUR_TEAM}
     return Config.model_validate({"league": [{**league, "policy": policy}]})
@@ -278,7 +283,7 @@ def test_the_synced_league_proposes_a_claim_timed_to_its_run_and_an_add_before_k
     league = synced(store, config)
     schedule = ProSchedule.model_validate(load(FIXTURES / "sports" / "ffl_pro_schedule_2026.json"))
     decision = decide_waivers(store, config, league, now=NOW, schedule=schedule, weights=EQUAL_WEIGHTS)
-    assert decision.warnings == ()
+    assert decision.warnings == (NO_BID_MODEL,)
     claim, add = decision.moves
     assert (claim.kind, claim.add.name, claim.drop) == (ProposalKind.WAIVER, "Jaylen Warren", None)
     assert claim.deadline == claim.clears_at == datetime(2026, 10, 5, 16, 40, tzinfo=UTC)  # waiverProcessDate
@@ -522,6 +527,7 @@ def test_a_league_whose_roster_lock_type_is_not_mapped_gets_no_move(store: Store
     decision = decide(store, fixture_config())
     assert decision.ranked == () and decision.moves == () and decision.proposals == ()
     assert decision.warnings == (
+        NO_BID_MODEL,
         "nfl: 5 wire candidates skipped: the league's roster lock type FIRSTGAME_WEEKLY is not mapped, so when adds "
         "and drops close is unknown",
     )
@@ -836,6 +842,107 @@ def test_a_league_without_faab_claims_by_priority(store: Store) -> None:
     decision = decide(store, fixture_config(), store_proposals=False)
     claims = [move for move in decision.ranked if move.kind is ProposalKind.WAIVER]
     assert claims and all(move.bid is None and move.bidding is None for move in claims)
+
+
+ZED = 108
+
+
+def two_claims() -> tuple[tuple[int, str, str, int, float, WireStatus, datetime | None, bool], ...]:
+    """The wire with a second claim, worth less than Wally's: only waiver claims are proposed with ``add_drop`` off."""
+    return (*WIRE, (ZED, "Zed Claim", "WR", 24, 12.5, WireStatus.WAIVERS, CLEARS, False))
+
+
+def won(bids: Iterable[int]) -> list[Transaction]:
+    return [
+        Transaction.model_validate({"id": f"w{i}", "type": "WAIVER", "status": "EXECUTED", "bidAmount": bid})
+        for i, bid in enumerate(bids)
+    ]
+
+
+def test_a_second_run_bids_from_what_the_first_runs_open_claim_leaves(store: Store) -> None:
+    """The synced spend does not include a claim still waiting for its run: two runs that each bid from the whole
+    budget could together bid more than the team has."""
+    league = seed(store, wire=two_claims())  # $20 spent: $80 left
+    config = fixture_config(add_drop="off")
+    first = decide(store, config, wire=wire_of(two_claims()), max_moves=1)
+    (first_claim,) = first.moves
+    assert first_claim.add.espn_id == WALLY and first_claim.bid is not None and first_claim.bid > 0
+    assert first_claim.bidding is not None and (first_claim.bidding.budget_left, first_claim.bidding.pledged) == (80, 0)
+    second = decide(store, config, wire=wire_of(two_claims()), max_moves=1)
+    (second_claim,) = second.moves
+    assert second_claim.add.espn_id == ZED  # Wally's claim is open: left alone
+    assert second_claim.bidding is not None
+    assert (second_claim.bidding.budget_left, second_claim.bidding.pledged) == (80 - first_claim.bid, first_claim.bid)
+    assert second_claim.roster_value is not None
+    assert second_claim.bid == heuristic_bid(
+        second_claim.gain, roster_value=second_claim.roster_value, budget_left=80 - first_claim.bid, cap=35
+    )
+    numbers = second.proposals[0].engine_numbers["bid"]
+    assert (numbers["budget_left"], numbers["pledged"]) == (80 - first_claim.bid, first_claim.bid)
+    assert f"nfl: ${first_claim.bid} of the FAAB budget is pledged by open waiver proposals" in second.warnings
+    assert len(store.proposals.open(league.row_id)) == 2
+    assert first_claim.bid + (second_claim.bid or 0) <= 80  # together the open claims never exceed what is left
+
+
+def test_a_claim_past_its_deadline_pledges_nothing(store: Store) -> None:
+    seed(store, wire=two_claims())
+    config = fixture_config(add_drop="off")
+    decide(store, config, wire=wire_of(two_claims()), max_moves=1)
+    later = decide_waivers(
+        store,
+        config,
+        "nfl",
+        now=CLEARS + timedelta(hours=1),  # the run has passed: the claim expires unexecuted
+        wire=wire_of(two_claims()),
+        weights=EQUAL_WEIGHTS,
+        store_proposals=False,
+    )
+    assert all(move.bidding is not None and move.bidding.pledged == 0 for move in later.ranked)
+    assert not any("pledged" in warning for warning in later.warnings)
+
+
+def test_a_league_history_of_winning_bids_prices_the_claims(store: Store) -> None:
+    seed(store, wire=two_claims())
+    config = fixture_config(add_drop="off")
+    history = won([30] * 12)  # this league's winners pay $30 for what they want
+    modeled = decide(store, config, wire=wire_of(two_claims()), history=history, store_proposals=False)
+    heuristic = decide(store, config, wire=wire_of(two_claims()), history=[], store_proposals=False)
+    claim = next(move for move in modeled.ranked if move.add.espn_id == WALLY)
+    base = next(move for move in heuristic.ranked if move.add.espn_id == WALLY)
+    model = fit_bid_model(history, budget=100)
+    assert claim.bidding is not None and claim.bidding.modeled and claim.roster_value is not None
+    assert claim.bid == modeled_bid(model, bid_strength(claim.gain, claim.roster_value), budget_left=80, cap=35)
+    assert (
+        claim.bid is not None and base.bid is not None and claim.bid > base.bid
+    )  # the league pays more than the heuristic
+    assert claim.bid <= 35  # the policy's cap
+    numbers = claim.engine_numbers()["bid"]
+    assert numbers["source"] == "model" and numbers["history"]["winning_bids"] == 12 and numbers["amount"] == claim.bid
+    assert not any("bid model" in warning for warning in modeled.warnings)
+
+
+def test_too_little_history_bids_the_heuristic_and_says_so(store: Store) -> None:
+    seed(store, wire=two_claims())
+    config = fixture_config(add_drop="off")
+    thin = won([30] * (MIN_WINNING_BIDS - 1))
+    decision = decide(store, config, wire=wire_of(two_claims()), history=thin, store_proposals=False)
+    reason = f"only {MIN_WINNING_BIDS - 1} winning bids in the history (need {MIN_WINNING_BIDS})"
+    assert f"nfl: no FAAB bid model ({reason}); bids use the heuristic" in decision.warnings
+    claim = next(move for move in decision.ranked if move.add.espn_id == WALLY)
+    assert claim.bidding is not None and not claim.bidding.modeled and claim.roster_value is not None
+    assert claim.bid == heuristic_bid(claim.gain, roster_value=claim.roster_value, budget_left=80, cap=35)
+    numbers = claim.engine_numbers()["bid"]
+    assert numbers["source"] == "heuristic" and numbers["history"] == {
+        "fitted": False,
+        "reason": reason,
+        "winning_bids": MIN_WINNING_BIDS - 1,
+    }
+
+
+def test_a_league_without_faab_needs_no_bid_model(store: Store) -> None:
+    seed(store, league_settings=real_nfl())
+    decision = decide(store, fixture_config(), history=won([30] * 12), store_proposals=False)
+    assert not any("bid model" in warning for warning in decision.warnings)
 
 
 def test_only_a_configured_nfl_league_is_decided(store: Store) -> None:
