@@ -879,7 +879,7 @@ def test_a_second_run_bids_from_what_the_first_runs_open_claim_leaves(store: Sto
     )
     numbers = second.proposals[0].engine_numbers["bid"]
     assert (numbers["budget_left"], numbers["pledged"]) == (80 - first_claim.bid, first_claim.bid)
-    assert f"nfl: ${first_claim.bid} of the FAAB budget is pledged by open waiver proposals" in second.warnings
+    assert f"nfl: ${first_claim.bid} of the FAAB budget is pledged by open or submitted waiver claims" in second.warnings
     assert len(store.proposals.open(league.row_id)) == 2
     assert first_claim.bid + (second_claim.bid or 0) <= 80  # together the open claims never exceed what is left
 
@@ -899,6 +899,57 @@ def test_a_claim_past_its_deadline_pledges_nothing(store: Store) -> None:
     )
     assert all(move.bidding is not None and move.bidding.pledged == 0 for move in later.ranked)
     assert not any("pledged" in warning for warning in later.warnings)
+
+
+def test_a_submitted_claim_pledges_its_bid_until_a_sync_after_its_run(store: Store) -> None:
+    """The executor's verified claim stays pending on ESPN until the waiver run, and the synced spend excludes it."""
+    league = seed(store, wire=two_claims())
+    config = fixture_config(add_drop="off")
+    first = decide(store, config, wire=wire_of(two_claims()), max_moves=1)
+    (claim,) = first.moves
+    (proposal,) = first.proposals
+    assert claim.bid is not None and claim.bid > 0 and proposal.deadline == CLEARS
+    store.proposals.update(proposal.model_copy(update={"status": "verified"}))
+    assert store.proposals.open(league.row_id) == []
+    second = decide(store, config, wire=wire_of(two_claims()), max_moves=1)
+    (next_claim,) = second.moves
+    assert next_claim.add.espn_id == ZED  # the submitted claim's player is left alone
+    assert next_claim.bidding is not None and next_claim.bidding.pledged == claim.bid
+    assert next_claim.bidding.budget_left == 80 - claim.bid
+    # a sync after the run has read the spend: nothing is pledged any more
+    team = store.teams.get(league.row_id, OUR_TEAM)
+    assert team is not None
+    store.teams.upsert(team.model_copy(update={"as_of": CLEARS + timedelta(hours=1)}))
+    later = decide_waivers(
+        store,
+        config,
+        "nfl",
+        now=CLEARS + timedelta(hours=2),
+        wire=wire_of(two_claims()),
+        weights=EQUAL_WEIGHTS,
+        store_proposals=False,
+    )
+    assert all(move.bidding is not None and move.bidding.pledged == 0 for move in later.ranked)
+
+
+def test_a_submitted_claim_not_yet_synced_after_its_run_still_pledges(store: Store) -> None:
+    league = seed(store, wire=two_claims())
+    config = fixture_config(add_drop="off")
+    first = decide(store, config, wire=wire_of(two_claims()), max_moves=1)
+    (claim,) = first.moves
+    (proposal,) = first.proposals
+    store.proposals.update(proposal.model_copy(update={"status": "verified"}))
+    assert store.teams.get(league.row_id, OUR_TEAM) is not None
+    later = decide_waivers(
+        store,
+        config,
+        "nfl",
+        now=CLEARS + timedelta(hours=1),  # past the run, but no sync has read it yet
+        wire=wire_of(two_claims()),
+        weights=EQUAL_WEIGHTS,
+        store_proposals=False,
+    )
+    assert f"nfl: ${claim.bid} of the FAAB budget is pledged by open or submitted waiver claims" in later.warnings
 
 
 def test_a_league_history_of_winning_bids_prices_the_claims(store: Store) -> None:
