@@ -86,6 +86,7 @@ MODULES = (
     "fm.espn.calendar",
     "fm.decide.lineup_daily",
     "fm.decide.streaming",
+    "fm.decide.trades",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
