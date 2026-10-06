@@ -45,7 +45,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - `fm status`, `fm lineup`, `fm waivers` render recommendations with engine numbers.
   - Phase 5: `fm lineup` renders `fm.decide.lineup.plan_lineup` (expected points, win probability when an opponent outlook is given, the moves and their deadline) and `fm waivers` renders `fm.decide.waivers.decide_waivers`, whose `warnings` name every skipped candidate and why; both draft through `fm.proposals.propose`, so the CLI shows the policy verdict rather than raising.
   AC: the three commands exit 0 against a fixture-backed store (`FM_CONFIG_DIR=tests/fixtures/home`); snapshot tests pass
-- IN PROGRESS [P0] [M] #27: Add/drop and waiver flows — scope: src/fm/browser/flows/add_drop.py, src/fm/browser/flows/waiver.py, src/fm/browser/selectors.py, tests/executor/test_add_drop.py, tests/executor/test_waiver.py — depends: #25 ✓
+- DONE [P0] [M] #27: Add/drop and waiver flows — scope: src/fm/browser/flows/add_drop.py, src/fm/browser/flows/waiver.py, src/fm/browser/selectors.py, tests/executor/test_add_drop.py, tests/executor/test_waiver.py — depends: #25 ✓
   - Free-agent add/drop and waiver claim with bid, plus cancel. API mode with UI fallback, preconditions (NBA adds before the day's first tip; no duplicate claims), and API verification.
   - Executes `AddDropPayload`, `WaiverPayload` and `TransactionCancelPayload` proposals.
   - Duplicate claims: `EspnClient.pending_offers` returns only open claims and offers (`PENDING`, not expired, not named by a CANCEL record; docs/espn-api.md §1 #2). Adds and drops close at the league's roster lock: `plugin.transaction_cutoff(pro_team_id, period, schedule, lock_type=settings.roster_lock_type)` per player moved (the real NBA league's `FIRSTGAME_SCORINGPERIOD` is the day's first tip, the NFL league's `INDIVIDUAL_GAME` each player's kickoff; `UNKNOWN` and ESPN's weekly types raise, so refuse the move rather than guess).
@@ -121,7 +121,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
   - FastMCP read tools (status, lineup, waivers, trade eval) plus `create_proposal`; no execute tool.
   - `create_proposal` is `fm.proposals.propose` (policy verdict and dedupe included); the server exposes no approve or execute path.
   AC: test command passes for tests/test_mcp_server.py (tool list has no write/execute tool; `create_proposal` stores a proposal)
-- TODO [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27
+- TODO [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27 ✓
   - Weekly dry-run of each UI-mode flow against the live site, stopping before the final confirm, so the fallback is known-good when API mode breaks. Alerts on failure.
   AC: test command passes for tests/browser/test_drills.py against a fake page; `uv run fm drill --help` exits 0
 - TODO [P2] [M] #42: NFL opportunity baseline — scope: src/fm/model/baseline_nfl.py, tests/model/test_baseline_nfl.py — depends: #13 ✓, #15 ✓, #33
