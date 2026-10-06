@@ -143,6 +143,6 @@ Key files: src/fm/advisor/{close_call,explain}.py, src/fm/decide/{weekly,trades}
   AC: `uv run fm report` against fixtures writes a markdown report; test command passes
 
 ## Phase 9
-- TODO [P2] [S] #47: Live report card — scope: src/fm/eval/report_card.py, tests/eval/test_report_card.py — depends: #33 ✓, #46 ✓
+- IN PROGRESS [P2] [S] #47: Live report card — scope: src/fm/eval/report_card.py, tests/eval/test_report_card.py — depends: #33 ✓, #46 ✓
   - Weekly lineup efficiency, bench points, and pickup value on real decisions, appended to the report.
   AC: test command passes for tests/eval/test_report_card.py
