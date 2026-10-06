@@ -212,6 +212,17 @@ def effective_setting(kind: ProposalKind | str, policy: Policy) -> Approval:
     return validate_setting(spec.kind, getattr(policy, spec.policy_field))
 
 
+_SETTING_RANK: Mapping[str, int] = {"off": 0, "approve": 1, "auto": 2}
+
+
+def cap_setting(setting: Approval, max_setting: Approval | None) -> Approval:
+    """``setting`` lowered to ``max_setting`` when it ranks above it (``off`` < ``approve`` < ``auto``); a ceiling never
+    raises a setting."""
+    if max_setting is None or _SETTING_RANK[setting] <= _SETTING_RANK[max_setting]:
+        return setting
+    return max_setting
+
+
 def parse_payload(proposal: ProposalRow) -> Payload:
     """The stored payload as the model for the proposal's kind."""
     return kind_spec(proposal.kind).payload_type.model_validate(proposal.payload)
@@ -252,12 +263,16 @@ def evaluate(
     *,
     scoring_period_id: int | None = None,
     deadline: datetime | None = None,
+    max_setting: Approval | None = None,
     now: datetime | None = None,
 ) -> Verdict:
     """Run every policy check and guardrail for a would-be proposal without storing anything.
 
     ``league`` is the store's row for the league the move is in; ``deadline`` is when the move stops making sense
-    (lock, waiver run, first tip). A payload of the wrong type for the kind is a programming error (``TypeError``).
+    (lock, waiver run, first tip). ``max_setting`` is a ceiling a producer puts on the setting (``approve`` for a
+    producer whose moves may never fire on their own): it caps the effective setting before the ``auto`` checks, so a
+    capped proposal needs no deadline, and it never raises one (trade kinds stay approve-only whatever is passed). A
+    payload of the wrong type for the kind is a programming error (``TypeError``).
     """
     spec = kind_spec(kind)
     if not isinstance(payload, spec.payload_type):
@@ -267,7 +282,7 @@ def evaluate(
 
     configured = _allowlisted(config, league, reasons)
     policy = configured.policy if configured is not None else Policy()
-    setting = effective_setting(spec.kind, policy)
+    setting = cap_setting(effective_setting(spec.kind, policy), max_setting)
     if setting == "off":
         reasons.append(f"{spec.kind.value} is off for league {league.key!r} ([league.policy] in config.toml)")
     if setting == "auto" and deadline is None:

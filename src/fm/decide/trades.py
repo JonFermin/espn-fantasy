@@ -1810,6 +1810,49 @@ def rationale(ctx: TradeContext, evaluation: TradeEvaluation) -> str:
     return " ".join(parts)
 
 
+@dataclass(slots=True)
+class TradeEtiquette:
+    """What our trade offers already in the league's queue allow (DESIGN 9.4): the teams with an open offer from us, the
+    open offers by dedupe key, and how many offers count against the weekly cap."""
+
+    open_teams: set[int]
+    open_keys: dict[str, ProposalRow]
+    recent: int
+    weekly_cap: int
+
+    def blocker(self, other_team_id: int, name: str | None = None) -> str | None:
+        """Why an offer to ``other_team_id`` may not be stored now (one open offer a team, the weekly cap), else
+        ``None``."""
+        if other_team_id in self.open_teams:
+            return f"one offer a team: {name or f'team {other_team_id}'} already has one from us"
+        if self.recent >= self.weekly_cap:
+            return f"already at the weekly cap of {self.weekly_cap} offers"
+        return None
+
+
+def trade_etiquette(
+    store: Store, league: LeagueRow, *, at: datetime, weekly_cap: int = WEEKLY_OFFERS
+) -> TradeEtiquette:
+    """Read the league's offer queue: the open ``trade_propose`` proposals and the offers that count toward
+    ``weekly_cap`` (any seven days, whatever their creator, unless rejected or expired)."""
+    open_teams: set[int] = set()
+    open_keys: dict[str, ProposalRow] = {}
+    for row in store.proposals.open(league.row_id):
+        if row.kind != ProposalKind.TRADE_PROPOSE.value:
+            continue
+        other = row.payload.get("other_team_id")
+        if isinstance(other, int):
+            open_teams.add(other)
+        if row.dedupe_key:
+            open_keys[row.dedupe_key] = row
+    recent = [
+        row
+        for row in store.proposals.find(league_id=league.row_id, kinds=[ProposalKind.TRADE_PROPOSE.value])
+        if row.status not in ("rejected", "expired") and at - row.created_at < timedelta(days=7)
+    ]
+    return TradeEtiquette(open_teams, open_keys, len(recent), weekly_cap)
+
+
 def propose_trades(
     store: Store,
     config: Config,
@@ -1831,22 +1874,9 @@ def propose_trades(
     ``blocked``, never raised; with ``dry_run`` policy is evaluated and nothing is stored.
     """
     at = now if now is not None else ctx.now
-    open_teams: set[int] = set()
-    open_keys: dict[str, ProposalRow] = {}
-    for row in store.proposals.open(ctx.league.row_id):
-        if row.kind != ProposalKind.TRADE_PROPOSE.value:
-            continue
-        other = row.payload.get("other_team_id")
-        if isinstance(other, int):
-            open_teams.add(other)
-        if row.dedupe_key:
-            open_keys[row.dedupe_key] = row
-    recent = [
-        row
-        for row in store.proposals.find(league_id=ctx.league.row_id, kinds=[ProposalKind.TRADE_PROPOSE.value])
-        if row.status not in ("rejected", "expired") and at - row.created_at < timedelta(days=7)
-    ]
-    room = min(max_offers, max(0, weekly_cap - len(recent)))
+    etiquette = trade_etiquette(store, ctx.league, at=at, weekly_cap=weekly_cap)
+    open_teams, open_keys = etiquette.open_teams, etiquette.open_keys
+    room = min(max_offers, max(0, weekly_cap - etiquette.recent))
     outcomes: list[ProposedTrade] = []
     fresh = 0
     for evaluation in evaluations:

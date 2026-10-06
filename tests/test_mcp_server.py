@@ -366,6 +366,46 @@ def test_an_mcp_proposal_is_never_left_on_auto(home: Path) -> None:
         assert auto_approve_due(store, now=datetime(2026, 10, 4, 16, 50, tzinfo=UTC)) == []
 
 
+def test_a_lineup_without_a_deadline_is_stored_in_an_auto_league_instead_of_refused(home: Path) -> None:
+    """The ceiling lowers auto to approve before the auto checks, so no deadline is demanded of a suggestion."""
+    out = call(
+        "create_proposal",
+        league="nfl",
+        kind="bench_inactive",
+        payload={"moves": [{"espn_id": SHAHEED, "from_slot_id": BENCH_SLOT, "to_slot_id": OPEN_SLOT}]},
+        rationale="Start Shaheed.",
+        scoring_period_id=4,
+    )
+    assert out["status"] == "proposed", out
+    assert out["proposal"]["policy"] == "approve" and "never approved on its own" in out["note"]
+    assert out["proposal"]["deadline"] is None
+    assert stored(home) == [("bench_inactive", "proposed", "approve", "mcp")]
+
+
+def offer(team: int, *, give: int = ALLEGIER, get: int = BARKLEY) -> dict[str, Any]:
+    return {
+        "league": "nfl",
+        "kind": "trade_propose",
+        "payload": {"other_team_id": team, "give_espn_ids": [give], "get_espn_ids": [get]},
+        "rationale": f"offer to team {team}",
+    }
+
+
+def test_an_mcp_trade_offer_follows_one_offer_a_team_and_the_weekly_cap(home: Path) -> None:
+    assert call("create_proposal", **offer(2))["status"] == "proposed"
+    # a different deal to the same team: one open offer a team
+    second = call("create_proposal", **offer(2, give=SHAHEED, get=DOWDLE))
+    assert second["status"] == "blocked" and any("one offer a team" in reason for reason in second["reasons"])
+    # asking for the open one again still returns it
+    assert call("create_proposal", **offer(2))["status"] == "existing"
+    assert call("create_proposal", **offer(3))["status"] == "proposed"
+    assert call("create_proposal", **offer(4))["status"] == "proposed"
+    # three offers in the week: the cap of WEEKLY_OFFERS is reached, whatever the team
+    fourth = call("create_proposal", **offer(5))
+    assert fourth["status"] == "blocked" and any("weekly cap of 3" in reason for reason in fourth["reasons"])
+    assert [row[0] for row in stored(home)] == ["trade_propose"] * 3
+
+
 # --- the real entry point ---------------------------------------------------------------------------------------------
 
 
