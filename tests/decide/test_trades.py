@@ -70,6 +70,7 @@ from fm.store import (
     LeagueSettingsRow,
     PlayerRow,
     ProjectionRow,
+    ProposalRow,
     RosterEntryRow,
     Store,
     TeamRow,
@@ -255,7 +256,10 @@ def seed_league(
         (9006, "Free D/ST", "D/ST", 3.0),
     ]
     store.players.upsert_many(
-        [player_row(espn_id, name, position, 40 + team) for team, name, position, _, espn_id, _ in people]
+        [
+            player_row(espn_id, name, position, 40 + team, injury="OUT" if espn_id in benched else None)
+            for team, name, position, _, espn_id, _ in people
+        ]
         + [player_row(espn_id, name, position, 60 + n) for n, (espn_id, name, position, _) in enumerate(wire)]
     )
     rows: list[ProjectionRow] = []
@@ -947,6 +951,76 @@ def test_a_player_in_the_ir_slot_lands_in_ir_when_there_is_room(store: Store) ->
     assert legality.legal and any("is in an IR slot" in note for note in legality.notes)
     full = context(store, ir=[pid(2, "RB4"), pid(US, "WR4")])  # one IR slot each, ours is taken
     assert check_legality(full, TradeSpec(2, (pid(US, "TE2"),), (pid(2, "RB4"),))).legal
+
+
+def heal(store: Store, team: int, name: str, position: str) -> None:
+    """The player is no longer injured as far as the last sync can tell (``seed_league`` makes IR players OUT)."""
+    store.players.upsert(player_row(pid(team, name), f"T{team} {name}", position, 40 + team))
+
+
+def fresh_context(store: Store, league: LeagueRow) -> TradeContext:
+    return load_trade_context(
+        store, league, now=NOW, matchups=schedule_view(ppr()), market=FakeMarket(), weights=EQUAL_WEIGHTS
+    )
+
+
+def test_a_team_holding_an_ir_ineligible_player_in_an_ir_slot_cannot_trade(store: Store) -> None:
+    league = seed_league(store, ir=[pid(2, "RB4")])
+    heal(store, 2, "RB4", "RB")  # healthy but still parked in IR: ESPN blocks that team's moves
+    ctx = fresh_context(store, league)
+    spec = TradeSpec(2, (pid(US, "RB2"),), (pid(2, "TE1"),))  # a deal that does not touch him
+    problems = check_legality(ctx, spec).problems
+    assert (
+        len(problems) == 1 and "Team 2 holds T2 RB4 in an IR slot without an IR-eligible injury status" in problems[0]
+    )
+    # ours is flagged the same way
+    ours = seed_league(store, ir=[pid(US, "WR4")])
+    heal(store, US, "WR4", "WR")
+    assert any("we hold T3 WR4" in why for why in check_legality(fresh_context(store, ours), spec).problems)
+
+
+def test_a_player_who_is_out_may_sit_in_ir_without_blocking_the_team(store: Store) -> None:
+    ctx = context(store, ir=[pid(2, "RB4")])
+    assert check_legality(ctx, TradeSpec(2, (pid(US, "RB2"),), (pid(2, "TE1"),))).legal
+
+
+def test_an_incoming_player_lands_in_ir_only_if_his_injury_status_allows_it(store: Store) -> None:
+    ctx = context(store, ir=[pid(2, "RB4")])  # OUT, in team 2's IR slot
+    mine = trades_module._after(ctx, US, (pid(US, "TE2"),), (pid(2, "RB4"),))
+    assert pid(2, "RB4") in mine.ir and pid(2, "RB4") not in mine.playing
+    healed = replace(ctx, players={**ctx.players, pid(2, "RB4"): player_row(pid(2, "RB4"), "T2 RB4", "RB", 42)})
+    after = trades_module._after(healed, US, (pid(US, "TE2"),), (pid(2, "RB4"),))
+    assert pid(2, "RB4") not in after.ir and pid(2, "RB4") in after.everyone  # he takes a roster spot: no IR for him
+    assert after.held == mine.held + 1
+    assert not healed.ir_eligible(pid(2, "RB4")) and ctx.ir_eligible(pid(2, "RB4"))
+    assert not ctx.ir_eligible(123456789)  # a player the store does not know
+
+
+def test_the_leagues_trade_limit_stops_us_once_it_is_used(store: Store) -> None:
+    capped = ppr().model_copy(update={"trade": ppr().trade.model_copy(update={"max_trades": 1})})
+    league = seed_league(store, settings=capped)
+    spec = swap_a_running_back_for_a_tight_end()
+    before = check_legality(fresh_context(store, league), spec)
+    assert before.legal and any("allows 1 trades a season" in note for note in before.notes)
+    store.proposals.insert(
+        ProposalRow(
+            league_id=league.row_id,
+            kind=ProposalKind.TRADE_ACCEPT.value,
+            status="verified",
+            policy="approve",
+            payload={"espn_transaction_id": "t1"},
+            created_by="test",
+            created_at=NOW,
+        )
+    )
+    used = fresh_context(store, league)
+    assert used.trades_made == 1
+    assert check_legality(used, spec).problems == ("we have made 1 trades and the league allows 1 a season",)
+
+
+def test_a_league_without_a_trade_limit_says_nothing_about_one(store: Store) -> None:
+    legality = check_legality(context(store), swap_a_running_back_for_a_tight_end())
+    assert legality.legal and not any("trades a season" in note for note in legality.notes)
 
 
 # --- finding deals ----------------------------------------------------------------------------------------------------

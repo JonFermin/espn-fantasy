@@ -37,7 +37,10 @@ says so.
 
 **Legality** (:func:`check_legality`) is read from the league's settings: the trade deadline, roster size (active plus
 bench slots, with IR separate) with the players each side would have to drop, per-position limits, the roster lock
-(a player whose game has started under ``rosterLocktimeType``), untouchables, and IR placement. A trade that needs
+(a player whose game has started under ``rosterLocktimeType``, judged in the period current at ``now``),
+untouchables, the season's trade limit (``tradeSettings.max``, against the trades we know we made), and IR: a team
+holding an IR-ineligible player (:data:`IR_ELIGIBLE`) in an IR slot is blocked by ESPN, and a player arriving from an IR
+slot lands in one only if his injury status allows it. A trade that needs
 a drop on our side is legal, but it cannot be proposed (a :class:`TradePayload` carries no drop), so
 :func:`find_trades` leaves it out unless asked.
 
@@ -72,7 +75,7 @@ from typing import Any, Final, Protocol
 
 from fm.config import Config
 from fm.espn.calendar import league_matchup_days, matchup_period_of
-from fm.espn.ids import Game
+from fm.espn.ids import Game, InjuryStatus
 from fm.espn.models import MatchupsView
 from fm.espn.settings import LeagueSettings, LockType, ScoringType
 from fm.model.availability import assess
@@ -136,6 +139,10 @@ change in rest-of-season value in starter seasons."""
 ACCEPT: Final = "accept"
 DECLINE: Final = "decline"
 COUNTER: Final = "counter"
+IR_ELIGIBLE: Final = frozenset({InjuryStatus.OUT, InjuryStatus.INJURY_RESERVE, InjuryStatus.SUSPENSION})
+"""The injury designations that may sit in an IR slot. ESPN's ``mSettings`` carries no IR rule (only the slot counts),
+so this is the rule assumed for every league: out, injury reserve, suspended. A player ESPN lists otherwise (active,
+questionable, day to day, unknown) is IR-ineligible, and a team that holds one in an IR slot cannot make moves."""
 EDGE_TITLE: Final = 0.002
 """The change in title odds below which a deal is a wash."""
 EDGE_ROS: Final = 0.02
@@ -691,6 +698,9 @@ class TradeContext:
     warnings: tuple[str, ...] = ()
     current_period: int | None = None
     """The scoring period current at ``now`` by the pro schedule (``None``: no schedule, or none at ``now``)."""
+    trades_made: int = 0
+    """Trades we are known to have made this season (verified ``trade_accept`` proposals); trades made outside this
+    tool, and offers of ours another manager accepted, are not seen."""
     cache: _Cache = field(default_factory=_Cache, repr=False, compare=False)
 
     @property
@@ -698,6 +708,12 @@ class TradeContext:
         """The period roster locks, transaction cutoffs and proposal weeks are judged in: the current one, which is
         ``period`` unless the last sync is from an earlier period (a stale period's cutoffs are all in the past)."""
         return self.current_period if self.current_period is not None else self.period
+
+    def ir_eligible(self, espn_id: int) -> bool:
+        """Whether the player's injury designation lets him sit in an IR slot (:data:`IR_ELIGIBLE`); a player the store
+        does not know is not."""
+        player = self.players.get(espn_id)
+        return player is not None and self.settings.ids.injury_status(player.injury_status) in IR_ELIGIBLE
 
     @property
     def other_teams(self) -> tuple[int, ...]:
@@ -894,6 +910,11 @@ def load_trade_context(
         acceptance=acceptance,
         warnings=tuple(warnings),
         current_period=current_period,
+        trades_made=len(
+            store.proposals.find(
+                league_id=league.row_id, kinds=[ProposalKind.TRADE_ACCEPT.value], statuses=["verified"]
+            )
+        ),
     )
 
 
@@ -1221,14 +1242,15 @@ def _after(
     ctx: TradeContext, team_id: int, out: Collection[int], incoming: Sequence[int], dropped: Collection[int] = ()
 ) -> _After:
     """``team_id``'s roster once ``out`` and ``dropped`` leave and ``incoming`` arrive. A player who was in someone's IR
-    slot goes to an IR slot here when the team has one free, else he takes a roster spot."""
+    slot goes to an IR slot here when the team has one free and he is IR-eligible by his injury designation
+    (:data:`IR_ELIGIBLE`; he may have healed since), else he takes a roster spot."""
     gone = set(out) | set(dropped)
     everyone = (ctx.rosters.get(team_id, frozenset()) - gone) | set(incoming)
     ir_kept = {espn_id for espn_id in ctx.ir.get(team_id, frozenset()) if espn_id not in gone}
     room = ctx.settings.ir_count - len(ir_kept)
     in_ir_elsewhere = {espn_id for held in ctx.ir.values() for espn_id in held}
     for espn_id in sorted(incoming):
-        if room > 0 and espn_id in in_ir_elsewhere:
+        if room > 0 and espn_id in in_ir_elsewhere and ctx.ir_eligible(espn_id):
             ir_kept.add(espn_id)
             room -= 1
     ir = frozenset(ir_kept)
@@ -1323,6 +1345,23 @@ def check_legality(ctx: TradeContext, spec: TradeSpec) -> TradeLegality:
             problems.append(f"{ctx.name(espn_id)} is untouchable (policy)")
     for espn_id, why in _locked_players(ctx, (*spec.give, *spec.get)).items():
         problems.append(f"{ctx.name(espn_id)} is locked: {why}")
+    for team in (ctx.team_id, other):
+        stuck = sorted(espn_id for espn_id in ctx.ir.get(team, frozenset()) if not ctx.ir_eligible(espn_id))
+        if stuck:
+            name = "we hold" if team == ctx.team_id else f"{ctx.team_name(team)} holds"
+            problems.append(
+                f"{name} {_names(ctx, stuck)} in an IR slot without an IR-eligible injury status, and ESPN blocks "
+                "that team's moves until it is fixed"
+            )
+    limit_trades = ctx.settings.trade.max_trades
+    if limit_trades is not None:
+        if ctx.trades_made >= limit_trades:
+            problems.append(f"we have made {ctx.trades_made} trades and the league allows {limit_trades} a season")
+        else:
+            notes.append(
+                f"the league allows {limit_trades} trades a season; {ctx.trades_made} made through this tool are "
+                f"counted, {other}'s count is unknown"
+            )
     after_ours = _after(ctx, ctx.team_id, spec.give, spec.get)
     after_theirs = _after(ctx, other, spec.get, spec.give)
     drops: dict[int, tuple[int, ...]] = {}
