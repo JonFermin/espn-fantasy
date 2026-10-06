@@ -31,7 +31,8 @@ inactive, has no team or no game; whether he has a game comes from the pro sched
 **Locks** are hard constraints: a locked player (ESPN's ``lineupLocked`` at the last sync, or his lock time under
 ``LeagueSettings.lineup_lock_type`` has passed) keeps his slot and the slot stays his; a player on IR stays there. A
 lock type that locks every team at the day's first start (``FIRSTGAME_*``) locks a team without a game with the rest,
-as in :mod:`fm.decide.lineup`; per-game locks never lock one. An ``UNKNOWN`` lock type is refused (:class:`DailyLineupError`), never guessed.
+as in :mod:`fm.decide.lineup`; per-game locks never lock one. An ``UNKNOWN`` lock type is refused
+(:class:`DailyLineupError`), never guessed.
 
 **Late swaps** (DESIGN 8.2). Among lineups worth the same, the target day's slot arrangement is chosen to value the
 late-swap pivots (:func:`fm.model.availability.plan_pivots`): a questionable starter is slotted where a later bench
