@@ -831,6 +831,24 @@ def test_the_loader_builds_rows_by_espn_id_with_provenance(store: Store) -> None
     assert_accounted(loader.explanations[espn_of(101)])
 
 
+def test_replaying_a_past_day_is_degraded_because_talent_splits_and_designations_are_read_as_of_now(
+    store: Store,
+) -> None:
+    loader, talent, *_ = loader_for()
+    talent.clock = lambda: NOW + timedelta(days=3)  # type: ignore[method-assign,assignment]  # period 2 is 2026-11-20
+    replay = loader(store, SEASON, 2, {})
+    assert replay.degraded and replay.data  # still loaded, but flagged
+    assert any(
+        "before today (2026-11-23)" in warning and "can see the future" in warning for warning in replay.warnings
+    )
+    # the same day on its own day, or a day still ahead, is clean
+    clean, *_ = loader_for()
+    assert not clean(store, SEASON, 2, {}).degraded
+    ahead, talent, *_ = loader_for()
+    talent.clock = lambda: NOW - timedelta(days=1)  # type: ignore[method-assign,assignment]
+    assert not ahead(store, SEASON, 2, {}).degraded
+
+
 def test_players_who_may_be_out_shape_the_day_and_pull_their_teams_on_off_split(store: Store) -> None:
     store.players.upsert(PlayerRow(sport="nba", espn_id=espn_of(101), full_name="Star", injury_status="OUT", as_of=NOW))
     loader, _, stats, _ = loader_for()
