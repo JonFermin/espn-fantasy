@@ -73,7 +73,7 @@ SIGNED_OUT_PAGE = (
     "says Log in Required: the browser profile has the API cookies but no ESPN web sign-in, so the click-through "
     "cannot run (sign in on fantasy.espn.com in the fm browser profile; API mode does not need it)"
 )
-SAVE_FAILED = "ESPN's page reported that the save failed (Oops! Looks like something went wrong)"
+SAVE_FAILED_MESSAGE = "ESPN's page reported that the save failed (Oops! Looks like something went wrong)"
 """What the UI walk raises after its confirm when the page shows the failure text; the executor then re-reads."""
 
 
@@ -378,7 +378,7 @@ def open_page(page: PageLike, url: str, anchor: selectors.Selector, what: str) -
 def check_saved(page: PageLike) -> None:
     """After the confirm click: the page must not show ESPN's failure text."""
     if selectors.SAVE_FAILED.locate(page).count():
-        raise RuntimeError(SAVE_FAILED)
+        raise RuntimeError(SAVE_FAILED_MESSAGE)
 
 
 def roster_fix_walk[P: Payload](

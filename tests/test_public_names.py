@@ -71,6 +71,14 @@ MODULES = (
     "fm.executor.transport",
     "fm.executor.ui",
     "fm.executor.verify",
+    "fm.model.simulate",
+    "fm.browser.flows.add_drop",
+    "fm.browser.flows.waiver",
+    "fm.jobs.tick",
+    "fm.jobs.deadlines",
+    "fm.jobs.scheduler_windows",
+    "fm.advisor.client",
+    "fm.advisor.news_triage",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
