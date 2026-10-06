@@ -133,11 +133,11 @@ Key files: src/fm/advisor/{close_call,explain}.py, src/fm/decide/{weekly,trades}
   - Open offers: ESPN leaves an expired offer `PENDING` and closes it with a separate CANCEL record that still says `isPending`; `EspnClient.pending_offers` keeps only open ones (docs/espn-api.md §1 #2). Offers come from `mTransactions2`, not `mPendingTransactions`, and expire 48 h after `proposedDate`.
   - Phase 5: `fm.browser.transactions` (#25) builds the TRADE item and the envelope (`isLeagueManager` false, impossible combinations refused) and `fm.browser.selectors` is the registry to extend; `fm.model.relevance` (#23) already reads open trade proposals for its trade targets.
   AC: test command passes for both tests (fake page; `auto` policy rejected for trade kinds; duplicate offers and locked-player trades blocked)
-- TODO [P1] [M] #45: Trade pitch and weekly strategist workers — scope: src/fm/advisor/pitch.py, src/fm/advisor/strategist.py, tests/advisor/test_pitch.py, tests/advisor/test_strategist.py — depends: #30 ✓, #32 ✓, #38 ✓
+- IN PROGRESS [P1] [M] #45: Trade pitch and weekly strategist workers — scope: src/fm/advisor/pitch.py, src/fm/advisor/strategist.py, tests/advisor/test_pitch.py, tests/advisor/test_strategist.py — depends: #30 ✓, #32 ✓, #38 ✓
   - Pitch draft per approved trade idea.
   - Weekly priorities, punts, and targets → proposals.
   AC: test command passes for both tests with a stubbed client
-- TODO [P1] [S] #46: Weekly report — scope: src/fm/jobs/report.py, src/fm/commands/report.py, tests/jobs/test_report.py — depends: #16 ✓, #18 ✓, #36 ✓
+- IN PROGRESS [P1] [S] #46: Weekly report — scope: src/fm/jobs/report.py, src/fm/commands/report.py, tests/jobs/test_report.py — depends: #16 ✓, #18 ✓, #36 ✓
   - `fm report`: matchup outlook, playoff odds, moves made, upcoming deadlines; markdown + phone channel.
   - Phone: `fm.notify.send_report(channel, title, body)` on `fm.notify.open_channel(config)`; long reports are split automatically.
   AC: `uv run fm report` against fixtures writes a markdown report; test command passes
