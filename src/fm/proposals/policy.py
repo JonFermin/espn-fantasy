@@ -21,11 +21,12 @@ of them at once:
 - the deadline has not passed; the ``fm pause`` switch is not thrown;
 - untouchables: no player on the policy's list is dropped or given away;
 - weekly cap: ``max_transactions_per_week`` counts the league's add/drop and waiver proposals that are pending or went
-  through: those in the same matchup period as the new one when a scoring period is known and the synced settings
-  list that matchup's scoring periods, plus any stored without a scoring period in the trailing seven days (a producer
-  that omits the period cannot free the week for one that supplies it); otherwise every one in the trailing seven
-  days. ESPN lists NBA matchups as weeks, not days, so NBA leagues use the trailing seven days until ESPN's calendar
-  maps the weeks to days (ROADMAP #31);
+  through: those in the same matchup period as the new one when a scoring period is known and the matchup's scoring
+  periods can be told, plus any stored without a scoring period in the trailing seven days (a producer that omits the
+  period cannot free the week for one that supplies it); otherwise every one in the trailing seven days. The
+  matchup's scoring periods are the synced settings' own where they list scoring periods, and ESPN's season calendar
+  (:mod:`fm.espn.calendar`) resolves the weeks the NBA league lists them as; a season without a calendar file uses the
+  trailing seven days;
 - FAAB cap: a bid is at most ``max_faab_pct_per_bid`` of the league's season budget (from the synced settings);
 - trade deadline: once settings are synced, proposing or accepting a trade must happen before the league's trade
   deadline; declining or withdrawing an offer stays allowed, and the executor re-checks the live league either way.
@@ -45,6 +46,7 @@ from fractions import Fraction
 from typing import cast
 
 from fm.config import Approval, Config, League, Policy, Sport
+from fm.espn.calendar import matchup_scoring_periods
 from fm.espn.settings import LeagueSettings
 from fm.proposals.pause import pause_state
 from fm.proposals.payloads import (
@@ -388,11 +390,12 @@ def acquisitions_this_week(
 ) -> int:
     """How many transaction slots the league's add/drop and waiver proposals hold this week (``COUNTED_STATUSES``).
 
-    The week is the matchup period containing ``scoring_period_id`` when the synced settings list that matchup's
-    scoring periods (``ScheduleSettings.lists_scoring_periods``: NFL weeks), plus the rows stored without a scoring
-    period in the seven days before ``now``. Otherwise it is every row created in the seven days before ``now``: without
-    settings or a period, and for an NBA league, whose matchups ESPN lists as weeks of days that only its web-client
-    calendar maps (ROADMAP #31); reading a week id as a day would count one day's moves against a seven-day cap.
+    The week is the matchup period containing ``scoring_period_id`` when its scoring periods can be told, plus the rows
+    stored without a scoring period in the seven days before ``now``: the synced settings list them
+    (``ScheduleSettings.lists_scoring_periods``: NFL weeks) or ESPN's season calendar resolves them
+    (:func:`fm.espn.calendar.matchup_scoring_periods`: the real NBA league's weekly matchups, days 1-6, 7-13, ...).
+    Otherwise it is every row created in the seven days before ``now``: without settings, a period or a calendar for the
+    season; reading a week id as a day would count one day's moves against a seven-day cap.
     """
     rows = store.proposals.find(
         league_id=league.row_id, statuses=COUNTED_STATUSES, kinds=[kind.value for kind in ACQUISITION_KINDS]
@@ -412,8 +415,7 @@ def week_filter(
     """
     since = as_utc(now) - ROLLING_WEEK
     if settings is not None and scoring_period_id is not None:
-        matchup = settings.schedule.matchup_period_for(scoring_period_id)
-        listed = None if matchup is None else settings.schedule.scoring_periods(matchup)
+        listed = matchup_scoring_periods(settings, scoring_period_id)
         if listed is not None:
             periods = frozenset(listed)
             return lambda row: (
