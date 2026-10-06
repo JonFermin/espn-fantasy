@@ -79,6 +79,8 @@ MODULES = (
     "fm.jobs.scheduler_windows",
     "fm.advisor.client",
     "fm.advisor.news_triage",
+    "fm.advisor.close_call",
+    "fm.advisor.explain",
     "fm.browser.canary",
     "fm.decide.faab",
     "fm.decide.rankings",
