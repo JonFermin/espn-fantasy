@@ -82,15 +82,15 @@ Open follow-ups:
 Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm/render/, src/fm/browser/flows/{add_drop,waiver}.py, src/fm/browser/canary.py, src/fm/jobs/{tick,deadlines,scheduler_windows}.py, src/fm/advisor/{client,news_triage}.py, src/fm/model/simulate.py, src/fm/espn/calendar.py, data/calendars/, src/fm/decide/{lineup_daily,streaming,faab,rankings}.py, src/fm/eval/backtest.py, tests/fixtures/{home,backtest}/. 2148 tests. Skipped: none. (10/10 tasks)
 
 ## Phase 7
-- TODO [P1] [M] #36: Close-call and explain workers — scope: src/fm/advisor/close_call.py, src/fm/advisor/explain.py, tests/advisor/test_close_call.py, tests/advisor/test_explain.py — depends: #20 ✓, #30 ✓
+- IN PROGRESS [P1] [M] #36: Close-call and explain workers — scope: src/fm/advisor/close_call.py, src/fm/advisor/explain.py, tests/advisor/test_close_call.py, tests/advisor/test_explain.py — depends: #20 ✓, #30 ✓
   - Near-tie tie-break with the web search tool over a domain allowlist and cited sources.
   - Rationale per non-trivial proposal; trivial moves use templates.
   AC: test command passes for both tests with a stubbed client (allowlist configured; templated path makes no API call)
-- TODO [P1] [M] #37: NBA category planner — scope: src/fm/decide/weekly.py, tests/decide/test_weekly.py — depends: #24 ✓, #32 ✓
+- IN PROGRESS [P1] [M] #37: NBA category planner — scope: src/fm/decide/weekly.py, tests/decide/test_weekly.py — depends: #24 ✓, #32 ✓
   - Weekly per-category win probabilities → targets, punts (H-score-style roster-aware re-weighting, arXiv:2409.09884), and streamer stat targets.
   - Phase 5: `CategoryModel.stat(c)` (μ, σ, τ), `with_tau` / `within_player_sd` and `punt_weights` (#24) are the planner's inputs.
   AC: test command passes for tests/decide/test_weekly.py (punt recommended below the threshold win probability)
-- TODO [P1] [L] #38: Trade evaluator and finder — scope: src/fm/decide/trades.py, src/fm/commands/trade.py, tests/decide/test_trades.py — depends: #12 ✓, #32 ✓
+- IN PROGRESS [P1] [L] #38: Trade evaluator and finder — scope: src/fm/decide/trades.py, src/fm/commands/trade.py, tests/decide/test_trades.py — depends: #12 ✓, #32 ✓
   - `fm trade eval|find`: Δ ROS value for both sides, Δ title odds, legality.
   - Enumerates 1:1, 2:1, and 2:2 deals per opponent; screens, then re-scores; ranks by Δ title odds × P(accept), where P(accept) uses market values + their needs.
   - Market values: `MarketSource.market_values(settings, rank_type=<"PPR"/"STANDARD"/"SUPERFLEX" for ffl, "STANDARD"/"ROTO" for fba>)` takes the game, the season and FantasyCalc's league shape from the league's `LeagueSettings` (`LeagueShape.from_settings`: team count, REC scoring points, starting slots a QB can fill, so superflex/2-QB leagues ask for 2 QBs; there is no default shape); derive `rank_type` from `LeagueSettings` too, never a literal. FantasyCalc is skipped for fba and every rank type stays in `MarketValue.espn_ranks`.
@@ -103,10 +103,10 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   - FastMCP read tools (status, lineup, waivers, trade eval) plus `create_proposal`; no execute tool.
   - `create_proposal` is `fm.proposals.propose` (policy verdict and dedupe included); the server exposes no approve or execute path.
   AC: test command passes for tests/test_mcp_server.py (tool list has no write/execute tool; `create_proposal` stores a proposal)
-- TODO [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27 ✓
+- IN PROGRESS [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27 ✓
   - Weekly dry-run of each UI-mode flow against the live site, stopping before the final confirm, so the fallback is known-good when API mode breaks. Alerts on failure.
   AC: test command passes for tests/browser/test_drills.py against a fake page; `uv run fm drill --help` exits 0
-- TODO [P2] [M] #42: NFL opportunity baseline — scope: src/fm/model/baseline_nfl.py, tests/model/test_baseline_nfl.py — depends: #13 ✓, #15 ✓, #33 ✓
+- IN PROGRESS [P2] [M] #42: NFL opportunity baseline — scope: src/fm/model/baseline_nfl.py, tests/model/test_baseline_nfl.py — depends: #13 ✓, #15 ✓, #33 ✓
   - Shares × implied team total × regressed efficiency, registered as a projection source.
   - ESPN removes the scoreboard `odds` block at kickoff, so implied team totals must be captured while `ScoreboardGame.state == "pre"` (the scoreboard TTL is 10 minutes); have the sync job (#16) snapshot pregame lines if the baseline needs them after the fact.
   AC: test command passes; the backtest on fixtures shows the blend with the baseline no worse than without it
