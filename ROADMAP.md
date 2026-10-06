@@ -81,41 +81,48 @@ Open follow-ups:
 
 Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm/render/, src/fm/browser/flows/{add_drop,waiver}.py, src/fm/browser/canary.py, src/fm/jobs/{tick,deadlines,scheduler_windows}.py, src/fm/advisor/{client,news_triage}.py, src/fm/model/simulate.py, src/fm/espn/calendar.py, data/calendars/, src/fm/decide/{lineup_daily,streaming,faab,rankings}.py, src/fm/eval/backtest.py, tests/fixtures/{home,backtest}/. 2148 tests. Skipped: none. (10/10 tasks)
 
-## Phase 7
-- DONE [P1] [M] #36: Close-call and explain workers — scope: src/fm/advisor/close_call.py, src/fm/advisor/explain.py, tests/advisor/test_close_call.py, tests/advisor/test_explain.py — depends: #20 ✓, #30 ✓
-  - Near-tie tie-break with the web search tool over a domain allowlist and cited sources.
-  - Rationale per non-trivial proposal; trivial moves use templates.
-  AC: test command passes for both tests with a stubbed client (allowlist configured; templated path makes no API call)
-- DONE [P1] [M] #37: NBA category planner — scope: src/fm/decide/weekly.py, tests/decide/test_weekly.py — depends: #24 ✓, #32 ✓
-  - Weekly per-category win probabilities → targets, punts (H-score-style roster-aware re-weighting, arXiv:2409.09884), and streamer stat targets.
-  - Phase 5: `CategoryModel.stat(c)` (μ, σ, τ), `with_tau` / `within_player_sd` and `punt_weights` (#24) are the planner's inputs.
-  AC: test command passes for tests/decide/test_weekly.py (punt recommended below the threshold win probability)
-- DONE [P1] [L] #38: Trade evaluator and finder — scope: src/fm/decide/trades.py, src/fm/commands/trade.py, tests/decide/test_trades.py — depends: #12 ✓, #32 ✓
-  - `fm trade eval|find`: Δ ROS value for both sides, Δ title odds, legality.
-  - Enumerates 1:1, 2:1, and 2:2 deals per opponent; screens, then re-scores; ranks by Δ title odds × P(accept), where P(accept) uses market values + their needs.
-  - Market values: `MarketSource.market_values(settings, rank_type=<"PPR"/"STANDARD"/"SUPERFLEX" for ffl, "STANDARD"/"ROTO" for fba>)` takes the game, the season and FantasyCalc's league shape from the league's `LeagueSettings` (`LeagueShape.from_settings`: team count, REC scoring points, starting slots a QB can fill, so superflex/2-QB leagues ask for 2 QBs; there is no default shape); derive `rank_type` from `LeagueSettings` too, never a literal. FantasyCalc is skipped for fba and every rank type stays in `MarketValue.espn_ranks`.
-  - Phase 5: availability rows keep `inputs["news"]["before"]`, the `p_active` without Claude signals (#22); value trades on it so a Claude-only signal never triggers a trade (CLAUDE.md). `fm.model.valuation.load_valuation(include_rostered=True)` (#21) values every player on any roster (`LeagueValuation.rostered`).
-  AC: test command passes for tests/decide/test_trades.py (symmetric trade ≈ 0 Δ; finder returns only legal trades in ranked order); `uv run fm trade eval --help` exits 0
-- DONE [P2] [S] #39: Blend weight tuning — scope: src/fm/eval/tune.py, data/blend_weights.toml, tests/eval/test_tune.py — depends: #33 ✓
-  - Fits per-(source, position) weights on held-out weeks.
-  AC: test command passes for tests/eval/test_tune.py (held-out MAE ≤ equal-weight MAE on fixtures)
-- DONE [P2] [M] #40: MCP server — scope: src/fm/mcp_server.py, tests/test_mcp_server.py — depends: #8 ✓, #26 ✓
-  - FastMCP read tools (status, lineup, waivers, trade eval) plus `create_proposal`; no execute tool.
-  - `create_proposal` is `fm.proposals.propose` (policy verdict and dedupe included); the server exposes no approve or execute path.
-  AC: test command passes for tests/test_mcp_server.py (tool list has no write/execute tool; `create_proposal` stores a proposal)
-- DONE [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27 ✓
-  - Weekly dry-run of each UI-mode flow against the live site, stopping before the final confirm, so the fallback is known-good when API mode breaks. Alerts on failure.
-  AC: test command passes for tests/browser/test_drills.py against a fake page; `uv run fm drill --help` exits 0
-- DONE [P2] [M] #42: NFL opportunity baseline — scope: src/fm/model/baseline_nfl.py, tests/model/test_baseline_nfl.py — depends: #13 ✓, #15 ✓, #33 ✓
-  - Shares × implied team total × regressed efficiency, registered as a projection source.
-  - ESPN removes the scoreboard `odds` block at kickoff, so implied team totals must be captured while `ScoreboardGame.state == "pre"` (the scoreboard TTL is 10 minutes); have the sync job (#16) snapshot pregame lines if the baseline needs them after the fact.
-  AC: test command passes; the backtest on fixtures shows the blend with the baseline no worse than without it
-- DONE [P2] [M] #43: NBA minutes baseline — scope: src/fm/model/baseline_nba.py, tests/model/test_baseline_nba.py — depends: #11 ✓, #24 ✓, #33 ✓
-  - Minutes × per-minute rates, registered as a projection source.
-  - Teammates-out redistribution from without-player splits + on/off data, with DARKO minutes as the prior; blowout risk and back-to-back rest risk.
-  - `fm.sources.nba_stats` works live (#17 smoke test, 2026-10-05: `game_logs("2025-26")` 26,651 rows, `player_splits("2025-26", "Base")` 582 rows). Its `leaguedashplayerstats` fixtures are hand-built from nba_api's expected_data (`CFID`, `CFPARAMS`); live stats.nba.com sends `NICKNAME`, `WNBA_FANTASY_PTS`, `FP_HIGH_SCORE`, their ranks and `TEAM_COUNT` instead. The adapter's required columns are present either way, and live game logs match their fixture.
-  - Phase 5: register the source with `fm.model.projections` and `fm.model.value_nba.blend_day` / `day_sources` (#24) pick it up.
-  AC: test command passes; backtest on fixtures no worse than without
+## Phase 7 — DONE
+Built:
+- **Close-call and explain advisor workers (#36).**
+  - **Close-call** (`fm.advisor.close_call`): `decide_close_call` breaks engine near-ties (2+ options, all within a capped margin, all on our roster) using the web search server tool `web_search_20260209` over an allowlist, by default `DEFAULT_ALLOWED_DOMAINS`; `fm.config.Llm` has no field for it yet.
+    - A pick stands only when an allowlisted URL that the search actually returned cites it, and confidence is at least 0.6. Otherwise it falls back to the engine's choice. Every outcome is logged and recorded in `llm_usage`.
+  - **Explain** (`fm.advisor.explain`): `explain_proposal(s)` writes rationales. Trivial proposals use a template with no API call (`bench_inactive`, cancels, a single-swap `lineup`). Refusal, max_tokens and budget failures fall back to the template.
+  - **Client:** `fm.advisor.client` carries `tools` on `Prompt`/`CallParams` and resumes `pause_turn` up to twice.
+- **NBA weekly category planner (#37).** `fm.decide.weekly.plan_weekly` / `plan_categories` produce a `WeeklyPlan` with, per category, P(win), CONTEST / PUNT / SAFE (punt below 0.15, safe at or above 0.85), the stat gap, and swing weights for streamers.
+  - The punt cap comes from the league's scoring type (most-categories `(n-1)//2`, each-category `n-1`).
+  - It is information only: there is no registered decision. #45 calls it directly.
+- **Trade evaluator and finder (#38).** `fm.decide.trades`:
+  - **Entry points:** `load_trade_context` → `TradeContext`, `evaluate_trade(ctx, TradeSpec(other_team_id, give, get))` → `TradeEvaluation` (both sides' Δ ROS and Δ title / playoff / bye odds with common seeds, legality, `AcceptanceParams` P(accept), recommendation ACCEPT / DECLINE / COUNTER), `check_legality`, `parse_trade_text`, `rank_type_for`.
+  - **Finder:** `find_trades` enumerates 1:1, 2:1, 1:2 and 2:2 deals, screens them, re-scores finalists by simulation, and ranks by Δ title × P(accept), or Δ ROS without matchups.
+  - **Proposals:** `propose_trades` drafts approve-only `TradePayload` proposals (max 3 per run, 1 per team).
+  - **Inputs:** values use `inputs["news"]["before"]`, so Claude-only signals never move a trade. Locks are judged at the current period.
+  - **CLI:** `fm trade eval|find` (`--matchups FILE`, else a captured or live `mMatchup`).
+- **Blend weight tuning (#39).** `fm.eval.tune.tune_sport` runs a simplex grid per position over common player-weeks, with shrinkage n/(n+20), a minimum of 30 samples, and leave-one-week-out held-out scoring against the weights currently in the file.
+  - `write_weights` rewrites `data/blend_weights.toml` only when the result is meaningful (at least 6 weeks and better on held-out weeks).
+  - CLI: `fm tune --sport … [--write]`. The committed file is still equal weights, because the fixtures are too small.
+- **MCP server (#40).** `fm.mcp_server.build_server()`, run with `fm mcp` over stdio.
+  - Tools: read-only `status`, `lineup`, `waivers`, `trade_eval` and `list_proposals`, plus `create_proposal`. The last is `fm.proposals.propose` capped at `approve`, so nothing from MCP is ever auto-approved, with trade caps.
+  - No executor, flows or transactions import. This is enforced by an allowlist, a description scan, an AST import scan and a subprocess `sys.modules` test.
+- **UI fallback drills (#41).** `fm.browser.drills` and `fm drill` walk each UI flow (`set_lineup`, `add_drop`, `claim_waiver`) up to its final confirm on live pages and never click it.
+  - Four layers enforce that: a dry-run `Runtime` (flag plus refusing transport plus non-GET abort route), `DrillUi.confirm` raising `DryRunStop`, `GuardedPage` refusing confirm, add, claim, HERE and unclassifiable clicks and presses with a `BaseException`, and `RequestWatch`.
+  - Alerts are sent through `send_alert`. Run it on a no-game day; it has not been run live yet.
+- **Projection baselines (#42, #43).** Each is registered as a projection source at import but not yet imported in production or weighted in `data/blend_weights.toml`.
+  - **NFL (#42):** `fm.model.baseline_nfl` is source `("nfl","opportunity")`: shares × implied team total × regressed efficiency. Pregame lines are snapshotted to `cache/baseline_nfl/pregame_lines.json`.
+  - **NBA (#43):** `fm.model.baseline_nba` is source `("nba","baseline_nba")`: DARKO-prior minutes × regressed per-minute rates, with bounded teammates-out, back-to-back and blowout adjustments, explained by `explain()`. Past-day replays are marked degraded.
+  - **Backtests:** synthetic consistent worlds are in `tests/fixtures/backtest/nfl_world/` (pre-registered) and `tests/fixtures/backtest/nba/`. On those, the blend with the baseline beats the blend without it. On the original NFL fixture it is about 3% worse, kept as a strict xfail.
+
+Patterns:
+- Advisor workers go through `fm.advisor.client` (structured outputs, `stop_reason` checks, budget cap, `llm_usage`) and always degrade to the engine's or the template's answer.
+- LLM-facing surfaces (MCP, advisor) have no write path, and tests enforce that structurally.
+- Evaluation code compares a candidate against what is currently in production, on held-out data.
+
+Open follow-ups:
+- Import the baselines in production and give them blend weights once `fm tune` has real history.
+- `fm sync` does not store `mMatchup`.
+- `isBenchUnlimited` is not parsed.
+- P(accept) weights are uncalibrated.
+
+Key files: src/fm/advisor/{close_call,explain}.py, src/fm/decide/{weekly,trades}.py, src/fm/eval/tune.py, src/fm/mcp_server.py, src/fm/browser/drills.py, src/fm/model/baseline_{nfl,nba}.py, src/fm/commands/{trade,tune,mcp,drill}.py, tests/fixtures/backtest/{nfl_world,nba}/. 2537 tests. Skipped: none. (8/8 tasks)
 
 ## Phase 8 — MILESTONE: trades end-to-end + weekly report
 - TODO [P1] [M] #44: Trade flows and offer handling — scope: src/fm/browser/flows/trade.py, src/fm/browser/selectors.py, src/fm/decide/offers.py, tests/executor/test_trade_flow.py, tests/decide/test_offers.py — depends: #25 ✓, #29 ✓, #38 ✓
