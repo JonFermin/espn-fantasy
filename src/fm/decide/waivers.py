@@ -34,12 +34,16 @@ league whose roster lock type the plugins refuse to read (ESPN's weekly types pa
 all: when its adds and drops close is unknown, and the executor refuses to guess (ROADMAP #27). The timing needs the
 pro schedule; without one a claim counts from the next period and an add has no deadline.
 
-**FAAB** (:func:`heuristic_bid`). In a league that bids, a claim bids the share of the budget left that its gain is of a
-quarter of the roster's remaining value, at least ESPN's minimum bid and never more than the budget left or
-:func:`fm.proposals.faab_bid_cap` (the policy's ``max_faab_pct_per_bid`` of the synced season budget, the cap
-:func:`fm.proposals.evaluate` enforces again); a plan's later claims bid from what its earlier bids leave. ROADMAP #34
-replaces it with a model of the league's winning bids. Leagues without FAAB claim by waiver priority, with no bid (both
-real leagues).
+**FAAB** (:mod:`fm.decide.faab`). In a league that bids, a claim bids what the league's winning bids say its gain
+is worth (:class:`fm.decide.faab.BidModel`, fitted from the ``mTransactions2`` history the sync captured), shrunk
+toward the heuristic (:func:`fm.decide.faab.heuristic_bid`: the share of the budget left that its gain is of a quarter
+of the roster's remaining value) and falling back to it entirely when the history is too thin; the decision's warnings
+and the proposal's engine numbers say which. A bid is at least ESPN's minimum bid and never more than the budget left
+or :func:`fm.proposals.faab_bid_cap` (the policy's ``max_faab_pct_per_bid`` of the synced season budget, the cap
+:func:`fm.proposals.evaluate` enforces again). The budget left is the season budget less the spend the sync read and
+less the bids pledged by the league's still-open waiver proposals (:func:`_pending`), so successive runs together
+never overbid; a plan's later claims bid from what its earlier bids leave. Leagues without FAAB claim by waiver
+priority, with no bid (both real leagues).
 
 **Proposing** (:func:`decide_waivers`, registered as ``("nfl", "waivers")`` in :mod:`fm.decide.registry`). The plan
 takes the best pair worth at least ``min_gain`` with a transaction slot left in the week it executes in, applies it,
@@ -66,9 +70,18 @@ from pydantic import ValidationError
 
 from fm import paths
 from fm.config import Config, Policy
+from fm.decide.faab import (
+    DEFAULT_BID_SHARE,
+    BidModel,
+    bid_strength,
+    fit_bid_model,
+    heuristic_bid,
+    load_bid_history,
+    modeled_bid,
+)
 from fm.decide.registry import register
 from fm.espn.client import View
-from fm.espn.models import POOL_FREE_AGENT, POOL_WAIVERS, PlayersView, PoolEntry
+from fm.espn.models import POOL_FREE_AGENT, POOL_WAIVERS, PlayersView, PoolEntry, Transaction
 from fm.espn.settings import LeagueSettings, LockType
 from fm.model.projections import ESPN, BlendWeights
 from fm.model.valuation import (
@@ -107,9 +120,6 @@ DEFAULT_MIN_GAIN: Final = 5.0
 season, below which a move is projection noise that still costs a transaction (and, on waivers, claim priority)."""
 DEFAULT_CANDIDATES: Final = 25
 """Wire players, best rest-of-season value first, considered as adds."""
-DEFAULT_BID_SHARE: Final = 0.25
-"""The share of the roster's remaining value the FAAB budget left is taken to buy: a claim worth that much bids all
-of it."""
 POOL_KIND: Final = View.PLAYER_INFO.value
 """``raw_snapshots.kind`` of the free-agent pool pages the sync captures."""
 
@@ -234,66 +244,65 @@ def load_wire(store: Store, league: LeagueRow, *, scoring_period: int | None = N
 # --- FAAB -------------------------------------------------------------------------------------------------------------
 
 
-def heuristic_bid(
-    gain: float,
-    *,
-    roster_value: float,
-    budget_left: int,
-    cap: int,
-    minimum_bid: int = 0,
-    share: float = DEFAULT_BID_SHARE,
-) -> int | None:
-    """A FAAB bid for a claim worth ``gain`` rest-of-season points to a roster worth ``roster_value``.
-
-    The bid is ``budget_left`` times ``gain / (share * roster_value)`` (all of it at most), rounded down, then raised to
-    ``minimum_bid`` and held to ``cap`` and ``budget_left``. It is monotonic in the gain, and as the season runs down
-    the same share of the remaining value buys more of what is left: the weeks left enter through both values, which
-    shrink together. ``None`` when no bid is possible because the cap or the budget left is below the minimum. Raises
-    ``ValueError`` for a non-finite value, a negative budget, cap or minimum, or a ``share`` that is not positive.
-    """
-    if not (math.isfinite(gain) and math.isfinite(roster_value)):
-        raise ValueError(f"gain and roster_value must be finite, got {gain!r} and {roster_value!r}")
-    if budget_left < 0 or cap < 0 or minimum_bid < 0:
-        raise ValueError(f"budget_left, cap and minimum_bid must be >= 0, got {budget_left}, {cap}, {minimum_bid}")
-    if not (math.isfinite(share) and share > 0):
-        raise ValueError(f"share must be a positive number, got {share!r}")
-    ceiling = min(cap, budget_left)
-    if ceiling < minimum_bid:
-        return None
-    if gain <= 0:
-        return minimum_bid
-    scale = share * roster_value  # 0 for a worthless roster (or one so small the product underflows): bid it all
-    fraction = 1.0 if scale <= 0 else min(1.0, gain / scale)
-    return max(minimum_bid, min(math.floor(budget_left * fraction), ceiling))
-
-
 @dataclass(frozen=True, slots=True)
 class Bidding:
-    """What a league's FAAB bids are drawn from: the budget left, the policy's per-bid cap and ESPN's minimum bid."""
+    """What a league's FAAB bids are drawn from: the budget left, the policy's per-bid cap and ESPN's minimum bid.
+
+    ``pledged`` is what the budget left already excludes because open proposals hold it (for the proposal's numbers);
+    ``model`` is the league's fitted winning-bid model, or the reason there is none (:attr:`modeled`): a claim then
+    bids the heuristic's amount.
+    """
 
     budget_left: int
     cap: int
     minimum_bid: int = 0
     share: float = DEFAULT_BID_SHARE
+    pledged: int = 0
+    model: BidModel | None = None
 
     @classmethod
     def for_league(
-        cls, settings: LeagueSettings, policy: Policy, *, spent: int, share: float = DEFAULT_BID_SHARE
+        cls,
+        settings: LeagueSettings,
+        policy: Policy,
+        *,
+        spent: int,
+        pledged: int = 0,
+        model: BidModel | None = None,
+        share: float = DEFAULT_BID_SHARE,
     ) -> Bidding | None:
-        """The league's bidding with ``spent`` dollars of its season budget gone; ``None`` when it does not bid. The cap
-        is :func:`fm.proposals.faab_bid_cap`, the one :func:`fm.proposals.evaluate` enforces."""
+        """The league's bidding with ``spent`` dollars of its season budget gone and ``pledged`` held by open claims;
+        ``None`` when it does not bid. The cap is :func:`fm.proposals.faab_bid_cap`, the one
+        :func:`fm.proposals.evaluate` enforces."""
         cap = faab_bid_cap(policy, settings)
         budget = settings.acquisition.budget
         if cap is None or budget is None:
             return None
-        return cls(max(0, budget - spent), cap, settings.acquisition.minimum_bid, share)
+        return cls(max(0, budget - spent - pledged), cap, settings.acquisition.minimum_bid, share, pledged, model)
 
     @property
     def possible(self) -> bool:
         """False when the cap or the budget left is below ESPN's minimum bid, so no claim can be made."""
         return min(self.cap, self.budget_left) >= self.minimum_bid
 
+    @property
+    def modeled(self) -> bool:
+        """True when bids come from the fitted model rather than the heuristic alone."""
+        return self.model is not None and self.model.fitted
+
     def bid(self, gain: float, roster_value: float) -> int | None:
+        """The bid for a claim worth ``gain`` to a roster worth ``roster_value``: the model's, shrunk toward the
+        heuristic (:func:`fm.decide.faab.modeled_bid`), or the heuristic's alone when no model is fitted."""
+        if self.model is not None and self.model.fitted:
+            if not (math.isfinite(gain) and math.isfinite(roster_value)):
+                raise ValueError(f"gain and roster_value must be finite, got {gain!r} and {roster_value!r}")
+            return modeled_bid(
+                self.model,
+                bid_strength(gain, roster_value, self.share),
+                budget_left=self.budget_left,
+                cap=self.cap,
+                minimum_bid=self.minimum_bid,
+            )
         return heuristic_bid(
             gain,
             roster_value=roster_value,
@@ -302,6 +311,20 @@ class Bidding:
             minimum_bid=self.minimum_bid,
             share=self.share,
         )
+
+    def numbers(self) -> dict[str, Any]:
+        """The bidding's side of a proposal's engine numbers: the source of the bid and what it drew on."""
+        numbers: dict[str, Any] = {
+            "cap": self.cap,
+            "budget_left": self.budget_left,
+            "pledged": self.pledged,
+            "minimum_bid": self.minimum_bid,
+            "share": self.share,
+            "source": "model" if self.modeled else "heuristic",
+        }
+        if self.model is not None:
+            numbers["history"] = self.model.numbers()
+        return numbers
 
 
 # --- moves ------------------------------------------------------------------------------------------------------------
@@ -367,10 +390,7 @@ class WaiverMove:
         if self.bidding is not None:
             numbers["bid"] = {
                 "amount": self.bid,
-                "cap": self.bidding.cap,
-                "budget_left": self.bidding.budget_left,
-                "minimum_bid": self.bidding.minimum_bid,
-                "share": self.bidding.share,
+                **self.bidding.numbers(),
                 "roster_value": None if self.roster_value is None else round(self.roster_value, 3),
             }
         return numbers
@@ -383,7 +403,8 @@ class WaiverMove:
             text += f", dropping {_label(self.drop)}"
         text += f": +{self.gain:.1f} rest-of-season points from period {self.start}"
         if self.bid is not None and self.bidding is not None:
-            text += f"; bid ${self.bid} (cap ${self.bidding.cap}, ${self.bidding.budget_left} left)"
+            source = "league bid history" if self.bidding.modeled else "heuristic"
+            text += f"; bid ${self.bid} ({source}, cap ${self.bidding.cap}, ${self.bidding.budget_left} left)"
         return text + "."
 
 
@@ -859,13 +880,16 @@ before its add counts is two of them)."""
 
 def _pending(
     store: Store, league: LeagueRow, valuation: LeagueValuation, now: datetime
-) -> tuple[tuple[PendingMove, ...], frozenset[int]]:
-    """The moves the league's open add/drop and waiver proposals would make, for the valuer, and every player they
-    touch, which new moves leave alone. A proposal past its deadline is not pending (it expires unexecuted); an add
-    the valuation cannot value (not on the wire it read) stays out of the valuer, its players still left alone."""
+) -> tuple[tuple[PendingMove, ...], frozenset[int], int]:
+    """The moves the league's open add/drop and waiver proposals would make, for the valuer, every player they touch,
+    which new moves leave alone, and the FAAB dollars their waiver bids pledge (``payload.bid``), which new bids must
+    leave. A proposal past its deadline is not pending (it expires unexecuted) and pledges nothing; an add the
+    valuation cannot value (not on the wire it read) stays out of the valuer, its players still left alone and its bid
+    still pledged."""
     kinds = {kind.value for kind in ACQUISITION_KINDS}
     moves: list[PendingMove] = []
     players: set[int] = set()
+    pledged = 0
     for row in store.proposals.open(league.row_id):
         if row.kind not in kinds or (row.status != "executing" and row.deadline is not None and row.deadline <= now):
             continue
@@ -874,6 +898,8 @@ def _pending(
             continue
         add, drop = payload.add_espn_id, payload.drop_espn_id
         players.update(espn_id for espn_id in (add, drop) if espn_id is not None)
+        if isinstance(payload, WaiverPayload):
+            pledged += payload.bid or 0
         if add is not None and add not in valuation.wire:
             continue
         executes = row.scoring_period_id if row.scoring_period_id is not None else valuation.scoring_period
@@ -881,7 +907,28 @@ def _pending(
         start = start if isinstance(start, int) else executes
         dropped = drop if drop in valuation.roster else None
         moves.extend([(add, dropped, start)] if start == executes else [(None, dropped, executes), (add, None, start)])
-    return tuple(moves), frozenset(players)
+    return tuple(moves), frozenset(players), pledged
+
+
+def _bid_model(
+    store: Store,
+    league: LeagueRow,
+    settings: LeagueSettings,
+    history: Iterable[Transaction] | None,
+    warnings: list[str],
+) -> BidModel | None:
+    """The league's winning-bid model, or ``None`` when it does not bid. A model that could not be fitted is returned
+    all the same (it says why) and a warning names the reason: claims then bid the heuristic."""
+    budget = settings.acquisition.budget
+    if not settings.acquisition.uses_faab or budget is None:
+        return None
+    if history is None:
+        history, problems = load_bid_history(store, league)
+        warnings.extend(problems)
+    model = fit_bid_model(history, budget=budget)
+    if not model.fitted:
+        warnings.append(f"{league.key}: no FAAB bid model ({model.reason}); bids use the heuristic")
+    return model
 
 
 def decide_waivers(
@@ -898,6 +945,7 @@ def decide_waivers(
     max_moves: int | None = None,
     candidates: int = DEFAULT_CANDIDATES,
     store_proposals: bool = True,
+    history: Iterable[Transaction] | None = None,
 ) -> WaiverDecision:
     """Rank the league's (add, drop) pairs and propose the best moves (the module docs give the rules).
 
@@ -911,6 +959,10 @@ def decide_waivers(
     ``store_proposals`` false nothing is written (the decision only ranks and plans); otherwise the league's proposals
     past their deadline are expired first, as :func:`fm.proposals.propose` would. Raises :class:`WaiverError` for a
     league it cannot decide for and :class:`fm.model.valuation.ValuationError` for one that is not synced.
+
+    In a league that bids, ``history`` (default: :func:`fm.decide.faab.load_bid_history`, the ``mTransactions2`` pages
+    the sync captured) fits the winning-bid model the claims bid from; too little of it leaves the heuristic, with a
+    warning saying so. The bids of the league's open waiver proposals come off the budget left (the module docs).
     """
     at = as_utc(now)
     row = _league_row(store, league)
@@ -940,13 +992,18 @@ def decide_waivers(
     team = store.teams.get(row.row_id, row.team_id)
     if team is None and settings.acquisition.uses_faab:
         warnings.append(f"{row.key}: team {row.team_id} has no synced FAAB spending; the whole budget is assumed left")
-    bidding = Bidding.for_league(settings, policy, spent=team.acquisition_budget_spent if team is not None else 0)
+    pending, committed, pledged = _pending(store, row, valuation, at)
+    model = _bid_model(store, row, settings, history, warnings)
+    bidding = Bidding.for_league(
+        settings, policy, spent=team.acquisition_budget_spent if team is not None else 0, pledged=pledged, model=model
+    )
+    if bidding is not None and pledged:
+        warnings.append(f"{row.key}: ${pledged} of the FAAB budget is pledged by open waiver proposals")
 
     def slots_left(period: int) -> int:
         held = acquisitions_this_week(store, row, settings, scoring_period_id=period, now=at)
         return max(0, policy.max_transactions_per_week - held)
 
-    pending, committed = _pending(store, row, valuation, at)
     if committed:
         warnings.append(f"{row.key}: {len(committed)} players in open proposals were left out of new moves")
     board = _board(
