@@ -403,8 +403,7 @@ class WaiverMove:
             text += f", dropping {_label(self.drop)}"
         text += f": +{self.gain:.1f} rest-of-season points from period {self.start}"
         if self.bid is not None and self.bidding is not None:
-            source = "league bid history" if self.bidding.modeled else "heuristic"
-            text += f"; bid ${self.bid} ({source}, cap ${self.bidding.cap}, ${self.bidding.budget_left} left)"
+            text += f"; bid ${self.bid} (cap ${self.bidding.cap}, ${self.bidding.budget_left} left)"
         return text + "."
 
 

@@ -918,7 +918,6 @@ def test_a_league_history_of_winning_bids_prices_the_claims(store: Store) -> Non
     assert claim.bid <= 35  # the policy's cap
     numbers = claim.engine_numbers()["bid"]
     assert numbers["source"] == "model" and numbers["history"]["winning_bids"] == 12 and numbers["amount"] == claim.bid
-    assert "league bid history" in claim.rationale()
     assert not any("bid model" in warning for warning in modeled.warnings)
 
 
@@ -938,7 +937,6 @@ def test_too_little_history_bids_the_heuristic_and_says_so(store: Store) -> None
         "reason": reason,
         "winning_bids": MIN_WINNING_BIDS - 1,
     }
-    assert "heuristic" in claim.rationale()
 
 
 def test_a_league_without_faab_needs_no_bid_model(store: Store) -> None:
