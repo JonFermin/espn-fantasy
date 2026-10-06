@@ -90,7 +90,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   - Weekly per-category win probabilities → targets, punts (H-score-style roster-aware re-weighting, arXiv:2409.09884), and streamer stat targets.
   - Phase 5: `CategoryModel.stat(c)` (μ, σ, τ), `with_tau` / `within_player_sd` and `punt_weights` (#24) are the planner's inputs.
   AC: test command passes for tests/decide/test_weekly.py (punt recommended below the threshold win probability)
-- IN PROGRESS [P1] [L] #38: Trade evaluator and finder — scope: src/fm/decide/trades.py, src/fm/commands/trade.py, tests/decide/test_trades.py — depends: #12 ✓, #32 ✓
+- DONE [P1] [L] #38: Trade evaluator and finder — scope: src/fm/decide/trades.py, src/fm/commands/trade.py, tests/decide/test_trades.py — depends: #12 ✓, #32 ✓
   - `fm trade eval|find`: Δ ROS value for both sides, Δ title odds, legality.
   - Enumerates 1:1, 2:1, and 2:2 deals per opponent; screens, then re-scores; ranks by Δ title odds × P(accept), where P(accept) uses market values + their needs.
   - Market values: `MarketSource.market_values(settings, rank_type=<"PPR"/"STANDARD"/"SUPERFLEX" for ffl, "STANDARD"/"ROTO" for fba>)` takes the game, the season and FantasyCalc's league shape from the league's `LeagueSettings` (`LeagueShape.from_settings`: team count, REC scoring points, starting slots a QB can fill, so superflex/2-QB leagues ask for 2 QBs; there is no default shape); derive `rank_type` from `LeagueSettings` too, never a literal. FantasyCalc is skipped for fba and every rank type stays in `MarketValue.espn_ranks`.
@@ -118,7 +118,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   AC: test command passes; backtest on fixtures no worse than without
 
 ## Phase 8 — MILESTONE: trades end-to-end + weekly report
-- TODO [P1] [M] #44: Trade flows and offer handling — scope: src/fm/browser/flows/trade.py, src/fm/browser/selectors.py, src/fm/decide/offers.py, tests/executor/test_trade_flow.py, tests/decide/test_offers.py — depends: #25 ✓, #29 ✓, #38
+- TODO [P1] [M] #44: Trade flows and offer handling — scope: src/fm/browser/flows/trade.py, src/fm/browser/selectors.py, src/fm/decide/offers.py, tests/executor/test_trade_flow.py, tests/decide/test_offers.py — depends: #25 ✓, #29 ✓, #38 ✓
   - Propose/respond/cancel flows (approval-only), API mode with UI fallback.
   - Never duplicates an open offer; checks lock status for every player involved.
   - Pending incoming offers become evaluation proposals registered for the tick.
@@ -126,7 +126,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   - Open offers: ESPN leaves an expired offer `PENDING` and closes it with a separate CANCEL record that still says `isPending`; `EspnClient.pending_offers` keeps only open ones (docs/espn-api.md §1 #2). Offers come from `mTransactions2`, not `mPendingTransactions`, and expire 48 h after `proposedDate`.
   - Phase 5: `fm.browser.transactions` (#25) builds the TRADE item and the envelope (`isLeagueManager` false, impossible combinations refused) and `fm.browser.selectors` is the registry to extend; `fm.model.relevance` (#23) already reads open trade proposals for its trade targets.
   AC: test command passes for both tests (fake page; `auto` policy rejected for trade kinds; duplicate offers and locked-player trades blocked)
-- TODO [P1] [M] #45: Trade pitch and weekly strategist workers — scope: src/fm/advisor/pitch.py, src/fm/advisor/strategist.py, tests/advisor/test_pitch.py, tests/advisor/test_strategist.py — depends: #30 ✓, #32 ✓, #38
+- TODO [P1] [M] #45: Trade pitch and weekly strategist workers — scope: src/fm/advisor/pitch.py, src/fm/advisor/strategist.py, tests/advisor/test_pitch.py, tests/advisor/test_strategist.py — depends: #30 ✓, #32 ✓, #38 ✓
   - Pitch draft per approved trade idea.
   - Weekly priorities, punts, and targets → proposals.
   AC: test command passes for both tests with a stubbed client
