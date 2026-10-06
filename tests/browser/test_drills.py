@@ -819,12 +819,13 @@ def test_a_confirm_like_name_is_refused_whatever_the_player_is() -> None:
         with pytest.raises(FinalSaveClickError):
             locator.click()
     assert guard.clicks == [] and len(guard.refused) == len(blocked)
-    for locator in (
+    harmless: list[Any] = [
         selectors.drop_player_button(guarded, "Add Smith"),  # a player called Add is still only a drop button
         selectors.continue_button(guarded, "Somebody Else", "Another One"),  # its (?:add|claim) is not a lead
         guarded.get_by_role("button", name="Address book", exact=True),  # not the word Add
         guarded.get_by_role("button", name=selectors.MOVE_NAME),
-    ):
+    ]
+    for locator in harmless:
         guard.before_click(locator._spec)
     assert len(guard.clicks) == 4
 
@@ -873,7 +874,7 @@ def test_the_probes_are_built_from_the_names_the_preconditions_observed_too(tmp_
 
         def run_ui(self, ctx: FlowContext[AddDropPayload], ui: UiDriver, pre: Preconditions) -> None:
             seen.append(ui.guard.probes)  # type: ignore[attr-defined]
-            raise DryRunStop
+            raise DryRunStop("spied")
 
     site = nba_site()
     plan = DrillPlan(AddDropPayload(add_espn_id=6589), "spy", ("Plan Name",))
