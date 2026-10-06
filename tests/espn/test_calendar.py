@@ -102,6 +102,22 @@ def test_the_extractor_keeps_the_data_keys_and_checks_them() -> None:
         extract_calendar(broken)
 
 
+def test_a_malformed_file_leaves_a_leagues_matchup_days_unknown_instead_of_raising(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = load_league_settings(REAL / "fba" / "mSettings.json")
+    calendar_file(settings.game, settings.season, root=tmp_path).write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="fm.espn.calendar"):
+        assert league_matchup_days(settings, root=tmp_path) is None
+        assert matchup_scoring_periods(settings, 5, root=tmp_path) is None
+        assert matchup_period_of(settings, 5, root=tmp_path) is None
+    assert "cannot be read" in caplog.text
+    with pytest.raises(CalendarError, match="cannot be read"):  # the strict readers still say so
+        find_calendar(settings.game, settings.season, root=tmp_path)
+    with pytest.raises(CalendarError, match="cannot be read"):
+        load_calendar(settings.game, settings.season, root=tmp_path)
+
+
 def test_a_malformed_file_is_an_error_not_silence(tmp_path: Path) -> None:
     (tmp_path / "fba_2027.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(CalendarError, match="cannot be read"):
