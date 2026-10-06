@@ -39,6 +39,7 @@ from fm.commands.trade import _matchups
 from fm.config import Config
 from fm.espn.client import View
 from fm.espn.models import MatchupsView
+from fm.eval.report_card import attach_report_card
 from fm.jobs.report import (
     DEFAULT_WINDOW_DAYS,
     LeagueReport,
@@ -136,6 +137,7 @@ def report(
                 previous=previous_odds(directory, configured.key),
                 window=timedelta(days=days),
             )
+            built = attach_report_card(built, store, row, now=at, schedule=loaded.schedule)
             reports.append(built)
             if built.odds is not None:
                 remember_odds(directory, configured.key, built.odds)

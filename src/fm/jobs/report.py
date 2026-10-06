@@ -111,6 +111,8 @@ class LeagueReport:
     moves: tuple[MoveLine, ...] = ()
     deadlines: tuple[str, ...] = ()
     pending: tuple[str, ...] = ()
+    sections: tuple[str, ...] = ()
+    """Extra markdown blocks appended after the league's own sections (the report card, ROADMAP #47)."""
     notes: tuple[str, ...] = ()
 
 
@@ -357,6 +359,8 @@ def render_league(report: LeagueReport) -> list[str]:
         lines += ["", "Still open:", ""] + [f"- {text}" for text in report.pending]
     lines += ["", "### Upcoming deadlines", ""]
     lines += [f"- {text}" for text in report.deadlines] or ["None in the window."]
+    for block in report.sections:
+        lines += ["", block]
     return lines
 
 
