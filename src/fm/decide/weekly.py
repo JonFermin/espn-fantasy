@@ -35,7 +35,8 @@ swing. The rest are *contested*, and the ones to chase. The thresholds (:data:`P
 model parameters, as ``game_sd`` is, not league settings; the cap on the number of punts is the league's: a most
 categories matchup needs a majority of the categories, so at most ``(n - 1) // 2`` of the ``n`` categories are conceded
 (the lowest P first; the rest stay contested), and a league that counts every category as its own win only keeps one
-contested (:func:`default_max_punts`).
+contested (:func:`default_max_punts`). A category left out of the plan (no expected score or spread for it) counts as
+conceded, so it comes off that cap.
 
 **Stat gaps.** ``gap`` is how much better than expected we must be to even a category (``P = 0.5``), in the stat's own
 units: a count for a counting category, the rate itself for a percentage or per-game stat (the team's rate over its
@@ -316,6 +317,11 @@ def plan_categories(
         if model.stat(name).sd <= 0:
             warnings.append(f"{name}: the model sees no spread in it across the pool, so it is left out of the plan")
             continue
+        if name not in outlook.sds:
+            warnings.append(
+                f"{name}: the outlook has an expected score but no spread for it, so it is left out of the plan"
+            )
+            continue
         sd = max(outlook.sds[name], _FLOOR)
         if simulated is not None and name in simulated:
             chance = simulated[name]
@@ -327,13 +333,18 @@ def plan_categories(
     if not rows:
         raise ValueError("the outlook covers none of the league's categories")
 
+    # A category left out of the plan is not contested either, so it is conceded already: it uses up the punt cap, or
+    # the plan would punt ``cap`` more and concede a majority.
+    left_out = len(names) - len(rows)
+    allowed = max(0, cap - left_out)
     losers = sorted((row[0], name) for name, row in rows.items() if row[0] < punt_below)
-    punts = {name for _, name in losers[:cap]}
-    if len(losers) > cap:
+    punts = {name for _, name in losers[:allowed]}
+    if len(losers) > allowed:
         warnings.append(
-            f"{len(losers)} categories are below {punt_below:.0%} but at most {cap} may be conceded; "
-            f"conceding {', '.join(sorted(punts)) or 'none'}, still contesting "
-            f"{', '.join(name for _, name in losers[cap:])}"
+            f"{len(losers)} categories are below {punt_below:.0%} but at most {allowed} may be conceded"
+            + (f" ({cap} in all, {left_out} already left out of the plan)" if left_out else "")
+            + f"; conceding {', '.join(sorted(punts)) or 'none'}, still contesting "
+            f"{', '.join(name for _, name in losers[allowed:])}"
         )
     statuses = {
         name: CategoryStatus.PUNT
