@@ -75,8 +75,8 @@ class WindowKind(StrEnum):
 
 LINEUP_DECISIONS: Final = frozenset({"lineup", "lineup_daily"})
 """Decision kinds a lineup-lock window runs (:mod:`fm.decide.registry` kinds)."""
-ACQUISITION_DECISIONS: Final = frozenset({"waivers", "streaming"})
-"""Decision kinds a roster-lock window runs."""
+ACQUISITION_DECISIONS: Final = frozenset({"waivers", "streaming", "offers"})
+"""Decision kinds a roster-lock window runs (incoming trade offers expire in 48 h, so they are answered here too)."""
 WAIVER_DECISIONS: Final = frozenset({"waivers"})
 WINDOW_DECISIONS: Mapping[WindowKind, frozenset[str] | None] = MappingProxyType(
     {

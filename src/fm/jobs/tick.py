@@ -57,6 +57,7 @@ from typing import Any, Protocol
 
 import fm.decide.lineup  # noqa: F401  (registers the NFL lineup decision)
 import fm.decide.lineup_daily  # noqa: F401  (registers the NBA daily lineup decision)
+import fm.decide.offers  # noqa: F401  (registers the incoming trade offer decision, both sports)
 import fm.decide.streaming  # noqa: F401  (registers the NBA streaming decision)
 import fm.decide.waivers  # noqa: F401  (registers the NFL waiver decision)
 from fm import paths
@@ -837,6 +838,8 @@ class _Tick:
         kwargs: dict[str, Any] = {"schedule": ctx.schedule, "now": self.now}
         if registration.kind in OPPONENT_DECISIONS:
             kwargs["opponent_team_id"] = self._opponent(ctx)
+        if ctx.client is not None:
+            kwargs["client"] = ctx.client
         try:
             result = registration.fn(ctx.store, ctx.config, ctx.row, **_accepted(registration.fn, kwargs))
         except _CRITICAL_ERRORS:
