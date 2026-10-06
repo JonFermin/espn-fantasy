@@ -32,7 +32,7 @@ from fm.browser.flows import LocatorLike, PageLike
 from fm.browser.selectors import Presence, Selector, WebPage
 from fm.config import League
 from fm.espn.client import PENDING_OFFER_TYPES, EspnClient, EspnClientError, EspnRead, EspnSchemaError
-from fm.espn.models import LeagueStatus, MatchupsView
+from fm.espn.models import LeagueStatus, MatchupsView, PlayersView
 from fm.notify.base import Message
 from fm.notify.messages import alert
 
@@ -132,6 +132,8 @@ class ViewCheck:
     findings: tuple[CanaryFinding, ...] = ()
     parsed: tuple[str, ...] = ()
     skipped: tuple[Skipped, ...] = ()
+    probe: PageProbe | None = None
+    """A player the pool read showed (a free agent first), for the pages about one player."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,15 +187,45 @@ class CanaryReport:
 
 # --- pages ------------------------------------------------------------------------------------------------------------
 
-type PageAddress = Callable[[League], str]
-"""Where the canary opens a page for a league."""
+
+@dataclass(frozen=True, slots=True)
+class PageProbe:
+    """A player from the pool read, for a page that is about one player (the roster-fix page)."""
+
+    player_id: int
+    kind: selectors.RosterFixType
+    """``ADD`` for a free agent, ``CLAIM`` for a player on waivers."""
 
 
-def _team_page(league: League) -> str:
+type PageAddress = Callable[[League, PageProbe | None], str | None]
+"""Where the canary opens a page for a league. The second argument is a player the pool read showed, for a page that is
+about one player; an address that needs one returns ``None`` when there is none."""
+
+
+def _team_page(league: League, probe: PageProbe | None) -> str:
     return selectors.team_page_url(league.game, league.espn_league_id, league.team_id, league.season)
 
 
-PAGE_ADDRESSES: Mapping[WebPage, PageAddress] = {WebPage.ROSTER: _team_page}
+def _players_page(league: League, probe: PageProbe | None) -> str:
+    return selectors.players_page_url(league.game, league.espn_league_id, league.team_id, league.season)
+
+
+def _roster_fix_page(league: League, probe: PageProbe | None) -> str | None:
+    """The page an add or claim sends us to when the roster is full, opened for a player the pool read turned up.
+    Loading it only shows the drop choices; nothing happens unless Continue and Confirm are clicked, and the canary
+    never clicks."""
+    if probe is None:
+        return None
+    return selectors.roster_fix_url(
+        league.game, league.espn_league_id, league.season, league.team_id, probe.player_id, probe.kind
+    )
+
+
+PAGE_ADDRESSES: Mapping[WebPage, PageAddress] = {
+    WebPage.ROSTER: _team_page,
+    WebPage.PLAYERS: _players_page,
+    WebPage.ROSTERFIX: _roster_fix_page,
+}
 """How to open each registered page. A page in the registry without an entry is reported as :attr:`FindingKind.
 NO_ADDRESS`, and ``tests/browser/test_canary.py`` fails until it has one. The address builders themselves belong in
 ``fm.browser.selectors``; add a page there, then a line here."""
@@ -205,11 +237,13 @@ def check_selectors(
     *,
     registry: Sequence[Selector] | None = None,
     addresses: Mapping[WebPage, PageAddress] | None = None,
+    probe: PageProbe | None = None,
 ) -> SelectorCheck:
     """Open each registered page for ``league`` and judge every selector by its :class:`Presence`.
 
     Loads pages and counts locators; clicks nothing, so a selector that appears only after a click (``after``) is
-    skipped. ``registry`` and ``addresses`` default to the real ones; tests pass their own.
+    skipped. ``registry`` and ``addresses`` default to the real ones; tests pass their own. ``probe`` is a player
+    for the pages about one player (the roster-fix page).
     """
     chosen = tuple(selectors.registered_selectors() if registry is None else registry)
     known = addresses if addresses is not None else PAGE_ADDRESSES
@@ -236,7 +270,19 @@ def check_selectors(
             )
             skipped.extend(Skipped(item.key, "no address for the page") for item in batch)
             continue
-        url = address(league)
+        url = address(league, probe)
+        if url is None:
+            findings.append(
+                CanaryFinding(
+                    FindingKind.PAGE_FAILED,
+                    web_page.value,
+                    Presence.ALWAYS.value,
+                    f"the {web_page.value} page is opened for a player and the pool view showed none to open it with",
+                    page=web_page,
+                )
+            )
+            skipped.extend(Skipped(item.key, "no player to open the page with") for item in batch)
+            continue
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         except Exception as exc:
@@ -410,11 +456,22 @@ def check_views(reader: EspnClient) -> ViewCheck:
         skipped.append(Skipped("mMatchupScore+mScoreboard", "no matchup period to ask for"))
     else:
         attempt("mMatchupScore+mScoreboard", lambda: reader.scoreboard(period))
-    attempt("kona_player_info", lambda: reader.free_agents(limit=FREE_AGENT_PROBE))
+    pool = attempt("kona_player_info", lambda: reader.free_agents(limit=FREE_AGENT_PROBE))
+    probe = _probe(pool.data) if pool is not None else None
     attempt("mPendingTransactions", reader.pending_transactions)
     attempt("mTransactions2", lambda: reader.transactions(types=PENDING_OFFER_TYPES))
     attempt("proTeamSchedules_wl", reader.pro_schedule)
-    return ViewCheck(tuple(findings), tuple(parsed), tuple(skipped))
+    return ViewCheck(tuple(findings), tuple(parsed), tuple(skipped), probe)
+
+
+def _probe(pool: PlayersView) -> PageProbe | None:
+    for entry in pool.players:
+        if entry.is_free_agent:
+            return PageProbe(entry.id, selectors.RosterFixType.ADD)
+    for entry in pool.players:
+        if entry.is_on_waivers:
+            return PageProbe(entry.id, selectors.RosterFixType.CLAIM)
+    return None
 
 
 def _matchup_period(status: LeagueStatus | None, matchups: EspnRead[MatchupsView] | None) -> int | None:
@@ -439,8 +496,11 @@ def run_canary(
     addresses: Mapping[WebPage, PageAddress] | None = None,
 ) -> CanaryReport:
     """Check ``league``'s pages (with ``page``) and read views (with ``reader``); either may be left out."""
-    selector_check = None if page is None else check_selectors(page, league, registry=registry, addresses=addresses)
     view_check = None if reader is None else check_views(reader)
+    probe = view_check.probe if view_check is not None else None
+    selector_check = (
+        None if page is None else check_selectors(page, league, registry=registry, addresses=addresses, probe=probe)
+    )
     findings = (selector_check.findings if selector_check else ()) + (view_check.findings if view_check else ())
     return CanaryReport(league.key, selector_check, view_check, findings)
 

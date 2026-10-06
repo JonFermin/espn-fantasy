@@ -69,7 +69,7 @@ def roster_row(label: str, player: str | None, *, move: bool = True) -> FakeElem
         FakeElement(role="cell", text=player or "Empty"),
     )
     if move and player is not None:
-        row.add(FakeElement(role="button", name="MOVE"))
+        row.add(FakeElement(role="button", name=f"Select {player} to move"))
     return row
 
 
@@ -81,12 +81,56 @@ def page_showing(*screen: FakeElement, url: str = ROSTER_URL) -> FakePage:
     return FakePage(screens={url: list(screen)})
 
 
+def players_screen(*, add: bool = True, status_filter: bool = True) -> list[FakeElement]:
+    """The player list: the status filter, and an Add button for a free agent when there is one on the page."""
+    if status_filter:
+        screen = [FakeElement(role="combobox", name="Status")]
+    else:
+        screen = [FakeElement(role="heading", name="Players")]
+    if add:
+        screen.append(FakeElement(role="button", name="Add Some Player QB for Team"))
+    return screen
+
+
+def roster_fix_screen(*, cancel: bool = True, proceed: bool = True) -> list[FakeElement]:
+    """The roster-fix page: Cancel, Continue and a DROP button per droppable player."""
+    screen = [FakeElement(role="button", name="Drop Player Some Starter")]
+    if cancel:
+        screen.append(FakeElement(role="button", name="Cancel"))
+    if proceed:
+        screen.append(FakeElement(role="button", name="Continue"))
+    return screen
+
+
+def fix_url(player_id: int, kind: str) -> str:
+    return selectors.roster_fix_url("ffl", 1010101, 2026, 1, player_id, kind)
+
+
+FIRST_POOL_PLAYER = 4241478  # the first entry of the recorded NFL pool, who is on waivers
+PLAYERS_URL = selectors.players_page_url("ffl", 1010101, 1, 2026)
+CLAIM_PROBE = canary.PageProbe(FIRST_POOL_PLAYER, selectors.RosterFixType.CLAIM)
+ROSTER_ONLY = selectors.selectors_for(WebPage.ROSTER)
+
+
+def site(**screens: list[FakeElement]) -> FakePage:
+    """Every page of the registry, healthy unless a screen is replaced (``roster=``, ``players=``, ``fix=``)."""
+    return FakePage(
+        screens={
+            ROSTER_URL: screens.get("roster", healthy_screen()),
+            PLAYERS_URL: screens.get("players", players_screen()),
+            fix_url(FIRST_POOL_PLAYER, "claim"): screens.get("fix", roster_fix_screen()),
+        }
+    )
+
+
 def check(page: FakePage, **options: Any) -> canary.SelectorCheck:
+    """The roster page's selectors (the registry's other pages have their own tests), unless a registry is given."""
+    options.setdefault("registry", ROSTER_ONLY)
     return check_selectors(page, LEAGUE, **options)
 
 
 def report_of(page: FakePage) -> CanaryReport:
-    return run_canary(LEAGUE, reader=None, page=page)
+    return run_canary(LEAGUE, reader=None, page=page, registry=ROSTER_ONLY)
 
 
 # --- selectors --------------------------------------------------------------------------------------------------------
@@ -105,7 +149,7 @@ def test_a_healthy_roster_page_raises_nothing() -> None:
 
 def test_every_registered_selector_is_judged_or_explained() -> None:
     """Iterating the registry means a selector added later is covered, or skipped with a reason, never forgotten."""
-    result = check(page_showing(*healthy_screen()))
+    result = check(site(), registry=selectors.registered_selectors(), probe=CLAIM_PROBE)
     judged = set(result.resolved) | set(result.absent_sometimes) | set(result.clear)
     judged |= {skip.key for skip in result.skipped}
     judged |= {finding.subject for finding in result.findings}
@@ -259,6 +303,68 @@ def test_a_locator_that_raises_is_reported_not_raised() -> None:
     assert result.findings and {finding.kind for finding in result.findings} == {FindingKind.LOCATOR_ERROR}
 
 
+def test_the_player_list_selectors_that_are_always_there_are_checked() -> None:
+    players = selectors.selectors_for(WebPage.PLAYERS)
+    healthy = check(site(), registry=players)
+    assert healthy.findings == () and "players.status_filter" in healthy.resolved
+
+    broken = site(players=players_screen(status_filter=False))  # ESPN dropped the status filter
+    report = run_canary(LEAGUE, reader=None, page=broken, registry=players)
+    [finding] = report.drift
+    assert (finding.kind, finding.subject, finding.page, finding.expected) == (
+        FindingKind.MISSING,
+        "players.status_filter",
+        WebPage.PLAYERS,
+        "always",
+    )
+    assert finding.url == PLAYERS_URL and broken.did("goto") == [PLAYERS_URL]
+    message = drift_alert([report])
+    assert message is not None and message.link == PLAYERS_URL and "[players] players.status_filter" in message.body
+
+
+def test_the_player_list_without_an_add_button_is_still_healthy() -> None:
+    result = check(site(players=players_screen(add=False)), registry=selectors.selectors_for(WebPage.PLAYERS))
+
+    assert result.findings == ()
+    assert {"players.add", "players.claim"} <= set(result.absent_sometimes)
+
+
+def test_the_roster_fix_page_is_opened_for_a_player_the_pool_showed() -> None:
+    registry = selectors.selectors_for(WebPage.ROSTERFIX)
+    page = site()
+    result = check(page, registry=registry, probe=CLAIM_PROBE)
+
+    assert page.did("goto") == [fix_url(FIRST_POOL_PLAYER, "claim")]
+    assert result.findings == () and {"rosterfix.cancel", "rosterfix.continue"} <= set(result.resolved)
+    skipped = {skip.key for skip in result.skipped}
+    assert {"rosterfix.confirm_dialog", "rosterfix.confirm"} <= skipped  # they appear only after Continue is clicked
+    assert page.did("click") == []
+
+    free_agent = canary.PageProbe(77, selectors.RosterFixType.ADD)
+    other = FakePage(screens={fix_url(77, "add"): roster_fix_screen(proceed=False)})
+    broken = check(other, registry=registry, probe=free_agent)
+    assert [(f.kind, f.subject) for f in broken.findings] == [(FindingKind.MISSING, "rosterfix.continue")]
+    assert other.did("goto") == [fix_url(77, "add")]
+
+
+def test_the_roster_fix_page_needs_a_player_to_open_it_with() -> None:
+    page = site()
+    result = check(page, registry=selectors.selectors_for(WebPage.ROSTERFIX))
+
+    [finding] = result.findings
+    assert finding.kind is FindingKind.PAGE_FAILED and not finding.is_drift and finding.page is WebPage.ROSTERFIX
+    assert page.did("goto") == []
+
+
+def test_the_probe_is_the_first_free_agent_else_the_first_waiver_player() -> None:
+    assert check_views(reader(api_for())).probe == CLAIM_PROBE  # the recorded NFL pool is all waivers
+    api = api_for()
+    pool = json.loads((REAL / "ffl" / "kona_player_info.json").read_text(encoding="utf-8"))
+    pool["players"][2]["status"] = "FREEAGENT"
+    api.serve("kona_player_info", pool)
+    assert check_views(reader(api)).probe == canary.PageProbe(pool["players"][2]["id"], selectors.RosterFixType.ADD)
+
+
 # --- read views -------------------------------------------------------------------------------------------------------
 
 
@@ -347,7 +453,7 @@ def test_a_season_with_no_matchup_period_skips_the_scoreboard_with_a_reason() ->
 
 
 def test_a_clean_run_has_no_alert() -> None:
-    report = run_canary(LEAGUE, reader=reader(api_for()), page=page_showing(*healthy_screen()))
+    report = run_canary(LEAGUE, reader=reader(api_for()), page=site())
 
     assert report.ok and report.findings == ()
     assert drift_alert([report]) is None
@@ -434,10 +540,17 @@ def live_runtime(monkeypatch: pytest.MonkeyPatch, page: FakePage, api: FakeEspnA
     monkeypatch.setattr(canary_cmd, "live_opener", lambda options: runtime)
 
 
-def nfl_page() -> FakePage:
+def nfl_site() -> FakePage:
+    """Every page of the sample config's NFL league (not the ids the helpers above use)."""
     league = sample_league("nfl")
-    url = selectors.team_page_url("ffl", league.espn_league_id, league.team_id, league.season)
-    return page_showing(*healthy_screen(), url=url)
+    league_id, team, season = league.espn_league_id, league.team_id, league.season
+    return FakePage(
+        screens={
+            selectors.team_page_url("ffl", league_id, team, season): healthy_screen(),
+            selectors.players_page_url("ffl", league_id, team, season): players_screen(),
+            selectors.roster_fix_url("ffl", league_id, season, team, FIRST_POOL_PLAYER, "claim"): roster_fix_screen(),
+        }
+    )
 
 
 @pytest.mark.usefixtures("configured")
@@ -487,7 +600,7 @@ def nfl_page_url() -> str:
 
 @pytest.mark.usefixtures("configured")
 def test_a_clean_live_run_sends_nothing(monkeypatch: pytest.MonkeyPatch, phone: Recorder) -> None:
-    live_runtime(monkeypatch, nfl_page(), api_for())
+    live_runtime(monkeypatch, nfl_site(), api_for())
     result = runner.invoke(cli(), ["canary", "--league", "nfl"])
 
     assert result.exit_code == 0, result.output
