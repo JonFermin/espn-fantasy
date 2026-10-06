@@ -538,6 +538,16 @@ def test_a_trade_proposal_that_ran_under_auto_or_was_approved_by_auto_is_refused
     assert nfl.transport.sent == []
 
 
+def test_an_approved_trade_with_no_recorded_approver_is_refused(nfl: League) -> None:
+    """``approve`` always records who decided; a row without one (a hand-edited database) sends nothing."""
+    row = nfl.offer()
+    nfl.store.proposals.update(row.model_copy(update={"decided_by": None}))
+    result = nfl.run(get_proposal(nfl.store, row.row_id))
+    assert result.proposal.status == "failed"
+    assert "trades are approval-only, but this proposal records no approver" in result.preconditions.failures
+    assert nfl.transport.sent == []
+
+
 # --- the proposal, API mode -------------------------------------------------------------------------------------------
 
 

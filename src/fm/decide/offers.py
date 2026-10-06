@@ -282,6 +282,14 @@ def _already_answered(store: Store, league: LeagueRow, offer: OfferView) -> Prop
     return None
 
 
+def _settled(store: Store, league: LeagueRow, offer: OfferView) -> OfferOutcome:
+    """The outcome of an offer that needs no evaluation: unsupported, or answered already (as in
+    :func:`propose_incoming`)."""
+    if not offer.supported:
+        return OfferOutcome(offer, blocked="; ".join(offer.unsupported))
+    return OfferOutcome(offer, proposal=_already_answered(store, league, offer), existing=True)
+
+
 def _answer_numbers(ctx: TradeContext, evaluation: TradeEvaluation, offer: OfferView) -> dict[str, Any]:
     return {
         **engine_numbers(ctx, evaluation),
@@ -417,6 +425,9 @@ def decide_offers(
     waiting = incoming(found)
     if not waiting:
         return OffersDecision(row, outgoing=outgoing(found), warnings=tuple(warnings))
+    if store_proposals and not any(o.supported and _already_answered(store, row, o) is None for o in waiting):
+        settled = [_settled(store, row, offer) for offer in waiting]  # every offer has its answer: skip the model
+        return OffersDecision(row, tuple(settled), outgoing(found), tuple(dict.fromkeys(warnings)))
     try:
         ctx = load_trade_context(
             store, row, now=at, config=config, schedule=schedule, matchups=matchups, market=market, weights=weights

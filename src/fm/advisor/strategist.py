@@ -152,7 +152,8 @@ def engine_plan(
 class StrategyInputs:
     """Everything the strategist reads, all of it the engine's: ``plan`` (``None`` without category matchups),
     ``our_odds`` (our :class:`~fm.model.simulate.TeamOdds` from the simulation), ``ideas`` (the trade targets) and the
-    ``names`` of players and ``team_names`` of teams for the text."""
+    ``names`` of players and ``team_names`` of teams for the text; ``league_id`` (the league row) tags the call's
+    ``llm_usage`` row."""
 
     league_label: str
     plan: WeeklyPlan | None = None
@@ -161,6 +162,7 @@ class StrategyInputs:
     names: Mapping[int, str] = field(default_factory=dict)
     team_names: Mapping[int, str] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    league_id: int | None = None
 
     @property
     def targets(self) -> tuple[StrategyIdea, ...]:
@@ -314,6 +316,7 @@ def write_strategy(client: AdvisorClient, inputs: StrategyInputs, *, now: dateti
         user=strategy_text(inputs),
         max_tokens=STRATEGIST_MAX_TOKENS,
         effort=effort_for(STRATEGIST_WORKER),
+        league_id=inputs.league_id,
     )
     when = now if now is not None else utc_now()
 

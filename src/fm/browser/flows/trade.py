@@ -166,6 +166,8 @@ def _approval_failures[P: Payload](ctx: FlowContext[P]) -> list[str]:
         )
     if ctx.proposal.decided_by == DECIDED_BY_AUTO:
         failures.append("trades are approval-only, but this proposal was approved by auto, not by a person")
+    elif ctx.proposal.decided_by is None and ctx.proposal.status != "proposed":  # a dry run previews a proposed row
+        failures.append("trades are approval-only, but this proposal records no approver")
     return failures
 
 

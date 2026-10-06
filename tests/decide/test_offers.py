@@ -402,6 +402,21 @@ def test_the_same_offer_is_answered_once_however_many_ticks_see_it(store: Store)
     assert len(store.proposals.find(league_id=ctx.league.row_id, kinds=ANSWER_KINDS)) == 1
 
 
+def test_a_tick_that_finds_only_answered_offers_loads_no_trade_context(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = context(store)
+    offers = open_offers([an_offer_we_like()], US, NOW)
+    first = decide_offers(store, CONFIG, ctx.league, now=NOW, offers=offers, weights=EQUAL_WEIGHTS)
+
+    def no_context(*_: Any, **__: Any) -> TradeContext:
+        raise AssertionError("every offer is answered: nothing to evaluate")
+
+    monkeypatch.setattr(offers_module, "load_trade_context", no_context)
+    again = decide_offers(store, CONFIG, ctx.league, now=NOW + timedelta(minutes=30), offers=offers)
+    assert again.answers[0].existing and again.proposals == first.proposals
+
+
 def test_an_accept_that_needs_a_drop_is_reported_not_proposed(store: Store) -> None:
     fillers = tuple((US, f"Filler {n}", "WR", BENCH, 7300 + n, 0.5) for n in range(2))  # we hold 16: no room
     ctx = context(store, extra=fillers)

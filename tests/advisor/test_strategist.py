@@ -212,7 +212,7 @@ def test_a_league_without_category_matchups_is_a_warning_not_an_error(
 
 
 def test_claude_words_the_report_and_cannot_change_the_punts_or_targets(store: Store) -> None:
-    ours = inputs()
+    ours = inputs(league_id=league_row(store).id)
     first = ours.targets[0]
     reply = said(
         "We are even this week.",
@@ -233,7 +233,7 @@ def test_claude_words_the_report_and_cannot_change_the_punts_or_targets(store: S
     assert "Season odds: playoffs 62%, bye 20%, title 8%" in sent
     assert "1. give Our Guard to Sharks for Their Wing" in sent and "2. give Our Big to Jets for Their Big" in sent
     (usage,) = store.llm_usage.since(datetime(2026, 1, 1, tzinfo=UTC))
-    assert usage.worker == "weekly_strategist"
+    assert usage.worker == "weekly_strategist" and usage.league_id == league_row(store).id
 
 
 def test_the_bounds_on_claudes_text_are_applied() -> None:
