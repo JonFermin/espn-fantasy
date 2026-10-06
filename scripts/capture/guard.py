@@ -30,11 +30,23 @@ needs them); a non-GET to ``.../teams/{id}/pendingTransactions`` is caught by th
 lets non-GET requests to ESPN hosts outside ``fantasy.espn.com`` through, in case the Disney sign-in needs one. It
 still aborts the write host, every URL containing ``transactions`` and every non-GET to ``fantasy.espn.com`` or its
 subdomains (where every league API lives), and records each request it let through in :attr:`WriteGuard.passed`.
+
+**The trade lock** is a second route, independent of the first and installed with it in every mode. Playwright runs
+routes in reverse order of registration, so the lock sees each request first. It aborts (reason ``trade lock: ...``)
+every request to the write host, and every non-GET request to *any* host whose URL matches ``transaction`` or
+``trade`` in any case or whose body carries a trade payload (``TRADE_PROPOSAL``, ``TRADE_ACCEPT``, ...,
+``ACQUISITION_BUDGET_TRADE`` or a ``"type": "TRADE"`` item). Everything else falls back to the main route. A request it
+cannot classify (an unreadable body included) is aborted. :meth:`WriteGuard.trade_canary` proves the lock on its own:
+it fires four trade-shaped POSTs that would be harmless even if they got through (league 0 on the write host, league 0
+on ``fantasy.espn.com``, and two ``.invalid`` hosts, which never resolve, one caught only by its URL and one only by its
+body) and raises :class:`GuardProofError` unless the lock itself aborted every one. ``capture.py trade-review`` runs
+it before every trade-builder interaction.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -60,6 +72,15 @@ KEPT_HEADERS: tuple[str, ...] = (
     "x-fantasy-pref",
 )
 """The only request headers a record keeps; cookies and authorization never are."""
+
+TRADE_LOCK = "trade lock"
+TRADE_URL = re.compile(r"transaction|trade", re.IGNORECASE)
+TRADE_BODY = re.compile(
+    r'TRADE_(?:PROPOSAL|ACCEPT|DECLINE|UPHOLD|VETO|AND_COUNTER)|ACQUISITION_BUDGET_TRADE|"type"\s*:\s*"TRADE"'
+)
+"""A trade in a request body: every trade transaction type the web client knows, a FAAB item, or a ``TRADE`` item."""
+CANARY_HOSTS = ("fm-trade-canary.invalid", "fm-canary.invalid")
+"""``.invalid`` never resolves (RFC 6761): a canary to these hosts could not reach anything even unblocked."""
 
 PROBE_SEASON = 2026
 PROBE_LEAGUE = 0
@@ -105,6 +126,20 @@ def block_reason(method: str, url: str, *, sign_in: bool = False) -> str | None:
         return f"{verb} to {'a fantasy.espn.com' if sign_in else 'an espn.com'} host"
     if TRANSACTIONS_MARKER in url:
         return f"URL contains {TRANSACTIONS_MARKER!r}"
+    return None
+
+
+def trade_lock_reason(method: str, url: str, body: bytes | None) -> str | None:
+    """Why the trade lock aborts this request, or ``None`` to fall back to the main route (module docstring)."""
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    if host == WRITE_HOST:
+        return f"{TRADE_LOCK}: write host"
+    if method.upper() == "GET":
+        return None
+    if TRADE_URL.search(url):
+        return f"{TRADE_LOCK}: {method.upper()} to a transaction/trade URL"
+    if body and TRADE_BODY.search(body.decode("utf-8", errors="replace")):
+        return f"{TRADE_LOCK}: {method.upper()} with a trade in its body"
     return None
 
 
@@ -197,12 +232,14 @@ class WriteGuard:
     leaks: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     proven: bool = False
+    trade_lock_proven: bool = False
     _last_read: float | None = field(default=None, init=False, repr=False)
     _probe_urls: frozenset[str] = field(default=frozenset(), init=False, repr=False)
 
     def install(self, context: BrowserContext) -> None:
         """Route every request and WebSocket of ``context`` through the guard. Call before opening any ESPN page."""
         context.route("**/*", self._on_route)
+        context.route("**/*", self._on_trade_lock)  # registered last, so it runs first
         context.route_web_socket(lambda url: is_espn_host(urlsplit(url).hostname), self._on_websocket)
         context.on("response", self._on_response)
 
@@ -229,6 +266,21 @@ class WriteGuard:
                 self._pace()
             self._record_read(request)
         route.continue_()
+
+    def _on_trade_lock(self, route: Route, request: Request) -> None:
+        try:
+            reason = trade_lock_reason(request.method, request.url, request.post_data_buffer)
+        except Exception as exc:  # fail closed, as the main route does
+            self.errors.append(f"trade lock classify failed: {exc!r}")
+            route.abort(ABORT_ERROR)
+            return
+        if reason is None:
+            route.fallback()
+            return
+        try:
+            self._record_blocked(request, reason)
+        finally:
+            route.abort(ABORT_ERROR)
 
     def _record_blocked(self, request: Request, reason: str) -> None:
         try:
@@ -274,7 +326,13 @@ class WriteGuard:
         request = response.request
         if request.method.upper() == "OPTIONS":
             return  # CORS preflights: Playwright answers them itself while routing is on
-        reason = block_reason(request.method, request.url, sign_in=self.sign_in)
+        try:
+            body = request.post_data_buffer
+        except Exception:  # an unreadable body: judge the URL alone
+            body = None
+        reason = block_reason(request.method, request.url, sign_in=self.sign_in) or trade_lock_reason(
+            request.method, request.url, body
+        )
         if reason is not None:
             self.leaks.append(f"{request.method} {request.url} -> HTTP {response.status} ({reason})")
             return
@@ -295,17 +353,52 @@ class WriteGuard:
     def prove(self, page: Page, *, season: int = PROBE_SEASON) -> list[BlockedRequest]:
         """Fire the probes from ``page`` and confirm each was aborted and recorded; returns their records."""
         league = f"/apis/v3/games/ffl/seasons/{season}/segments/0/leagues/{PROBE_LEAGUE}"
-        probes = (
-            ("POST", f"https://{WRITE_HOST}{league}/{TRANSACTIONS_MARKER}/"),
-            ("POST", f"https://fantasy.espn.com{league}/fm-guard-probe"),
-            ("GET", f"https://{READ_HOST}{league}/{TRANSACTIONS_MARKER}/"),
+        records = self._fire(
+            page,
+            (
+                ("POST", f"https://{WRITE_HOST}{league}/{TRANSACTIONS_MARKER}/", "{}"),
+                ("POST", f"https://fantasy.espn.com{league}/fm-guard-probe", "{}"),
+                ("GET", f"https://{READ_HOST}{league}/{TRANSACTIONS_MARKER}/", None),
+            ),
         )
-        # Only these URLs count as probes, so an app request aborted during a proof is still a capture.
-        self._probe_urls = frozenset(url for _, url in probes)
+        self.proven = True
+        return records
+
+    def trade_canary(self, page: Page, *, game: str, season: int) -> list[BlockedRequest]:
+        """Fire trade-shaped probes from ``page`` and confirm the trade lock itself aborted each (module docstring);
+        returns their records. Raises :class:`GuardProofError` otherwise, before anything touches the page."""
+        league = f"/apis/v3/games/{game}/seasons/{season}/segments/0/leagues/{PROBE_LEAGUE}"
+        offer = json.dumps(
+            {
+                "isLeagueManager": False,
+                "teamId": 0,
+                "type": "TRADE_PROPOSAL",
+                "executionType": "EXECUTE",
+                "items": [{"playerId": 0, "type": "TRADE", "fromTeamId": 0, "toTeamId": 0}],
+            }
+        )
+        records = self._fire(
+            page,
+            (
+                ("POST", f"https://{WRITE_HOST}{league}/{TRANSACTIONS_MARKER}/", offer),
+                ("POST", f"https://fantasy.espn.com{league}/fm-trade-canary", offer),
+                ("POST", f"https://{CANARY_HOSTS[0]}/Trade", "{}"),  # only the URL says trade, capitalised
+                ("POST", f"https://{CANARY_HOSTS[1]}/beacon", offer),  # only the body says trade
+            ),
+        )
+        missed = [f"{r.method} {r.url} ({r.reason})" for r in records if not r.reason.startswith(TRADE_LOCK)]
+        if missed:
+            raise GuardProofError("the trade lock did not abort: " + "; ".join(missed))
+        self.trade_lock_proven = True
+        return records
+
+    def _fire(self, page: Page, probes: tuple[tuple[str, str, str | None], ...]) -> list[BlockedRequest]:
+        # Only probe URLs count as probes, so an app request aborted during a proof is still a capture.
+        self._probe_urls = self._probe_urls | {url for _, url, _ in probes}
         records: list[BlockedRequest] = []
-        for method, url in probes:
+        for method, url, body in probes:
             before = len(self.blocked)
-            outcome = page.evaluate(_PROBE_JS, [method, url])
+            outcome = page.evaluate(_PROBE_JS, [method, url, body])
             page.wait_for_timeout(250)
             recorded = [r for r in self.blocked[before:] if r.url == url and r.method == method]
             if outcome.get("sent") or not recorded:
@@ -314,7 +407,6 @@ class WriteGuard:
                 )
             records.extend(recorded)
         self.check()
-        self.proven = True
         return records
 
     @property
@@ -324,10 +416,10 @@ class WriteGuard:
 
 
 _PROBE_JS = """
-async ([method, url]) => {
+async ([method, url, body]) => {
   const init = { method, credentials: 'omit', cache: 'no-store' };
   if (method !== 'GET') {
-    init.body = '{}';
+    init.body = body ?? '{}';
     init.headers = { 'Content-Type': 'application/json' };
   }
   try {

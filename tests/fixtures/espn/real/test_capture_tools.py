@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -23,6 +24,8 @@ def load_capture(name: str) -> ModuleType:
     module_name = f"capture_{name}"
     if module_name in sys.modules:
         return sys.modules[module_name]
+    if str(CAPTURE_DIR) not in sys.path:
+        sys.path.append(str(CAPTURE_DIR))  # capture.py imports its siblings by name, as when run as a script
     spec = importlib.util.spec_from_file_location(module_name, CAPTURE_DIR / f"{name}.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -34,6 +37,7 @@ def load_capture(name: str) -> ModuleType:
 guard = load_capture("guard")
 reads = load_capture("reads")
 webclient = load_capture("webclient")
+capture = load_capture("capture")
 
 LEAGUE = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1"
 WRITE = "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1/transactions/"
@@ -136,6 +140,9 @@ class FakeRoute:
     def continue_(self) -> None:
         self.outcome = ("continue", None)
 
+    def fallback(self) -> None:
+        self.outcome = ("fallback", None)
+
 
 class FakeResponse:
     def __init__(self, request: FakeRequest, status: int) -> None:
@@ -214,6 +221,225 @@ def test_sign_in_mode_records_what_it_lets_through() -> None:
     assert write_guard.passed == ["POST https://www.espn.com/x"]
     write_guard._on_response(FakeResponse(FakeRequest("POST", "https://www.espn.com/x"), 200))
     write_guard.check()  # allowed in sign-in mode, so no leak
+
+
+# --- guard: the trade lock and its canary -----------------------------------------------------------------------------
+
+FBA_WRITE = (
+    "https://lm-api-writes.fantasy.espn.com/apis/v3/games/fba/seasons/2027/segments/0/leagues/2020202/transactions/"
+)
+PROPOSAL_URL = f"{FBA_WRITE}?platformVersion=9f97de9ffb23c28027f192ff8b805e30081871f2"
+"""The trade proposal's URL as the web client sends it (the observed ffl abort's shape, for the NBA league)."""
+PROPOSAL = json.dumps(
+    {
+        "isLeagueManager": False,
+        "teamId": 1,
+        "type": "TRADE_PROPOSAL",
+        "memberId": "{00000000-0000-0000-0000-000000000001}",
+        "scoringPeriodId": 1,
+        "executionType": "EXECUTE",
+        "items": [
+            {"playerId": 1, "type": "TRADE", "fromTeamId": 1, "toTeamId": 3},
+            {"playerId": 2, "type": "TRADE", "fromTeamId": 3, "toTeamId": 1},
+        ],
+        "expirationDate": "2026-10-08T18:10:21.078Z",
+        "comment": "",
+    }
+).encode()
+
+
+def chain(write_guard: Any, request: Any) -> tuple[str, str | None] | None:
+    """Both routes in Playwright's order: the trade lock (registered last) first, the main route on fallback."""
+    lock = FakeRoute()
+    write_guard._on_trade_lock(lock, request)
+    if lock.outcome != ("fallback", None):
+        return lock.outcome
+    return route(write_guard, request)
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("POST", PROPOSAL_URL, PROPOSAL),  # the proposal itself
+        ("POST", PROPOSAL_URL, None),
+        ("GET", PROPOSAL_URL, None),  # the write host, any method
+        ("OPTIONS", FBA_WRITE, None),
+        ("POST", "https://lm-api-writes.fantasy.espn.com./apis/v3/x", None),  # trailing dot
+        ("POST", f"{LEAGUE}/transactions/", PROPOSAL),  # the read host
+        ("PUT", f"{LEAGUE}/teams/1/pendingTransactions/abc", b'{"bidAmount": 1}'),
+        ("POST", "https://fantasy.espn.com/basketball/team/trade?leagueId=1", None),  # the builder's own path
+        ("POST", "https://proxy.example.net/relay/Transactions", None),  # any host, any case
+        ("PATCH", "https://example.net/TRADE", None),
+        ("POST", "https://example.net/beacon", PROPOSAL),  # only the body says trade
+        ("POST", "https://example.net/beacon", b'{"type":"TRADE_ACCEPT","relatedTransactionId":"x"}'),
+        ("POST", "https://example.net/beacon", b'{"type":"TRADE_DECLINE"}'),
+        ("POST", "https://example.net/beacon", b'{"items":[{"type": "TRADE"}]}'),
+        ("POST", "https://example.net/beacon", b'{"type":"ACQUISITION_BUDGET_TRADE"}'),
+    ],
+)
+def test_the_trade_lock_aborts(method: str, url: str, body: bytes | None) -> None:
+    reason = guard.trade_lock_reason(method, url, body)
+    assert reason is not None and reason.startswith(guard.TRADE_LOCK)
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("GET", f"{LEAGUE}?view=mTransactions2", None),  # reads stay with the main route
+        ("GET", "https://fantasy.espn.com/basketball/team/trade?leagueId=1&teamId=3&fromTeamId=1", None),
+        ("POST", "https://registerdisney.go.com/jgc/v8/client/ESPN-ONESITE.WEB-PROD/guest/login", b"{}"),
+        ("POST", "https://sw88.espn.com/b/ss/x", b"pageName=fantasy:basketball:team"),  # the main route's job
+    ],
+)
+def test_the_trade_lock_falls_back_for_anything_else(method: str, url: str, body: bytes | None) -> None:
+    assert guard.trade_lock_reason(method, url, body) is None
+    fake = FakeRoute()
+    guard.WriteGuard(pace_reads=False)._on_trade_lock(fake, FakeRequest(method, url, body))
+    assert fake.outcome == ("fallback", None)
+
+
+@pytest.mark.parametrize("sign_in", [False, True])
+def test_the_proposal_is_aborted_by_both_layers_in_every_mode(sign_in: bool) -> None:
+    assert guard.block_reason("POST", PROPOSAL_URL, sign_in=sign_in) == "write host"
+    write_guard = guard.WriteGuard(pace_reads=False, sign_in=sign_in)
+    request = FakeRequest("POST", PROPOSAL_URL, PROPOSAL, {"content-type": "application/json", "cookie": "s2=x"})
+    assert chain(write_guard, request) == ("abort", guard.ABORT_ERROR)
+    assert route(write_guard, request) == ("abort", guard.ABORT_ERROR)  # the main route alone also aborts it
+    lock_record, main_record = write_guard.captures
+    assert lock_record.reason == "trade lock: write host" and main_record.reason == "write host"
+    assert lock_record.body["type"] == "TRADE_PROPOSAL" and lock_record.headers == {"content-type": "application/json"}
+    write_guard._on_response(FakeResponse(request, 200))
+    with pytest.raises(guard.GuardLeakError):
+        write_guard.check()
+
+
+def test_a_trade_off_espn_that_the_main_route_would_pass_is_still_aborted() -> None:
+    write_guard = guard.WriteGuard(pace_reads=False, sign_in=True)
+    request = FakeRequest("POST", "https://example.net/beacon", PROPOSAL)
+    assert route(write_guard, request) == ("continue", None)  # the main route alone lets it through
+    assert chain(write_guard, request) == ("abort", guard.ABORT_ERROR)
+    write_guard._on_response(FakeResponse(request, 204))
+    with pytest.raises(guard.GuardLeakError):
+        write_guard.check()
+
+
+def test_the_trade_lock_fails_closed_on_an_unreadable_body() -> None:
+    class UnreadableBody(FakeRequest):
+        @property
+        def post_data_buffer(self) -> bytes:  # type: ignore[override]
+            raise RuntimeError("detached")
+
+        @post_data_buffer.setter
+        def post_data_buffer(self, value: bytes | None) -> None:
+            pass
+
+    write_guard = guard.WriteGuard(pace_reads=False)
+    fake = FakeRoute()
+    write_guard._on_trade_lock(fake, UnreadableBody("POST", "https://example.net/x"))
+    assert fake.outcome == ("abort", guard.ABORT_ERROR)
+    with pytest.raises(guard.GuardError):
+        write_guard.check()
+
+
+class FakePage:
+    """Runs each probe's fetch through the guard's routes; a fetch the routes do not abort is 'sent'."""
+
+    def __init__(self, write_guard: Any, *, lock: bool = True) -> None:
+        self.guard = write_guard
+        self.lock = lock
+        self.fired: list[tuple[str, str]] = []
+
+    def evaluate(self, script: str, args: list[Any]) -> dict[str, Any]:
+        method, url, body = args
+        self.fired.append((method, url))
+        request = FakeRequest(method, url, body.encode() if body else None)
+        outcome = chain(self.guard, request) if self.lock else route(self.guard, request)
+        aborted = outcome is not None and outcome[0] == "abort"
+        return {"sent": False, "error": "TypeError: Failed to fetch"} if aborted else {"sent": True}
+
+    def wait_for_timeout(self, ms: int) -> None:
+        pass
+
+
+def test_the_trade_canary_passes_only_when_the_lock_aborts_every_probe() -> None:
+    write_guard = guard.WriteGuard(pace_reads=False)
+    page = FakePage(write_guard)
+    records = write_guard.trade_canary(page, game="fba", season=2027)
+    assert write_guard.trade_lock_proven and len(records) == 4
+    assert all(record.reason.startswith(guard.TRADE_LOCK) and record.probe for record in records)
+    assert not write_guard.captures  # probes are not captures
+    hosts = {urlsplit(url).hostname for _, url in page.fired}
+    assert hosts == {"lm-api-writes.fantasy.espn.com", "fantasy.espn.com", *guard.CANARY_HOSTS}
+    assert all("/leagues/0/" in url for _, url in page.fired if "espn.com" in url)  # league 0 does not exist
+
+
+def test_the_trade_canary_fails_without_the_lock() -> None:
+    write_guard = guard.WriteGuard(pace_reads=False)
+    with pytest.raises(guard.GuardProofError):
+        write_guard.trade_canary(FakePage(write_guard, lock=False), game="ffl", season=2026)
+    assert not write_guard.trade_lock_proven
+
+
+def test_install_registers_the_trade_lock_after_the_main_route() -> None:
+    class FakeContext:
+        def __init__(self) -> None:
+            self.routes: list[Any] = []
+
+        def route(self, pattern: str, handler: Any) -> None:
+            self.routes.append(handler)
+
+        def route_web_socket(self, matcher: Any, handler: Any) -> None:
+            pass
+
+        def on(self, event: str, handler: Any) -> None:
+            pass
+
+    write_guard = guard.WriteGuard(pace_reads=False)
+    context = FakeContext()
+    write_guard.install(context)  # type: ignore[arg-type]
+    assert [handler.__name__ for handler in context.routes] == ["_on_route", "_on_trade_lock"]
+
+
+# --- capture: trade review --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Send Trade Proposal", "Propose Trade", "Accept Trade", "Decline", "Cancel", "Confirm", "Counter Offer", "Submit"],
+)
+def test_trade_review_refuses_every_sending_control(name: str) -> None:
+    assert capture.FORBIDDEN_CONTROL.search(name)
+
+
+@pytest.mark.parametrize("name", ["Continue", "Trade Jalen Brunson", "Trade Patrick Mahomes"])
+def test_trade_review_clicks_only_selection_and_continue(name: str) -> None:
+    assert not capture.FORBIDDEN_CONTROL.search(name)
+
+
+def test_trade_review_avoids_every_team_in_a_real_offer() -> None:
+    snap = {
+        "transactions": {
+            "a": {"type": "TRADE_PROPOSAL", "status": "PENDING", "team_id": 8, "team_ids": [8, 15]},
+            "b": {"type": "TRADE_PROPOSAL", "status": "CANCELED", "team_id": 4, "team_ids": [4, 8]},
+            "c": {"type": "ROSTER", "status": "EXECUTED", "team_id": 10, "team_ids": [0, 10]},
+        },
+        "pending": {"d": {"type": "TRADE_PROPOSAL", "status": "PENDING", "team_id": 2, "team_ids": [2, 8]}},
+    }
+    assert capture.offer_teams(snap) == {2, 4, 8, 15}
+
+
+def test_tradeable_skips_locked_reserved_and_pending_players() -> None:
+    def entry(player_id: int, *, locked: bool = False, pending: list[str] | None = None) -> dict[str, Any]:
+        pool = {"id": player_id, "tradeLocked": locked, "player": {"fullName": f"Player {player_id}"}}
+        return {"playerId": player_id, "pendingTransactionIds": pending, "playerPoolEntry": pool}
+
+    team = {
+        "roster": {
+            "entries": [entry(5), entry(1, locked=True), entry(2, pending=["x"]), entry(3), entry(4)],
+            "tradeReservedEntries": [{"playerId": 3}],
+        }
+    }
+    assert capture.tradeable(team) == [{"id": 4, "name": "Player 4"}, {"id": 5, "name": "Player 5"}]
 
 
 # --- snapshots: what a leaked write would leave -----------------------------------------------------------------------

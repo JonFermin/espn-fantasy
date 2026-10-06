@@ -1,7 +1,8 @@
 """Turn the raw real-league captures into scrubbed, trimmed fixtures under ``tests/fixtures/espn/real/`` (ROADMAP #14).
 
 Inputs live in the raw capture dir (``capture.py --raw``): ``reads.json`` (what ``reads`` saved and learned),
-``calendar_<game>.json`` and ``webclient.json`` (from ``webclient``) and ``writes/*.json`` (from ``writes``). Each
+``calendar_<game>.json`` and ``webclient.json`` (from ``webclient``), ``writes/*.json`` (from ``writes``),
+``trade_review/<game>/review.json`` (from ``trade-review``) and ``writes_derived/*.json`` (from ``derive-trade``). Each
 fixture keeps ESPN's structure and drops only volume: fewer teams, players, matchups and stat entries, and no long text
 blocks (player outlooks and rankings, notification settings). Every file is scrubbed by one :class:`scrub.Scrubber` per
 league and checked with :meth:`scrub.Scrubber.leaks` before it is written (``webclient.json``, which belongs to no
@@ -12,13 +13,15 @@ request that produced it, the model that parses it and how it was trimmed.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from scrub import Scrubber
+from scrub import MIN_SUBSTRING_LENGTH, Scrubber
 
 from fm.config import League
 
@@ -403,6 +406,8 @@ def make_fixtures(raw: Path, dest: Path, leagues: list[League]) -> dict[str, Any
         period_type = (settings.get("settings") or {}).get("scheduleSettings", {}).get("periodTypeId")
         _write_calendar(writer, scrubber, league, raw, period_type)
         _write_captured_writes(writer, scrubber, league, raw)
+        _write_trade_review(writer, scrubber, league, raw)
+        _write_derived_writes(writer, scrubber, league, raw)
     _write_webclient(writer, scrubbers, raw)
     index_path = dest / "index.json"
     index_path.write_text(json.dumps(writer.index, indent=1, sort_keys=True) + "\n", encoding="utf-8")
@@ -494,4 +499,94 @@ def _write_captured_writes(writer: FixtureWriter, scrubber: Scrubber, league: Le
     for path in sorted(folder.glob(f"{league.game}_*.json")):
         record = json.loads(path.read_text(encoding="utf-8"))
         entry = {"game": league.game, "kind": "write", "view": None, "trimmed": "aborted request, as captured"}
+        if isinstance(record.get("body"), dict) and record["body"].get("type") == "TRADE_PROPOSAL":
+            entry["trimmed"] = (
+                "observed: the web app's own request, aborted by the guard on the write host when a guarded `writes` "
+                "session drove the trade builder to Send; it never reached ESPN"
+            )
         writer.write(scrubber, f"{league.game}/write_{path.stem.split('_', 1)[1]}.json", record, entry)
+
+
+_TEAM_PARAM = re.compile(r"([?&][A-Za-z]*[Tt]eamId=)(\d+)")
+
+
+def _scrub_text(scrubber: Scrubber, data: Any) -> Any:
+    """Team ids in URL query parameters mapped, and every real team or manager name in free page text redacted."""
+    if isinstance(data, dict):
+        return {key: _scrub_text(scrubber, value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_scrub_text(scrubber, value) for value in data]
+    if not isinstance(data, str):
+        return data
+    text = _TEAM_PARAM.sub(lambda m: m.group(1) + str(scrubber.team(int(m.group(2)))), data)
+    for secret in sorted(scrubber.sensitive, key=len, reverse=True):
+        if secret.startswith("{"):
+            continue
+        # Page text runs words together ("Propose TradeTeam Name"), so a long name goes wherever it appears.
+        long_name = len(secret) >= MIN_SUBSTRING_LENGTH
+        pattern = re.escape(secret) if long_name else rf"(?<![A-Za-z0-9]){re.escape(secret)}(?![A-Za-z0-9])"
+        text = re.sub(pattern, "<redacted>", text, flags=re.IGNORECASE)
+    return text
+
+
+def _write_page_text(
+    writer: FixtureWriter, scrubber: Scrubber, relative: str, data: Any, entry: dict[str, Any]
+) -> None:
+    """A fixture holding page text: written once scrubbed, after a substring leak check stricter than
+    :meth:`scrub.Scrubber.leaks` (which matches whole words and would miss a name run into the word before it)."""
+    text = json.dumps(_scrub_text(scrubber, data), ensure_ascii=False).lower()
+    names = [s for s in scrubber.sensitive if not s.startswith("{") and len(s) >= MIN_SUBSTRING_LENGTH]
+    if any(name.lower() in text for name in names):
+        raise FixtureLeakError(f"{relative}: a real team or manager name appears in page text")
+    writer.write(scrubber, relative, _scrub_text(scrubber, data), entry)
+
+
+def _blocked_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """An aborted request as a fixture keeps it: whole on a fantasy host; elsewhere (analytics beacons, whose query
+    strings carry account ids) only its method, host, path and reason."""
+    parts = urlsplit(record["url"])
+    host = (parts.hostname or "").lower()
+    if host == "fantasy.espn.com" or host.endswith(".fantasy.espn.com"):
+        return record
+    return {
+        "method": record["method"],
+        "url": f"{parts.scheme}://{host}{parts.path}",
+        "reason": record["reason"],
+        "resource_type": record.get("resource_type"),
+        "trimmed": "query, headers and body dropped",
+    }
+
+
+def _write_trade_review(writer: FixtureWriter, scrubber: Scrubber, league: League, raw: Path) -> None:
+    """What ``trade-review`` observed: the canary, the builder and review DOM state and the review step's reads."""
+    path = raw / "trade_review" / league.game / "review.json"
+    if not path.exists():
+        return
+    review = json.loads(path.read_text(encoding="utf-8"))
+    review["review_blocked"] = [_blocked_summary(record) for record in review.get("review_blocked") or []]
+    entry = {
+        "game": league.game,
+        "kind": "trade_review",
+        "view": "trade builder",
+        "trimmed": "observed: the trade builder driven to its review step and left there (Send Trade Proposal never "
+        "clicked); DOM state as structured data, team and manager names redacted, screenshots kept raw; aborted "
+        "requests off the fantasy hosts (analytics) reduced to method, host, path and reason",
+    }
+    _write_page_text(writer, scrubber, f"{league.game}/trade_review.json", review, entry)
+
+
+def _write_derived_writes(writer: FixtureWriter, scrubber: Scrubber, league: League, raw: Path) -> None:
+    """Requests built by running ESPN's code offline (``derive-trade``): never observed on the wire."""
+    folder = raw / "writes_derived"
+    if not folder.is_dir():
+        return
+    for path in sorted(folder.glob(f"{league.game}_*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        entry = {
+            "game": league.game,
+            "kind": "write_derived",
+            "view": None,
+            "trimmed": "derived, not observed: ESPN's saved client code run offline with its send function stubbed",
+        }
+        name = f"{league.game}/write_{path.stem.split('_', 1)[1]}_derived.json"
+        _write_page_text(writer, scrubber, name, record, entry)

@@ -328,6 +328,13 @@
    "trimmed": "probe outcomes from the read pass",
    "view": null
   },
+  "fba/trade_review.json": {
+   "bytes": 7740,
+   "game": "fba",
+   "kind": "trade_review",
+   "trimmed": "observed: the trade builder driven to its review step and left there (Send Trade Proposal never clicked); DOM state as structured data, team and manager names redacted, screenshots kept raw; aborted requests off the fantasy hosts (analytics) reduced to method, host, path and reason",
+   "view": "trade builder"
+  },
   "fba/write_FREEAGENT_1.json": {
    "bytes": 596,
    "game": "fba",
@@ -347,6 +354,13 @@
    "game": "fba",
    "kind": "write",
    "trimmed": "aborted request, as captured",
+   "view": null
+  },
+  "fba/write_TRADE_PROPOSAL_derived.json": {
+   "bytes": 2346,
+   "game": "fba",
+   "kind": "write_derived",
+   "trimmed": "derived, not observed: ESPN's saved client code run offline with its send function stubbed",
    "view": null
   },
   "ffl/calendar.json": {
@@ -676,11 +690,32 @@
    "trimmed": "probe outcomes from the read pass",
    "view": null
   },
+  "ffl/trade_review.json": {
+   "bytes": 7621,
+   "game": "ffl",
+   "kind": "trade_review",
+   "trimmed": "observed: the trade builder driven to its review step and left there (Send Trade Proposal never clicked); DOM state as structured data, team and manager names redacted, screenshots kept raw; aborted requests off the fantasy hosts (analytics) reduced to method, host, path and reason",
+   "view": "trade builder"
+  },
   "ffl/write_ROSTER_1.json": {
    "bytes": 757,
    "game": "ffl",
    "kind": "write",
    "trimmed": "aborted request, as captured",
+   "view": null
+  },
+  "ffl/write_TRADE_PROPOSAL_1.json": {
+   "bytes": 920,
+   "game": "ffl",
+   "kind": "write",
+   "trimmed": "observed: the web app's own request, aborted by the guard on the write host when a guarded `writes` session drove the trade builder to Send; it never reached ESPN",
+   "view": null
+  },
+  "ffl/write_TRADE_PROPOSAL_derived.json": {
+   "bytes": 2339,
+   "game": "ffl",
+   "kind": "write_derived",
+   "trimmed": "derived, not observed: ESPN's saved client code run offline with its send function stubbed",
    "view": null
   },
   "ffl/write_WAIVER_1.json": {

@@ -9,6 +9,8 @@ it, prove nothing changed, and turn the captures into scrubbed fixtures. ``scrip
     uv run python scripts/capture/capture.py verify               # re-read the leagues and compare with the snapshot
     uv run python scripts/capture/capture.py fixtures             # scrub + trim into tests/fixtures/espn/real/
     uv run python scripts/capture/capture.py web-login            # fallback: a sign-in window that stays open
+    uv run python scripts/capture/capture.py trade-review         # trade builder up to its review step, never Send
+    uv run python scripts/capture/capture.py derive-trade         # the offer's request, from ESPN's code, offline
 
 Every browser session starts with :class:`guard.WriteGuard` installed and proven before any ESPN page opens. Raw
 captures hold real manager names and ids, so ``--raw`` defaults to the system temp dir and may not be inside the repo;
@@ -22,18 +24,19 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from fixture_writer import WEBCLIENT_FILE, make_fixtures
-from guard import FANTASY_DOMAIN, WRITE_HOST, BlockedRequest, GuardError, WriteGuard
+from guard import FANTASY_DOMAIN, WRITE_HOST, BlockedRequest, GuardError, GuardProofError, WriteGuard
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, Response
 from reads import (
@@ -67,6 +70,12 @@ REPO = Path(__file__).resolve().parents[2]
 FIXTURES = REPO / "tests" / "fixtures" / "espn" / "real"
 SNAPSHOT_BEFORE = "snapshot_before.json"
 TEAM_URL = "https://fantasy.espn.com/{sport}/team?leagueId={league}&teamId={team}&seasonId={season}"
+TRADE_BUILDER_URL = (
+    "https://fantasy.espn.com/{sport}/team/trade?leagueId={league}&teamId={partner}&fromTeamId={team}&seasonId={season}"
+)
+TRADE_REVIEW = "trade_review"
+DERIVED_WRITES = "writes_derived"
+DERIVE_JS = Path(__file__).resolve().parent / "derive_trade.cjs"
 LOGIN_REQUIRED = "Log in Required"
 """The heading the web app shows when the profile has no OneID web session (the API cookies may still work)."""
 LOGIN_POLL_MS = 2000
@@ -453,6 +462,7 @@ def cmd_writes(args: argparse.Namespace) -> int:
     try:
         with guarded_browser(headless=args.headless) as (browser, guard, page):
             session = harvest_session(browser.context)
+            browser.context.add_init_script(SEND_TRAP_JS)  # no offer is sent or answered from this window either
             open_espn_page(page, guard, url, args.settle_ms)
             if web_login_missing(page):
                 if args.headless:
@@ -475,8 +485,9 @@ def cmd_writes(args: argparse.Namespace) -> int:
             if outcome == 0:
                 print(
                     "Drive each flow in the window until the app sends its request (the guard aborts it and the app "
-                    "shows an error): a bench swap, a free-agent add/drop, a waiver claim, and a trade proposal, in "
-                    "each league. Never touch a real pending offer. Close the window when done."
+                    "shows an error): a bench swap, a free-agent add/drop and a waiver claim, in each league. No "
+                    "trades here: Send, Accept and Decline are disabled in this window, and `capture.py trade-review` "
+                    "covers the trade builder. Never touch a real pending offer. Close the window when done."
                 )
                 print(f"{capture_writes(page, guard, args.raw / 'writes', args.minutes)} write requests captured")
     except GuardError as exc:
@@ -516,6 +527,353 @@ def cmd_web_login(args: argparse.Namespace) -> int:
         print(f"After a browser restart the web app still shows {LOGIN_REQUIRED!r}: the web session did not persist.")
         return 3
     print("The web session survived a browser restart; run `capture.py snapshot` and then `writes`.")
+    return 0
+
+
+# --- trade review -----------------------------------------------------------------------------------------------------
+
+FORBIDDEN_CONTROL = re.compile(
+    r"\b(send|propose|submit|accept|decline|reject|cancel|confirm|counter|veto|withdraw|delete|drop)\b", re.IGNORECASE
+)
+"""Accessible names ``trade-review`` refuses to click: anything that could send, answer or cancel an offer."""
+
+SEND_TRAP_JS = """
+(() => {
+  if (window.__fmSendTrap) return;
+  const forbidden = /send trade|propose trade|send|submit|accept|decline|counter/i;
+  const hit = (node) => {
+    const el = node && node.closest ? node.closest('button, a, input, [role="button"], [role="link"]') : null;
+    if (!el) return false;
+    const text = [el.getAttribute('aria-label'), el.textContent, el.value].filter(Boolean).join(' ');
+    return forbidden.test(text);
+  };
+  const trap = (event) => {
+    const target = event.type === 'submit' ? (event.submitter || event.target) : event.target;
+    if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+    if (event.type === 'submit' || hit(target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      window.__fmSendTrapHits = (window.__fmSendTrapHits || 0) + 1;
+    }
+  };
+  for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'keydown', 'submit']) {
+    window.addEventListener(type, trap, true);
+  }
+  window.__fmSendTrap = true;
+})();
+"""
+"""A capturing listener on every document of the ``trade-review`` context that swallows clicks, key presses and form
+submits on any control reading like Send/Propose/Accept/Decline, so not even a person at the headed window can send an
+offer through the page. The network guard and trade lock stay the real defence; this is the layer in front of them."""
+
+REVIEW_STATE_JS = """
+() => {
+  const seen = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  const label = (el) => (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\\s+/g, ' ');
+  const named = (el) => el.getAttribute('aria-label') || el.getAttribute('name') || '';
+  return {
+    path: location.pathname,
+    headings: [...document.querySelectorAll('h1, h2, h3, h4, [role="heading"]')].filter(seen).map(label),
+    buttons: [...document.querySelectorAll('button, [role="button"]')].filter(seen).map((el) => ({
+      name: label(el),
+      disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+    })),
+    selects: [...document.querySelectorAll('select')].filter(seen).map((el) => ({
+      name: named(el),
+      value: el.value,
+      options: [...el.options].map((o) => ({ value: o.value, text: o.text.trim(), selected: o.selected })),
+    })),
+    textareas: [...document.querySelectorAll('textarea')].filter(seen).map((el) => ({
+      name: named(el),
+      placeholder: el.placeholder,
+      maxLength: el.maxLength,
+      value: el.value,
+    })),
+    checked: [...document.querySelectorAll('input[type="checkbox"]:checked')].map(
+      (el) => el.getAttribute('aria-label') || el.getAttribute('name') || ''
+    ),
+    dialogs: [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
+      .filter(seen)
+      .map((el) => ({
+        label: el.getAttribute('aria-label') || '',
+        text: el.innerText.split('\\n').map((line) => line.trim()).filter(Boolean),
+      })),
+    trapHits: window.__fmSendTrapHits || 0,
+  };
+}
+"""
+
+
+def offer_teams(snap: dict[str, Any]) -> set[int]:
+    """Every team in any trade record or pending item of a snapshot: the teams of the real offers, never disturbed."""
+    teams: set[int] = set()
+    for field_name in ("transactions", "pending"):
+        for record in (snap.get(field_name) or {}).values():
+            if str(record.get("type", "")).startswith("TRADE"):
+                teams.update(int(team) for team in record.get("team_ids") or [] if team)
+                if record.get("team_id"):
+                    teams.add(int(record["team_id"]))
+    return teams
+
+
+def _reserved_player_ids(value: Any) -> set[int]:
+    if isinstance(value, dict):
+        found = {int(value["playerId"])} if isinstance(value.get("playerId"), int) else set()
+        for child in value.values():
+            found |= _reserved_player_ids(child)
+        return found
+    if isinstance(value, list):
+        return {pid for child in value for pid in _reserved_player_ids(child)}
+    return set()
+
+
+def tradeable(team: dict[str, Any]) -> list[dict[str, Any]]:
+    """Roster entries the builder lets a person tick: not trade-locked, not held by a pending offer or move."""
+    roster = team.get("roster") or {}
+    reserved = _reserved_player_ids(roster.get("tradeReservedEntries"))
+    picks = []
+    for entry in roster.get("entries") or []:
+        pool = entry.get("playerPoolEntry") or {}
+        player_id = entry.get("playerId") or pool.get("id")
+        if pool.get("tradeLocked") or entry.get("pendingTransactionIds") or player_id in reserved:
+            continue
+        name = (pool.get("player") or {}).get("fullName")
+        if isinstance(player_id, int) and isinstance(name, str) and name:
+            picks.append({"id": player_id, "name": name})
+    return sorted(picks, key=lambda pick: pick["id"])
+
+
+def choose_trade(client: EspnClient, league: League, snap: dict[str, Any], partner: int | None) -> dict[str, Any]:
+    """A one-for-one offer to a team outside every real offer: the lowest-id tradeable player on each side."""
+    busy = offer_teams(snap)
+    if partner is None:
+        team_ids = sorted(team.id for team in client.teams().data.teams)
+        partner = next((team for team in team_ids if team != league.team_id and team not in busy), None)
+        if partner is None:
+            raise SnapshotError(f"{league.key}: every other team is part of a real offer")
+    elif partner in busy or partner == league.team_id:
+        raise SnapshotError(f"{league.key}: team {partner} is ours or part of a real offer; pick another")
+    rosters = client.get_view(View.ROSTER, key="trade_review").data
+    teams = {team["id"]: team for team in rosters.get("teams") or []}
+    ours, theirs = tradeable(teams.get(league.team_id, {})), tradeable(teams.get(partner, {}))
+    if not ours or not theirs:
+        raise SnapshotError(f"{league.key}: no tradeable player on one side of a trade with team {partner}")
+    settings = client.get_view(View.SETTINGS, key="trade_review").data
+    return {
+        "game": league.game,
+        "seasonId": league.season,
+        "leagueId": league.espn_league_id,
+        "latestScoringPeriod": (settings.get("status") or {}).get("latestScoringPeriod"),
+        "fromTeamId": league.team_id,
+        "toTeamId": partner,
+        "players": [
+            {**ours[0], "teamId": league.team_id, "side": "ours"},
+            {**theirs[0], "teamId": partner, "side": "theirs"},
+        ],
+    }
+
+
+def safe_click(page: Page, role: str, name: str) -> None:
+    """Click the one control with this role and exact accessible name; refuse a forbidden name or an ambiguous match."""
+    if FORBIDDEN_CONTROL.search(name):
+        raise GuardError(f"refusing to click {role} {name!r}: it reads like a send, answer or cancel")
+    locator = page.get_by_role(role, name=name, exact=True)  # type: ignore[arg-type]
+    if locator.count() != 1:
+        raise GuardError(f"expected one {role} named {name!r}, found {locator.count()}; stopping")
+    locator.click(timeout=15000)
+
+
+def review_trade(
+    page: Page, guard: WriteGuard, league: League, selection: dict[str, Any], out: Path, settle_ms: int
+) -> dict[str, Any]:
+    """Tick one player per side in the trade builder and press Continue; read the review step and leave. The trade
+    canary runs before the page is opened and again before the first click; Send Trade Proposal is never touched."""
+    canaries = guard.trade_canary(page, game=league.game, season=league.season)
+    sport = "football" if league.sport == "nfl" else "basketball"
+    url = TRADE_BUILDER_URL.format(
+        sport=sport,
+        league=league.espn_league_id,
+        partner=selection["toTeamId"],
+        team=league.team_id,
+        season=league.season,
+    )
+    open_espn_page(page, guard, url, settle_ms)
+    canaries += guard.trade_canary(page, game=league.game, season=league.season)
+    if page.evaluate("window.__fmSendTrap === true") is not True:
+        raise GuardProofError("the send trap is not installed on the trade builder")
+    report: dict[str, Any] = {
+        "league": league.key,
+        "game": league.game,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "builder_url": url,
+        "selection": selection,
+        "canary": [record.as_json() for record in canaries],
+    }
+    if web_login_missing(page):
+        report["status"] = "login required"
+        return report
+    dump_page(page, out, "builder")
+    report["builder"] = page.evaluate(REVIEW_STATE_JS)
+    for player in selection["players"]:
+        safe_click(page, "checkbox", f"Trade {player['name']}")
+        page.wait_for_timeout(500)
+        guard.check()
+    reads_from, blocked_from = len(guard.reads), len(guard.captures)
+    safe_click(page, "button", "Continue")
+    page.wait_for_timeout(settle_ms)
+    guard.check()
+    dump_page(page, out, "review")
+    state = page.evaluate(REVIEW_STATE_JS)
+    report["review"] = state
+    report["review_reads"] = [read.as_json() for read in guard.reads[reads_from:]]
+    report["review_blocked"] = [record.as_json() for record in guard.captures[blocked_from:]]
+    report["send_button_present"] = any(
+        re.search(r"send trade proposal", button["name"], re.IGNORECASE) for button in state["buttons"]
+    )
+    report["status"] = "review reached" if report["send_button_present"] else "review not reached"
+    page.goto("about:blank")
+    guard.check()
+    return report
+
+
+def cmd_trade_review(args: argparse.Namespace) -> int:
+    """Open each league's trade builder in a guarded window, tick one player per side, press Continue and record the
+    review step (its reads and DOM). Send Trade Proposal is never clicked: the click helper refuses it, a page-level
+    trap swallows it, and the trade lock would abort its request. Verifies every league afterwards."""
+    config = load_config()
+    chosen = leagues(config, args.league)
+    if not (args.raw / SNAPSHOT_BEFORE).exists():
+        print("run `capture.py snapshot` first: the verification compares against it")
+        return 2
+    snaps = read_json(args.raw / SNAPSHOT_BEFORE)
+    session: EspnSession | None = None
+    outcome = 0
+    try:
+        with guarded_browser(headless=args.headless) as (browser, guard, page):
+            session = harvest_session(browser.context)
+            browser.context.add_init_script(SEND_TRAP_JS)
+            log = RequestLog()
+            for league in chosen:
+                with league_client(league, session, args.raw, log) as client:
+                    selection = choose_trade(client, league, snaps[league.key], args.partner)
+                out = args.raw / TRADE_REVIEW / league.game
+                write_json(out / "selection.json", selection)
+                report = review_trade(page, guard, league, selection, out, args.settle_ms)
+                write_json(out / "review.json", report)
+                print(f"{league.key}: {report['status']} ({len(report.get('review_reads', []))} reads on the review)")
+                for record in report.get("review_blocked", []):
+                    print(f"  the guard aborted {record['method']} {record['url'][:120]} ({record['reason']})")
+                if report["status"] != "review reached":
+                    outcome = 2
+    except (GuardError, SnapshotError) as exc:
+        print(f"STOPPED: {exc}")
+        outcome = 1
+    print("verifying the leagues")
+    clean = verify_leagues(args.raw, chosen, session if session is not None else load_espn_session())
+    return outcome if clean else 1
+
+
+# --- derive trade -----------------------------------------------------------------------------------------------------
+
+DERIVED_NOTE = (
+    "derived, not observed: produced by running ESPN's saved web-client code (proposeTrade, createTransaction, the "
+    "model serializer) offline in Node with its send function stubbed (scripts/capture/derive_trade.cjs); no request "
+    "was sent or attempted"
+)
+
+
+def derive_trade(webclient: Path, inputs: dict[str, Any]) -> dict[str, Any]:
+    """The path and wire body ESPN's own ``proposeTrade`` builds from ``inputs`` (see ``derive_trade.cjs``)."""
+    done = subprocess.run(
+        ["node", str(DERIVE_JS), str(webclient)],
+        input=json.dumps(inputs),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise RuntimeError(f"derive_trade.cjs failed: {done.stderr.strip()}")
+    result = json.loads(done.stdout)
+    return {"path": result["path"], "body": json.loads(result["data"])}
+
+
+def cmd_derive_trade(args: argparse.Namespace) -> int:
+    """The ``TRADE_PROPOSAL`` request for each league's ``trade-review`` selection, derived from the saved client code
+    (never sent), into ``writes_derived/<game>_TRADE_PROPOSAL.json`` for ``fixtures``."""
+    config = load_config()
+    webclient = args.raw / WEBCLIENT_FILE
+    if not webclient.exists():
+        webclient = FIXTURES / WEBCLIENT_FILE
+    session = load_espn_session()
+    code = read_json(webclient)
+    for league in leagues(config, args.league):
+        folder = args.raw / TRADE_REVIEW / league.game
+        if not (folder / "selection.json").exists():
+            print(f"{league.key}: no trade-review selection; run `capture.py trade-review` first")
+            return 2
+        selection = read_json(folder / "selection.json")
+        review = read_json(folder / "review.json") if (folder / "review.json").exists() else {}
+        expiry = next((select for select in (review.get("review") or {}).get("selects", []) if select["options"]), None)
+        days = int(re.sub(r"\D", "", expiry["value"]) or 2) if expiry else 2
+        textarea = next(iter((review.get("review") or {}).get("textareas", [])), None)
+        inputs = {
+            **{key: selection[key] for key in ("game", "seasonId", "leagueId", "latestScoringPeriod")},
+            "swid": session.swid if session.swid.startswith("{") else "{" + session.swid + "}",
+            "fromTeamId": selection["fromTeamId"],
+            "toTeamId": selection["toTeamId"],
+            "trade": [{"id": p["id"], "teamId": p["teamId"]} for p in selection["players"]],
+            "expirationDate": (datetime.now(UTC) + timedelta(days=days)).isoformat(timespec="milliseconds")[:-6] + "Z",
+            "comment": textarea["value"] if textarea else "",
+        }
+        derived = derive_trade(webclient, inputs)
+        versions = {
+            match.group(1)
+            for read in review.get("review_reads") or []
+            if (match := re.search(r"[?&]platformVersion=([0-9a-f]{40})", read["url"]))
+        }
+        query = f"?platformVersion={versions.pop()}" if len(versions) == 1 else ""
+        record = {
+            "provenance": DERIVED_NOTE,
+            "derived_at": datetime.now(UTC).isoformat(),
+            "webClientBuild": code.get("webClientBuild"),
+            "bundleSha256": code.get("bundleSha256"),
+            "method": "POST",
+            "url": f"https://{WRITE_HOST}/apis/v3/{derived['path']}{query}",
+            "headers": {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "x-fantasy-platform": "espn-fantasy-web",
+                "x-fantasy-source": "kona",
+            },
+            "body": derived["body"],
+            "inputs": {
+                "players": selection["players"],
+                "expiry_days": days,
+                "expiry_source": "the review step's expiry select" if expiry else "the builder's default (2 Days)",
+                "comment_source": "the review step's textarea" if textarea else "empty",
+            },
+            "sources": {
+                "body": "service.proposeTrade -> createTransaction -> model get(), executed",
+                "path": "the `post` excerpt (games/{game}/seasons/{season}/segments/0/leagues/{id}/transactions/)",
+                "host": "the `writeHost` excerpt (lm-api-writes.fantasy.espn.com)",
+                "headers": "requestDefaults (Accept, X-Fantasy-Source) and post (Content-Type) excerpts; the "
+                "X-Fantasy-Platform value is not in the excerpts and is taken from the observed captures",
+                "expirationDate": "an ISO string with milliseconds, as the observed 2026-10-06 ffl abort sent; the "
+                "value is now + expiry_days, which is what that abort shows (sent at +48 h for 2 Days)",
+                "platformVersion": "the client appends it to every request (requestConfig) but its value is not in "
+                "the excerpts; it is the value the same client sent on the review step's own reads"
+                if query
+                else "not observed on the review step, so the derived URL carries none",
+            },
+            "unknowns": [
+                "the order of the TRADE items is the order of transactionListByAction.trade, which the UI builds; "
+                "the observed ffl abort listed our players first",
+            ],
+        }
+        path = args.raw / DERIVED_WRITES / f"{league.game}_TRADE_PROPOSAL.json"
+        write_json(path, record)
+        print(f"{league.key}: derived {path.name} ({len(derived['body'].get('items', []))} items)")
     return 0
 
 
@@ -561,6 +919,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     web_login = sub.add_parser("web-login", help="a sign-in window that stays open (league writes still blocked)")
     web_login.add_argument("--minutes", type=float, default=15.0)
     web_login.add_argument("--settle-ms", type=int, default=10000)
+    trade = sub.add_parser("trade-review", help="trade builder up to its review step; never sends an offer")
+    trade.add_argument("--partner", type=int, help="the other team (default: the lowest id outside every real offer)")
+    trade.add_argument("--headless", action="store_true", help="needs a web sign-in that survives a restart")
+    trade.add_argument("--settle-ms", type=int, default=8000)
+    sub.add_parser("derive-trade", help="the offer request from ESPN's code, run offline; nothing is sent")
     fixtures = sub.add_parser("fixtures", help="scrub + trim the raw captures into the repo")
     fixtures.add_argument("--dest", type=Path, default=FIXTURES)
     args = parser.parse_args(argv)
@@ -576,6 +939,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "explore": cmd_explore,
         "writes": cmd_writes,
         "web-login": cmd_web_login,
+        "trade-review": cmd_trade_review,
+        "derive-trade": cmd_derive_trade,
         "fixtures": cmd_fixtures,
     }
     return handlers[args.command](args)

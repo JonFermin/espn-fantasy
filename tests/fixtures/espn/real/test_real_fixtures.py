@@ -13,6 +13,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -106,6 +108,21 @@ def _write(data: Any, game: str) -> None:
     }
 
 
+DERIVED = "derived, not observed"
+
+
+def _write_derived(data: Any, game: str) -> None:
+    """A request built from ESPN's code (``capture.py derive-trade``): it says so, and has a capture's shape."""
+    assert data["provenance"].startswith(DERIVED)
+    _write(data, game)
+    assert data["sources"] and data["unknowns"] and data["inputs"]["players"]
+
+
+def _trade_review(data: Any, game: str) -> None:
+    assert data["game"] == game and data["status"] in ("review reached", "review not reached", "login required")
+    assert data["canary"] and all(record["reason"].startswith("trade lock") for record in data["canary"])
+
+
 def _webclient(data: Any, game: None) -> None:
     code = data["transactionCode"]
     assert data["webClientBuild"] and re.fullmatch(r"[0-9a-f]{64}", data["bundleSha256"])
@@ -129,6 +146,8 @@ LOADERS: dict[str, Callable[[Any, Any], object]] = {
     "calendar": _calendar,
     "probes": _probes,
     "write": _write,
+    "write_derived": _write_derived,
+    "trade_review": _trade_review,
     "webclient": _webclient,
 }
 
@@ -511,6 +530,128 @@ def test_writes_post_json_to_the_transactions_path_on_the_write_host() -> None:
     assert "withCredentials:true" in config and '"X-Fantasy-Platform":' in config
     assert '"/pendingTransactions"' in transaction_code("reorderPendingTransactions")
     assert "bidAmount" in transaction_code("updatePendingBid")
+
+
+# --- trade offers: observed, reviewed and derived ---------------------------------------------------------------------
+#
+# ffl/write_TRADE_PROPOSAL_1.json is observed: the web app's own request, aborted by the guard on the write host on
+# 2026-10-06 when a guarded `writes` session went as far as Send Trade Proposal. {ffl,fba}/trade_review.json are
+# observed: `trade-review` took each builder to its review step and stopped. {ffl,fba}/write_TRADE_PROPOSAL_derived.json
+# are derived, not observed: ESPN's saved code run offline with the send stubbed, for the offer the review showed.
+
+ISO_MILLIS_Z = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
+OFFER_KEYS = [
+    "isLeagueManager",
+    "teamId",
+    "type",
+    "memberId",
+    "scoringPeriodId",
+    "executionType",
+    "items",
+    "expirationDate",
+    "comment",
+]
+OFFERS = [
+    "ffl/write_TRADE_PROPOSAL_1.json",
+    "ffl/write_TRADE_PROPOSAL_derived.json",
+    "fba/write_TRADE_PROPOSAL_derived.json",
+]
+
+
+@pytest.mark.parametrize("relative", OFFERS)
+def test_an_offer_has_the_serializers_keys_and_an_iso_expiry(relative: str) -> None:
+    body = load(relative)["body"]
+    assert list(body) == OFFER_KEYS and body["type"] == "TRADE_PROPOSAL" and body["executionType"] == "EXECUTE"
+    assert ISO_MILLIS_Z.fullmatch(body["expirationDate"])  # a string on the wire; ESPN's records hold epoch ms
+    assert body["comment"] == ""  # the empty textarea is sent, not left out
+    ours = body["teamId"]
+    assert all(list(item) == ["playerId", "type", "fromTeamId", "toTeamId"] for item in body["items"])
+    sides = [item["fromTeamId"] == ours for item in body["items"]]
+    assert sides == sorted(sides, reverse=True) and True in sides and False in sides  # ours first, then theirs
+    assert all(ours in (item["fromTeamId"], item["toTeamId"]) for item in body["items"])
+
+
+def test_the_observed_offer_expires_two_days_after_it_was_sent() -> None:
+    capture = load("ffl/write_TRADE_PROPOSAL_1.json")
+    sent = datetime.fromisoformat(capture["at"])
+    expires = datetime.fromisoformat(capture["body"]["expirationDate"].replace("Z", "+00:00"))
+    assert timedelta(days=2) - timedelta(seconds=1) < expires - sent <= timedelta(days=2)  # the builder's "2 Days"
+
+
+@pytest.mark.parametrize("game", ["ffl", "fba"])
+def test_the_derived_offer_is_the_reviewed_one(game: str) -> None:
+    derived, review = load(f"{game}/write_TRADE_PROPOSAL_derived.json"), load(f"{game}/trade_review.json")
+    selection = review["selection"]
+    assert derived["inputs"]["players"] == selection["players"]
+    assert [(item["playerId"], item["fromTeamId"], item["toTeamId"]) for item in derived["body"]["items"]] == [
+        (player["id"], player["teamId"], selection["toTeamId" if player["side"] == "ours" else "fromTeamId"])
+        for player in selection["players"]
+    ]
+    assert derived["body"]["teamId"] == selection["fromTeamId"] == our_team(game)
+    assert derived["body"]["scoringPeriodId"] == selection["latestScoringPeriod"]
+    expiry = next(select for select in review["review"]["selects"] if select["options"])
+    assert derived["inputs"]["expiry_days"] == int(expiry["value"])
+
+
+def test_the_derived_offer_matches_the_observed_one_but_for_its_players() -> None:
+    observed, derived = load("ffl/write_TRADE_PROPOSAL_1.json"), load("ffl/write_TRADE_PROPOSAL_derived.json")
+    assert derived["url"] == observed["url"] and derived["headers"] == observed["headers"]
+    assert derived["method"] == observed["method"] == "POST"
+    for key in ("isLeagueManager", "teamId", "type", "memberId", "scoringPeriodId", "executionType", "comment"):
+        assert derived["body"][key] == observed["body"][key]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the saved client code")
+@pytest.mark.parametrize("game", ["ffl", "fba"])
+def test_the_derivation_reproduces_from_the_saved_client_code(game: str) -> None:
+    """Re-run ``derive_trade.cjs`` on the committed ``webclient.json``: ESPN's own code, offline, send stubbed."""
+    derived = load(f"{game}/write_TRADE_PROPOSAL_derived.json")
+    body = derived["body"]
+    inputs = {
+        "game": game,
+        "seasonId": SEASONS[game],
+        "leagueId": LEAGUE_PLACEHOLDERS[game],
+        "latestScoringPeriod": body["scoringPeriodId"],
+        "swid": body["memberId"],
+        "fromTeamId": body["teamId"],
+        "toTeamId": next(item["toTeamId"] for item in body["items"] if item["fromTeamId"] == body["teamId"]),
+        "trade": [{"id": player["id"], "teamId": player["teamId"]} for player in derived["inputs"]["players"]],
+        "expirationDate": body["expirationDate"],
+        "comment": body["comment"],
+    }
+    done = subprocess.run(
+        ["node", str(CAPTURE_DIR / "derive_trade.cjs"), str(HERE / "webclient.json")],
+        input=json.dumps(inputs),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    result = json.loads(done.stdout)
+    assert json.dumps(json.loads(result["data"])) == json.dumps(body)  # same keys, values and order
+    assert derived["url"].split("?")[0].endswith("/apis/v3/" + result["path"])
+
+
+@pytest.mark.parametrize("game", ["ffl", "fba"])
+def test_the_review_step_was_reached_and_nothing_tried_to_send(game: str) -> None:
+    review = load(f"{game}/trade_review.json")
+    assert review["status"] == "review reached" and review["send_button_present"]
+    assert review["review"]["trapHits"] == 0  # nothing even tried to press Send
+    assert len(review["canary"]) == 8  # four probes before the page opened, four more before the first click
+    for record in review["review_blocked"]:  # analytics beacons only: no league write, no transaction
+        assert "lm-api-writes" not in record["url"] and "/transactions" not in record["url"].lower()
+    dialog = review["review"]["dialogs"][0]["text"]
+    assert dialog[0] == "Confirm Transaction" and "Receiving:" in dialog and "Offering:" in dialog
+    assert "Keep trade open for:" in dialog
+    assert [line for line in dialog if line.endswith(" Days")] == [f"{n} Days" for n in range(1, 8)]
+    assert any(line.startswith("An email will be sent to all managers of") for line in dialog)
+
+
+@pytest.mark.parametrize("game", ["ffl", "fba"])
+def test_continue_is_client_side(game: str) -> None:
+    """Pressing Continue read no league view and wrote nothing: only the presence heartbeat went out."""
+    reads = load(f"{game}/trade_review.json")["review_reads"]
+    assert [read["url"].split("?")[0] for read in reads] == ["https://presence.fantasy.espn.com/apis/v1/heartbeat"]
 
 
 # --- rosters ----------------------------------------------------------------------------------------------------------

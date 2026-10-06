@@ -353,17 +353,26 @@ def test_the_headers_are_the_web_clients() -> None:
 
 # --- the guarded UI captures ------------------------------------------------------------------------------------------
 
-WRITE_CAPTURES = sorted(path.relative_to(REAL).as_posix() for path in REAL.glob("*/write_*.json"))
+WRITE_CAPTURES = sorted(
+    path.relative_to(REAL).as_posix() for path in REAL.glob("*/write_*.json") if not path.stem.endswith("_derived")
+)
 """``{ffl,fba}/write_*.json``: the requests the guard aborted while the UI flows were driven by hand on 2026-10-06
-(ROADMAP #14): a bench swap in each league, an NFL waiver claim with a drop, and two NBA free-agent adds (one-click from
-the player list, and add-plus-drop through the roster-fix page). They are the reference for every envelope."""
+(ROADMAP #14): a bench swap in each league, an NFL waiver claim with a drop, two NBA free-agent adds (one-click from
+the player list, and add-plus-drop through the roster-fix page), and an NFL trade offer that a guarded session drove to
+Send Trade Proposal (aborted on the write host; ``verify`` found the league unchanged). They are the reference for every
+envelope. ``write_*_derived.json`` were never on the wire (``capture.py derive-trade``) and are tested apart."""
 CAPTURED_FLOWS = {
     "ffl/write_ROSTER_1.json": "set_lineup",
     "ffl/write_WAIVER_1.json": "claim_waiver",
     "fba/write_FREEAGENT_1.json": "add_drop (one-click Add, no memberId)",
     "fba/write_FREEAGENT_2.json": "add_drop (roster-fix add plus drop)",
     "fba/write_ROSTER_1.json": "set_lineup",
+    "ffl/write_TRADE_PROPOSAL_1.json": "propose_trade (two for two, aborted at Send)",
 }
+OBSERVED_EXPIRATION = "2026-10-08T18:10:21.078Z"
+"""What the web client sent as ``expirationDate`` (ffl/write_TRADE_PROPOSAL_1.json): an ISO string 48 h (the builder's
+default ``2 Days``) after the send, not the epoch milliseconds ESPN's records hold. :class:`Envelope` annotates the
+field ``int`` from the records; the wire wants this string."""
 LATEST_AT_CAPTURE = {"ffl": 5, "fba": 1}
 """``status.latestScoringPeriod`` on 2026-10-06, the Tuesday of NFL week 5 and still NBA preseason day 1."""
 _REBUILD_ITEM = {
@@ -374,7 +383,7 @@ _REBUILD_ITEM = {
 }
 
 
-def test_the_captures_are_the_five_the_guard_saved() -> None:
+def test_the_captures_are_the_six_the_guard_saved() -> None:
     assert WRITE_CAPTURES == sorted(CAPTURED_FLOWS)
 
 
@@ -416,6 +425,21 @@ def flow_built(relative: str) -> tuple[Envelope, LeagueRow]:
             envelope = Envelope(1, TransactionType.FREEAGENT, None, 1, items=(add_item(6589, 1),))
         case "fba/write_FREEAGENT_2.json":  # the roster-fix page: add plus drop, with memberId
             envelope = Envelope(1, TransactionType.FREEAGENT, SWID, 1, items=(add_item(6589, 1), drop_item(4397136, 1)))
+        case "ffl/write_TRADE_PROPOSAL_1.json":  # two of ours for two of theirs (team 5), our players first
+            envelope = Envelope(
+                1,
+                TransactionType.TRADE_PROPOSAL,
+                SWID,
+                5,
+                items=(
+                    trade_item(15847, 1, 5),
+                    trade_item(3040151, 1, 5),
+                    trade_item(3126486, 5, 1),
+                    trade_item(4432665, 5, 1),
+                ),
+                expiration_date=OBSERVED_EXPIRATION,  # pyright: ignore[reportArgumentType]  # see OBSERVED_EXPIRATION
+                comment="",
+            )
         case _:
             raise AssertionError(f"no builder for {relative}: add one when a new capture lands")
     assert envelope.type.value == body["type"]

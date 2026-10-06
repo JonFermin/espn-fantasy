@@ -210,7 +210,7 @@ one (`tests/fixtures/espn/real/test_real_fixtures.py`).
 
 All writes are `POST https://lm-api-writes.fantasy.espn.com/apis/v3/games/{ffl|fba}/seasons/{season}/segments/0/leagues/{id}/transactions/`
 with the cookies and JSON body below, the same for both games. The reference is what the web app actually sent: the
-five requests the guard aborted on 2026-10-06 (`tests/fixtures/espn/real/{ffl,fba}/write_*.json`, each with method,
+six requests the guard aborted on 2026-10-06 (`tests/fixtures/espn/real/{ffl,fba}/write_*.json`, each with method,
 URL, headers and body as captured; "Captured flows" below). Behind them is ESPN's own code, saved verbatim in
 `tests/fixtures/espn/real/webclient.json` (`capture.py webclient` re-extracts it from a new build): `model` holds the
 item builders and the serializer `get()`, `service` the method behind each flow (`movePlayers`, `addPlayers`,
@@ -272,9 +272,14 @@ of §1 #17.
 | `fba/write_ROSTER_1.json` | bench swap on the team page (UTIL ↔ Bench), day 1 | `{…, type: "ROSTER", memberId, scoringPeriodId: 1, executionType: "EXECUTE", items: [LINEUP 11→12, LINEUP 12→11]}` |
 | `fba/write_FREEAGENT_1.json` | one-click **Add** from the player list (roster had room) | `{…, type: "FREEAGENT", scoringPeriodId: 1, executionType: "EXECUTE", items: [ADD {toTeamId}]}`, **no `memberId`** |
 | `fba/write_FREEAGENT_2.json` | add with a drop through the roster-fix page → Confirm | `{…, type: "FREEAGENT", memberId, scoringPeriodId: 1, executionType: "EXECUTE", items: [ADD, DROP]}` |
+| `ffl/write_TRADE_PROPOSAL_1.json` | two-for-two offer, trade builder → Continue → **Send Trade Proposal** (18:10 UTC; aborted on the write host, `verify` unchanged) | `{…, type: "TRADE_PROPOSAL", memberId, scoringPeriodId: 5, executionType: "EXECUTE", items: [TRADE ours→them ×2, TRADE them→ours ×2], expirationDate: "2026-10-08T18:10:21.078Z", comment: ""}` |
 
-**Not captured, and why:** a trade proposal in either game (the trade builder was opened and read, but an offer is a
-message to a real manager, and the capture stopped short of driving one to its request even under the guard); an NBA
+The trade capture was not planned: the `writes` prompt then still listed "a trade proposal". Since then `writes`
+disables Send/Accept/Decline in its window and leaves trades to `capture.py trade-review`, which stops at the review
+dialog (`{ffl,fba}/trade_review.json`), and `derive-trade`, which builds the request from the saved code
+(`{ffl,fba}/write_TRADE_PROPOSAL_derived.json`, **derived, not observed**; see `propose_trade` below).
+
+**Not captured, and why:** an NBA trade offer on the wire (only derived, above); an NBA
 waiver claim (no NBA player was on waivers: the player list's WAIVERS filter was empty, as
 `fba/kona_player_info_waivers.json` already showed); and an NFL free-agent add (every NFL player was on waivers until
 Wednesday, so the list offered only claims). Their payloads rest on the web client's code and the real records
@@ -308,6 +313,11 @@ Seen in both games during the capture; accessible names, not visible text, are w
   team page link `Propose Trade`: `checkbox`es named `Trade <Player>` on both rosters and a `Continue` button, then a
   review with an expiry `select` (`1`–`7 Days`, default `2`, which matches the 48 h expiries on record), a `textarea`
   for the message and a `Send Trade Proposal` button (not clicked).
+  The review is a **Confirm Transaction** dialog: `Receiving:` and `Offering:` with the players, `Keep trade open for:`
+  (the select), `Comments` (placeholder `Comments to include on the trade proposal`), the note "An email will be sent
+  to all managers of <their team>. No other teams will be notified.", then `Send Trade Proposal` and `Cancel`.
+  **Continue is client-side:** in both games it read no league view and wrote nothing (only the presence heartbeat went
+  out), so nothing about the offer reaches ESPN before Send (`{ffl,fba}/trade_review.json`).
 
 ### `set_lineup`: `ROSTER` / `FUTURE_ROSTER`
 
@@ -367,9 +377,15 @@ Seen in both games during the capture; accessible names, not visible text, are w
   `ACQUISITION_BUDGET_TRADE` items, `expirationDate`, `comment`, and `DROP` items when our roster must make room.
   Real offers expired 48 h after proposal, the trade builder's default expiry is `2 Days`; whether ESPN fills
   `expirationDate` when it is omitted is unknown, so the executor should send it.
-- **Not captured in either game.** The trade builder was opened and read (names above) but no offer was driven to its
-  request: an offer is a message to a real manager, and the capture stopped short of that. The payload rests on
-  `proposeTrade` in the saved code and the three real offers in `fba/mTransactions2_waiver_trade.json`.
+- **`expirationDate` is an ISO string on the wire** (`"2026-10-08T18:10:21.078Z"`: send time + 48 h for `2 Days`,
+  milliseconds, `Z`), although ESPN's records return it as epoch milliseconds. `fm.browser.transactions.Envelope`
+  annotates the field `int` from the records; a `propose_trade` flow must send the string. **`comment` is sent as
+  `""`** when the box is empty. Items list our players first, then theirs.
+- **Observed in `ffl` only:** `ffl/write_TRADE_PROPOSAL_1.json` (aborted at Send, see "Captured flows").
+  **Derived, not observed, in both games:** `{ffl,fba}/write_TRADE_PROPOSAL_derived.json`, built by running the saved
+  `proposeTrade` → `createTransaction` → serializer in Node with the send stubbed (`scripts/capture/derive_trade.cjs`)
+  for the offer `trade-review` took to its review dialog. The `ffl` derived body has the observed one's keys, order
+  and value types; `test_real_fixtures.py` re-runs the derivation from the committed `webclient.json`.
 - **Both games:** players with `tradeLocked` cannot move; `tradeReservedEntries` hold players already in an offer;
   `settings.tradeSettings.deadlineDate` closes trading; NBA trades lock at the day's first tip like adds.
 - **Verify:** a `TRADE_PROPOSAL` with `status: PENDING` and a future `expirationDate` in `mTransactions2`, with no
@@ -401,7 +417,7 @@ Seen in both games during the capture; accessible names, not visible text, are w
 | `set_lineup` | `ROSTER` / `FUTURE_ROSTER` | API, UI fallback with a web login | guarded UI capture + saved client code + real records (both games) | both games (`ROSTER`); `FUTURE_ROSTER` from real NBA records |
 | `add_drop` | `FREEAGENT` (+ `ROSTER` for a bare drop) | API, UI fallback | guarded UI capture (`fba`) + saved client code + real records (`ffl`) | `fba` (one-click and add+drop); `ffl` not captured (everyone was on waivers) |
 | `claim_waiver` | `WAIVER` | API, UI fallback | guarded UI capture (`ffl`) + saved client code + real records (both games) | `ffl`; `fba` not captured (nobody was on waivers) |
-| `propose_trade` | `TRADE_PROPOSAL` | API, approval-only | saved client code + real records (`fba`) | neither game (an offer reaches a real manager) |
+| `propose_trade` | `TRADE_PROPOSAL` | API, approval-only | guarded abort (`ffl`) + saved client code run offline (both) + real records (`fba`) | `ffl` (aborted at Send); `fba` derived, not observed; review dialog observed in both |
 | `respond_trade` | `TRADE_ACCEPT` / `TRADE_DECLINE` | API, approval-only | DESIGN §6.3 + saved client code | documented, not captured |
 | `cancel` | `TRADE_PROPOSAL`/`WAIVER` + `CANCEL` | API | saved client code + real expiry records | documented, not captured |
 
