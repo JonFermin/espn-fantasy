@@ -80,13 +80,17 @@ MODULES = (
     "fm.jobs.scheduler_windows",
     "fm.advisor.client",
     "fm.advisor.news_triage",
+    "fm.advisor.close_call",
+    "fm.advisor.explain",
     "fm.browser.canary",
+    "fm.browser.drills",
     "fm.decide.faab",
     "fm.decide.rankings",
     "fm.eval.backtest",
     "fm.espn.calendar",
     "fm.decide.lineup_daily",
     "fm.decide.streaming",
+    "fm.decide.weekly",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
