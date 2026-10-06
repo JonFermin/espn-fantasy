@@ -457,23 +457,38 @@ class TestWeeklyCap:
             add_drop(store, config, league, 2, period=13)
         assert add_drop(store, config, league, 2, period=14).status == "proposed"
 
-    def test_real_nba_week_ids_are_not_read_as_days(self, store: Store, config: Config) -> None:
+    def test_real_nba_weeks_are_counted_through_the_calendar(self, store: Store, config: Config) -> None:
         """The real NBA league lists its matchups as weeks: matchup 1 is days 1-6 but its ``matchupPeriods`` say
         ``{"1": [1]}``. Read as days, day 5 was "matchup 5" holding only itself and moves on days 2-4 went uncounted
-        (1 of 4 in the phase 4 review). Until ESPN's calendar maps weeks to days (ROADMAP #31) the cap is the
-        trailing seven days."""
+        (1 of 4 in the phase 4 review). ESPN's calendar (``data/calendars/fba_2027.json``) maps week 1 to days 1-6, so
+        the cap counts the matchup, not the trailing seven days."""
         nba = config.league("nba").model_copy(update={"policy": Policy(max_transactions_per_week=4)})
         config = config.model_copy(update={"leagues": (config.league("nfl"), nba)})
         league = seed_league(store, nba)
         real = seed_settings(store, league, "real/fba/mSettings.json")
-        assert real.schedule.matchup_period_for(5) is None
+        assert real.schedule.matchup_period_for(5) is None  # the settings alone cannot place a day
         for add, day in ((1, 2), (2, 3), (3, 4), (4, 5)):
             add_drop(store, config, league, add, period=day)
-        assert acquisitions_this_week(store, league, real, scoring_period_id=5, now=NOW) == 4
+        for day in (1, 5, 6):  # days 1-6 are matchup 1
+            assert acquisitions_this_week(store, league, real, scoring_period_id=day, now=NOW) == 4
         with pytest.raises(PolicyError, match="4 of 4 transactions already used this week"):
-            add_drop(store, config, league, 5, period=5)
+            add_drop(store, config, league, 5, period=6)
+        # Day 7 opens matchup 2 (days 7-13) at once: the four moves are a day old, still in the trailing week.
+        assert acquisitions_this_week(store, league, real, scoring_period_id=7, now=NOW) == 0
+        assert add_drop(store, config, league, 5, period=7).status == "proposed"
+        with pytest.raises(PolicyError, match="4 of 4 transactions already used this week"):
+            add_drop(store, config, league, 6, period=6)  # the day-7 move does not touch matchup 1's count
+
+    def test_a_season_without_a_calendar_counts_the_trailing_seven_days(self, store: Store, config: Config) -> None:
+        nba = config.league("nba").model_copy(update={"policy": Policy(max_transactions_per_week=4)})
+        config = config.model_copy(update={"leagues": (config.league("nfl"), nba)})
+        league = seed_league(store, nba)
+        real = seed_settings(store, league, "real/fba/mSettings.json", season=2099)  # no data/calendars/fba_2099.json
+        for add, day in ((1, 2), (2, 3), (3, 4), (4, 5)):
+            add_drop(store, config, league, add, period=day)
+        assert acquisitions_this_week(store, league, real, scoring_period_id=12, now=NOW) == 4
         later = NOW + timedelta(days=7, seconds=1)  # the four have left the trailing week
-        assert add_drop(store, config, league, 5, period=12, now=later).status == "proposed"
+        assert acquisitions_this_week(store, league, real, scoring_period_id=12, now=later) == 0
 
     def test_without_settings_or_period_the_window_is_the_trailing_week(self, store: Store, config: Config) -> None:
         league = seed_league(store, config.league("nfl"))

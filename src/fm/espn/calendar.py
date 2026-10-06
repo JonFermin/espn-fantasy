@@ -4,9 +4,9 @@
 ``scheduleSettings.periodTypeId`` names, not necessarily scoring periods. ``ffl`` and the stand-in NBA settings use type
 1, where period N is scoring period N. The real NBA league uses the weekly type (2): matchup 1 is ``[1]``, and only
 ESPN's web client knows that its week 1 is days 1-6 (Tue Oct 20 - Sun Oct 25, 2026), weeks 2-17 are Monday-Sunday
-(7 days each), week 18 is the 14 days around the All-Star break (days 119-132) and weeks 19-21, the playoffs, are days
-133-153. No read view carries that table: the web app bundles it as a constant, ``scripts/capture/webclient.py`` extracts
-it, and this module is where the engine reads it from.
+(7 days each), week 18 is the 14 days around the All-Star break (days 119-132) and weeks 19-21, the playoffs, are
+days 133-153. No read view carries that table: the web app bundles it as a constant, ``scripts/capture/webclient.py``
+extracts it, and this module is where the engine reads it from.
 
 **The data.** One JSON file per game and season under ``data/calendars/`` (``fba_2027.json``, :func:`calendar_file`),
 read through :func:`fm.paths.data_file`. The file is what ``capture.py webclient`` writes as ``calendar_<game>.json``
@@ -16,8 +16,8 @@ schedule), then replace the file with ``extract_calendar``'s output. A season wi
 :func:`find_calendar` answers ``None``, :func:`load_calendar` raises :class:`CalendarError` naming the fix, and callers
 fall back to what they did before the calendar existed (the weekly transaction cap counts the trailing seven days).
 
-**Not here.** ESPN's weekly lock types (``FIRSTGAME_WEEKLY`` and ``INDIVIDUAL_FIRSTGAME_WEEKLY``) parse as ``UNKNOWN`` in
-:mod:`fm.espn.settings` and the sport plugins refuse ``UNKNOWN``; this calendar is the data a future parser change
+**Not here.** ESPN's weekly lock types (``FIRSTGAME_WEEKLY`` and ``INDIVIDUAL_FIRSTGAME_WEEKLY``) parse as ``UNKNOWN``
+in :mod:`fm.espn.settings` and the sport plugins refuse ``UNKNOWN``; this calendar is the data a future parser change
 would resolve them against (:meth:`SeasonCalendar.matchup_days`), but nothing guesses a weekly lock until then.
 """
 
