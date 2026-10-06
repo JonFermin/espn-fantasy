@@ -284,6 +284,30 @@ class TestAllowlistAndSettings:
         )
         assert evaluate(store, config, league, ProposalKind.BENCH_INACTIVE, LINEUP, deadline=DEADLINE, now=NOW).allowed
 
+    def test_a_ceiling_lowers_auto_before_the_deadline_check_and_never_raises(
+        self, store: Store, config: Config
+    ) -> None:
+        league = seed_league(store, config.league("nfl"))  # bench_inactive = auto in the sample
+        capped = evaluate(store, config, league, ProposalKind.BENCH_INACTIVE, LINEUP, max_setting="approve", now=NOW)
+        assert capped.setting == "approve" and capped.allowed  # no deadline needed once it cannot be auto
+        row = propose(
+            store, config, league, ProposalKind.BENCH_INACTIVE, LINEUP, created_by="mcp", max_setting="approve", now=NOW
+        )
+        assert row.policy == "approve" and row.deadline is None
+        # a ceiling that is not lower than the setting changes nothing, and never lifts one
+        assert evaluate(
+            store, config, league, ProposalKind.BENCH_INACTIVE, LINEUP, max_setting="auto", now=NOW
+        ).reasons == ("an auto proposal needs a deadline: auto fires at T-15 when the proposal is unanswered",)
+        off = evaluate(
+            store, config, league, ProposalKind.LINEUP, LINEUP, max_setting="off", deadline=DEADLINE, now=NOW
+        )
+        assert off.setting == "off" and not off.allowed
+        # trade kinds stay approve-only whatever the ceiling says
+        trade = TradePayload(other_team_id=2, give_espn_ids=(1,), get_espn_ids=(2,))
+        assert evaluate(
+            store, config, league, ProposalKind.TRADE_PROPOSE, trade, max_setting="auto", now=NOW
+        ).setting == ("approve")
+
     def test_a_deadline_already_passed_is_blocked(self, store: Store, config: Config) -> None:
         league = seed_league(store, config.league("nfl"))
         verdict = evaluate(store, config, league, ProposalKind.LINEUP, LINEUP, deadline=NOW, now=NOW)

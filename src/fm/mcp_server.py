@@ -62,6 +62,7 @@ from fm.decide.trades import (
     evaluate_trade,
     load_trade_context,
     parse_trade_text,
+    trade_etiquette,
 )
 from fm.decide.waivers import WAIVERS_KIND, WaiverDecision, WaiverError, WaiverMove, decide_waivers
 from fm.espn.client import View
@@ -69,7 +70,18 @@ from fm.espn.ids import ids_for
 from fm.espn.models import MatchupsView, ProSchedule
 from fm.jobs.sync import ESPN_SOURCE
 from fm.model.valuation import DEFAULT_PLAYOFF_WEIGHT, PlayerOutlook, ValuationError
-from fm.proposals import PolicyError, ProposalError, ProposalKind, Verdict, evaluate, kind_spec, parse_payload, propose
+from fm.proposals import (
+    PolicyError,
+    ProposalError,
+    ProposalKind,
+    TradePayload,
+    Verdict,
+    effective_setting,
+    evaluate,
+    kind_spec,
+    parse_payload,
+    propose,
+)
 from fm.proposals.pause import pause_state
 from fm.proposals.policy import as_utc, stored_settings
 from fm.sports.base import plugin_for
@@ -755,8 +767,17 @@ def _create_proposal(
         if row is None:
             return _refused("invalid", [f"{league}: not synced; run fm sync"])
         open_before = {found.row_id for found in store.proposals.open(row.row_id)}
+        key = _dedupe_key(row, spec.kind, model.model_dump(mode="json"))
+        if isinstance(model, TradePayload) and spec.kind is ProposalKind.TRADE_PROPOSE:
+            # The engine's own etiquette (DESIGN 9.4): one open offer a team and the weekly cap. Asking again for an
+            # offer that is already open still returns it.
+            etiquette = trade_etiquette(store, row, at=at)
+            if key not in etiquette.open_keys and (blocker := etiquette.blocker(model.other_team_id)) is not None:
+                return _refused("blocked", [blocker])
         try:
             with store.db.transaction():
+                # Only the engine's own drafts may be approved on their own at T-15, never a move Claude suggested:
+                # the policy ceiling is approve, applied before the auto checks (an auto lineup needs a deadline).
                 stored = propose(
                     store,
                     config,
@@ -768,19 +789,26 @@ def _create_proposal(
                     engine_numbers={"origin": MCP_CREATED_BY},
                     rationale=rationale,
                     deadline=due,
-                    dedupe_key=_dedupe_key(row, spec.kind, model.model_dump(mode="json")),
+                    dedupe_key=key,
+                    max_setting="approve",
                     now=at,
                 )
                 note = None
-                if stored.row_id not in open_before and stored.policy == "auto":
-                    # Only the engine's own drafts may be approved on their own at T-15, never a move Claude suggested.
-                    stored = store.proposals.update(stored.model_copy(update={"policy": "approve"}))
+                if stored.row_id not in open_before and _configured_setting(config, league, spec.kind) == "auto":
                     note = (
                         "policy auto was lowered to approve: a suggestion made through MCP is never approved on its own"
                     )
         except PolicyError as exc:
             verdict = evaluate(
-                store, config, row, spec.kind, model, scoring_period_id=scoring_period_id, deadline=due, now=at
+                store,
+                config,
+                row,
+                spec.kind,
+                model,
+                scoring_period_id=scoring_period_id,
+                deadline=due,
+                max_setting="approve",
+                now=at,
             )
             return _refused("blocked", list(verdict.reasons) or [str(exc)], policy=_verdict(verdict))
         existing = stored.row_id in open_before
@@ -792,6 +820,14 @@ def _create_proposal(
             "message": (f"already open as #{stored.row_id}" if existing else f"stored as proposal #{stored.row_id}")
             + f" (policy {stored.policy}); it waits for the user's review and nothing has been changed in ESPN",
         }
+
+
+def _configured_setting(config: Config, league: str, kind: ProposalKind) -> str | None:
+    """The setting ``config.toml`` gives ``kind`` in ``league`` before the MCP ceiling; ``None`` for an unknown one."""
+    try:
+        return effective_setting(kind, config.league(league).policy)
+    except KeyError:
+        return None
 
 
 def _refused(status: str, reasons: list[str], *, policy: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -70,6 +70,7 @@ from fm.store import (
     LeagueSettingsRow,
     PlayerRow,
     ProjectionRow,
+    ProposalRow,
     RosterEntryRow,
     Store,
     TeamRow,
@@ -255,7 +256,10 @@ def seed_league(
         (9006, "Free D/ST", "D/ST", 3.0),
     ]
     store.players.upsert_many(
-        [player_row(espn_id, name, position, 40 + team) for team, name, position, _, espn_id, _ in people]
+        [
+            player_row(espn_id, name, position, 40 + team, injury="OUT" if espn_id in benched else None)
+            for team, name, position, _, espn_id, _ in people
+        ]
         + [player_row(espn_id, name, position, 60 + n) for n, (espn_id, name, position, _) in enumerate(wire)]
     )
     rows: list[ProjectionRow] = []
@@ -375,10 +379,31 @@ def test_market_values_prefer_fantasycalc_then_espn_rank_then_our_own_rank() -> 
     assert book.value(1) == 7000.0
     assert book.value(2) == pytest.approx(rank_value(10, 40))  # the draft rank under the league's type wins
     assert book.value(3) == pytest.approx(rank_value(40, 40))
-    assert book.value(4) == pytest.approx(rank_value(4, 4))  # last of four by our value
+    assert book.value(4) == pytest.approx(rank_value(4, 40))  # fourth by our value, on the feed's size
     assert book.value(99) == 0.0
     assert book.scale == pytest.approx((7000.0 + rank_value(10, 40)) / 2)
     assert build_market_book(None, values, rank_type="PPR").basis == dict.fromkeys(values, "ros_rank")
+
+
+def test_espn_ranked_and_fallback_players_are_valued_on_one_scale() -> None:
+    # 300 valued players; the ESPN feed ranks some of them up to 1000 deep (a universe longer than our own pool).
+    values = {espn_id: float(1000 - espn_id) for espn_id in range(1, 301)}  # id n is our n-th best
+    market = {
+        1: MarketValue(espn_id=1, name="a", espn_ranks={"PPR": 100}),
+        2: MarketValue(espn_id=2, name="b", espn_ranks={"PPR": 1000}),
+    }
+    book = build_market_book(market, values, rank_type="PPR")
+    assert book.basis[1] == "espn_rank" and book.basis[100] == "ros_rank"
+    assert book.value(1) == pytest.approx(rank_value(100, 1000))
+    # a fallback player who is 100th by our values is worth the ESPN-ranked 100th (about 5000, not about 1800)
+    assert book.value(100) == pytest.approx(book.value(1))
+    assert book.value(100) == pytest.approx(rank_value(100, 1000))
+    # a package of one of each: both bases agree, so it is worth what two 100th-ranked players are
+    assert package_value([book.value(1), book.value(100)]) == pytest.approx(
+        package_value([rank_value(100, 1000), rank_value(100, 1000)])
+    )
+    fallback = [book.value(espn_id) for espn_id in range(3, 301)]  # and our own order is kept among the fallback
+    assert fallback == sorted(fallback, reverse=True)
 
 
 def test_a_rank_is_a_value_on_fantasycalcs_scale() -> None:
@@ -832,6 +857,45 @@ def test_a_players_roster_lock_comes_from_his_teams_kickoff_under_an_individual_
     assert check_legality(late, elsewhere).legal
 
 
+def two_week_schedule() -> ProSchedule:
+    """Weeks 4 and 5 for every pro team the league's players are on: everyone plays Sunday 1 p.m. ET in each."""
+    teams = []
+    for team in [*range(41, 47), *range(60, 66)]:
+        games = {}
+        for week, day in (
+            (WEEK, datetime(2026, 10, 4, 17, 0, tzinfo=UTC)),
+            (WEEK + 1, datetime(2026, 10, 11, 17, 0, tzinfo=UTC)),
+        ):
+            games[str(week)] = [
+                {
+                    "id": team * 10 + week,
+                    "date": int(day.timestamp() * 1000),
+                    "scoringPeriodId": week,
+                    "homeProTeamId": team,
+                    "awayProTeamId": 99,
+                }
+            ]
+        teams.append({"id": team, "proGamesByScoringPeriod": games})
+    return ProSchedule.model_validate({"proTeams": teams})
+
+
+def test_locks_are_judged_in_the_current_period_when_the_last_sync_is_older(store: Store) -> None:
+    league = seed_league(store)  # the roster snapshot is week 4
+    sunday_next = datetime(2026, 10, 11, 15, 0, tzinfo=UTC)  # week 5, 11 a.m. ET, before its games
+    ctx = load_trade_context(
+        store, league, now=sunday_next, schedule=two_week_schedule(), market=FakeMarket(), weights=EQUAL_WEIGHTS
+    )
+    assert ctx.period == WEEK and ctx.current_period == WEEK + 1 and ctx.lock_period == WEEK + 1
+    assert any(f"period {WEEK + 1} is current" in warning for warning in ctx.warnings)
+    # week 4's kickoffs are long past; judged there every player would be "transactions closed"
+    assert check_legality(ctx, swap_a_running_back_for_a_tight_end()).legal
+    assert find_trades(ctx, options=SearchOptions(runs=RUNS)).results
+    fresh = load_trade_context(
+        store, league, now=NOW, schedule=two_week_schedule(), market=FakeMarket(), weights=EQUAL_WEIGHTS
+    )
+    assert fresh.current_period == WEEK and not any("is current" in warning for warning in fresh.warnings)
+
+
 def test_a_first_game_lock_closes_every_trade_at_the_periods_first_kickoff(store: Store) -> None:
     league = seed_league(store)
     kickoff = datetime(2026, 10, 4, 17, 0, tzinfo=UTC)
@@ -887,6 +951,76 @@ def test_a_player_in_the_ir_slot_lands_in_ir_when_there_is_room(store: Store) ->
     assert legality.legal and any("is in an IR slot" in note for note in legality.notes)
     full = context(store, ir=[pid(2, "RB4"), pid(US, "WR4")])  # one IR slot each, ours is taken
     assert check_legality(full, TradeSpec(2, (pid(US, "TE2"),), (pid(2, "RB4"),))).legal
+
+
+def heal(store: Store, team: int, name: str, position: str) -> None:
+    """The player is no longer injured as far as the last sync can tell (``seed_league`` makes IR players OUT)."""
+    store.players.upsert(player_row(pid(team, name), f"T{team} {name}", position, 40 + team))
+
+
+def fresh_context(store: Store, league: LeagueRow) -> TradeContext:
+    return load_trade_context(
+        store, league, now=NOW, matchups=schedule_view(ppr()), market=FakeMarket(), weights=EQUAL_WEIGHTS
+    )
+
+
+def test_a_team_holding_an_ir_ineligible_player_in_an_ir_slot_cannot_trade(store: Store) -> None:
+    league = seed_league(store, ir=[pid(2, "RB4")])
+    heal(store, 2, "RB4", "RB")  # healthy but still parked in IR: ESPN blocks that team's moves
+    ctx = fresh_context(store, league)
+    spec = TradeSpec(2, (pid(US, "RB2"),), (pid(2, "TE1"),))  # a deal that does not touch him
+    problems = check_legality(ctx, spec).problems
+    assert (
+        len(problems) == 1 and "Team 2 holds T2 RB4 in an IR slot without an IR-eligible injury status" in problems[0]
+    )
+    # ours is flagged the same way
+    ours = seed_league(store, ir=[pid(US, "WR4")])
+    heal(store, US, "WR4", "WR")
+    assert any("we hold T3 WR4" in why for why in check_legality(fresh_context(store, ours), spec).problems)
+
+
+def test_a_player_who_is_out_may_sit_in_ir_without_blocking_the_team(store: Store) -> None:
+    ctx = context(store, ir=[pid(2, "RB4")])
+    assert check_legality(ctx, TradeSpec(2, (pid(US, "RB2"),), (pid(2, "TE1"),))).legal
+
+
+def test_an_incoming_player_lands_in_ir_only_if_his_injury_status_allows_it(store: Store) -> None:
+    ctx = context(store, ir=[pid(2, "RB4")])  # OUT, in team 2's IR slot
+    mine = trades_module._after(ctx, US, (pid(US, "TE2"),), (pid(2, "RB4"),))
+    assert pid(2, "RB4") in mine.ir and pid(2, "RB4") not in mine.playing
+    healed = replace(ctx, players={**ctx.players, pid(2, "RB4"): player_row(pid(2, "RB4"), "T2 RB4", "RB", 42)})
+    after = trades_module._after(healed, US, (pid(US, "TE2"),), (pid(2, "RB4"),))
+    assert pid(2, "RB4") not in after.ir and pid(2, "RB4") in after.everyone  # he takes a roster spot: no IR for him
+    assert after.held == mine.held + 1
+    assert not healed.ir_eligible(pid(2, "RB4")) and ctx.ir_eligible(pid(2, "RB4"))
+    assert not ctx.ir_eligible(123456789)  # a player the store does not know
+
+
+def test_the_leagues_trade_limit_stops_us_once_it_is_used(store: Store) -> None:
+    capped = ppr().model_copy(update={"trade": ppr().trade.model_copy(update={"max_trades": 1})})
+    league = seed_league(store, settings=capped)
+    spec = swap_a_running_back_for_a_tight_end()
+    before = check_legality(fresh_context(store, league), spec)
+    assert before.legal and any("allows 1 trades a season" in note for note in before.notes)
+    store.proposals.insert(
+        ProposalRow(
+            league_id=league.row_id,
+            kind=ProposalKind.TRADE_ACCEPT.value,
+            status="verified",
+            policy="approve",
+            payload={"espn_transaction_id": "t1"},
+            created_by="test",
+            created_at=NOW,
+        )
+    )
+    used = fresh_context(store, league)
+    assert used.trades_made == 1
+    assert check_legality(used, spec).problems == ("we have made 1 trades and the league allows 1 a season",)
+
+
+def test_a_league_without_a_trade_limit_says_nothing_about_one(store: Store) -> None:
+    legality = check_legality(context(store), swap_a_running_back_for_a_tight_end())
+    assert legality.legal and not any("trades a season" in note for note in legality.notes)
 
 
 # --- finding deals ----------------------------------------------------------------------------------------------------

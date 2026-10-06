@@ -36,7 +36,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from fm.config import Config
+from fm.config import Approval, Config
 from fm.proposals.pause import pause_state
 from fm.proposals.payloads import Payload
 from fm.proposals.policy import ProposalError, ProposalKind, as_utc, evaluate, kind_spec
@@ -83,15 +83,17 @@ def propose(
     rationale: str | None = None,
     deadline: datetime | None = None,
     dedupe_key: str | None = None,
+    max_setting: Approval | None = None,
     now: datetime | None = None,
 ) -> ProposalRow:
     """Store a proposal once it clears policy; raise ``PolicyError`` listing every reason it does not.
 
     ``created_by`` names the producer (``decide.lineup``, ``advisor.strategist``, ``mcp``). ``deadline`` is when the
     move stops making sense; it is required for a kind whose setting is ``auto``. With a ``dedupe_key``, an open
-    proposal in the league carrying the same key is returned instead of storing a second one. The league's proposals
-    whose deadline has already passed are expired first, so one of them is never the duplicate handed back and no
-    longer counts toward the weekly cap.
+    proposal in the league carrying the same key is returned instead of storing a second one. ``max_setting`` caps the
+    setting the proposal runs under (``fm.proposals.policy.evaluate``): ``approve`` keeps it from ever being
+    auto-approved. The league's proposals whose deadline has already passed are expired first, so one of them is never
+    the duplicate handed back and no longer counts toward the weekly cap.
     """
     at = as_utc(now)
     spec = kind_spec(kind)
@@ -102,7 +104,15 @@ def propose(
                 if existing.dedupe_key == dedupe_key:
                     return existing
         verdict = evaluate(
-            store, config, league, spec.kind, payload, scoring_period_id=scoring_period_id, deadline=deadline, now=at
+            store,
+            config,
+            league,
+            spec.kind,
+            payload,
+            scoring_period_id=scoring_period_id,
+            deadline=deadline,
+            max_setting=max_setting,
+            now=at,
         )
         verdict.raise_if_blocked()
         row = ProposalRow(

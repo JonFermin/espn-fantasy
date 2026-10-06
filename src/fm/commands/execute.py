@@ -250,6 +250,7 @@ def open_fixture_runtime(directory: Path, league: LeagueRow, *, dry_run: bool) -
             transport=RefusingTransport(FIXTURE_DRY_RUN),
             browser=NoBrowser(),
             member_id=_recorded_owner(reader, league),
+            dry_run=True,
         )
 
 

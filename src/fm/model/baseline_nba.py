@@ -45,6 +45,12 @@ schedule, the day's lines, on/off splits for the teams that need them), builds t
 through the NBA crosswalk. A feed that cannot be fetched with nothing to fall back on is an empty ``degraded`` result
 naming the reason, so the blend runs without it.
 
+**Replaying a past day leaks.** The game logs are cut off at the day, but the loader's other inputs are read as of now:
+DARKO's talent and minutes (the current projections), the on/off splits (the season to date) and the ``players``
+table's injury designations. For a day before today (:func:`fm.sports.base.fantasy_day` of the clock) the result is
+therefore marked ``degraded`` with a warning saying so, and a backtest on it measures a baseline that has seen the
+future. Only a day that is today or ahead is clean.
+
 The scoring period of the day is the schedule's: day 1 is opening night (:mod:`fm.sports.nba`), so period ``p`` is
 the first regular-season day plus ``p - 1`` (:func:`nba_period_date`).
 """
@@ -72,6 +78,7 @@ from fm.sources.darko import DarkoProjection, DarkoSource
 from fm.sources.nba_schedule import NbaSchedule, NbaScheduleSource
 from fm.sources.nba_stats import NbaStatsSource, nba_season
 from fm.sources.odds import EspnScoreboardSource, Scoreboard
+from fm.sports.base import fantasy_day
 from fm.store import PlayerRow, ProjectionRow, Store
 
 logger = logging.getLogger(__name__)
@@ -1141,6 +1148,13 @@ class NbaBaselineLoader:
         context = NbaDayContext(day, teams, out, spreads, second, absorption)
         projected = project_nba_day(darko.data, history, context, params=self.params)
         warnings.extend(f"{NBA_BASELINE_SOURCE}: {note}" for note in projected.notes)
+        today = fantasy_day(now)
+        replay = day < today
+        if replay:
+            warnings.append(
+                f"{NBA_BASELINE_SOURCE}: period {period} is {day}, before today ({today}): DARKO talent and minutes, "
+                "the on/off splits and the injury designations are read as of now, so this replay can see the future"
+            )
         as_of = min(feed.as_of for feed in feeds)
         converted = nba_baseline_rows(projected, crosswalk, season=season, scoring_period=period, as_of=as_of)
         if converted.unmapped and not converted.rows:
@@ -1163,7 +1177,7 @@ class NbaBaselineLoader:
             f"{NBA_SPORT}_{season}_{period}",
             cached=all(feed.cached for feed in feeds),
             stale=any(feed.stale for feed in feeds),
-            degraded=any(feed.degraded for feed in feeds[:3]),
+            degraded=replay or any(feed.degraded for feed in feeds[:3]),
             warnings=tuple(warnings),
         )
 

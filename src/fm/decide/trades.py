@@ -37,7 +37,10 @@ says so.
 
 **Legality** (:func:`check_legality`) is read from the league's settings: the trade deadline, roster size (active plus
 bench slots, with IR separate) with the players each side would have to drop, per-position limits, the roster lock
-(a player whose game has started under ``rosterLocktimeType``), untouchables, and IR placement. A trade that needs
+(a player whose game has started under ``rosterLocktimeType``, judged in the period current at ``now``),
+untouchables, the season's trade limit (``tradeSettings.max``, against the trades we know we made), and IR: a team
+holding an IR-ineligible player (:data:`IR_ELIGIBLE`) in an IR slot is blocked by ESPN, and a player arriving from an IR
+slot lands in one only if his injury status allows it. A trade that needs
 a drop on our side is legal, but it cannot be proposed (a :class:`TradePayload` carries no drop), so
 :func:`find_trades` leaves it out unless asked.
 
@@ -72,7 +75,7 @@ from typing import Any, Final, Protocol
 
 from fm.config import Config
 from fm.espn.calendar import league_matchup_days, matchup_period_of
-from fm.espn.ids import Game
+from fm.espn.ids import Game, InjuryStatus
 from fm.espn.models import MatchupsView
 from fm.espn.settings import LeagueSettings, LockType, ScoringType
 from fm.model.availability import assess
@@ -136,6 +139,10 @@ change in rest-of-season value in starter seasons."""
 ACCEPT: Final = "accept"
 DECLINE: Final = "decline"
 COUNTER: Final = "counter"
+IR_ELIGIBLE: Final = frozenset({InjuryStatus.OUT, InjuryStatus.INJURY_RESERVE, InjuryStatus.SUSPENSION})
+"""The injury designations that may sit in an IR slot. ESPN's ``mSettings`` carries no IR rule (only the slot counts),
+so this is the rule assumed for every league: out, injury reserve, suspended. A player ESPN lists otherwise (active,
+questionable, day to day, unknown) is IR-ineligible, and a team that holds one in an IR slot cannot make moves."""
 EDGE_TITLE: Final = 0.002
 """The change in title odds below which a deal is a wash."""
 EDGE_ROS: Final = 0.02
@@ -386,8 +393,8 @@ def build_market_book(
     """Market values for every player in ``values`` (what the fallback ranks by: our rest-of-season value over
     replacement, by ESPN id). A player's market value is FantasyCalc's trade value when it has one, else his ESPN rank
     under ``rank_type`` (draft rank, then the season's total ranking), else his rank by ``values``: all on
-    :func:`rank_value`'s scale, so a package can mix them. ``starters`` are the ESPN ids that set
-    :attr:`MarketBook.scale`."""
+    :func:`rank_value`'s scale with one ``size`` (the largest rank in the feed, or the number of valued players when
+    that is larger), so a package can mix them. ``starters`` are the ESPN ids that set :attr:`MarketBook.scale`."""
     found = market or {}
     ordered = sorted(values, key=lambda espn_id: (-values[espn_id], espn_id))
     ours = {espn_id: position for position, espn_id in enumerate(ordered, start=1)}
@@ -395,6 +402,9 @@ def build_market_book(
         rank for entry in found.values() for rank in (entry.espn_ranks.get(rank_type), entry.total_ranking) if rank
     ]
     size = max([*ranks, len(ordered), 2])
+    # One ``size`` for both bases: a rank is a place among the league's players, so our 100th-best player is worth what
+    # ESPN's 100th-ranked is, whether the feed is 1000 deep or our own pool is 300 (a per-basis size would put the same
+    # rank at about 5000 on one basis and 1800 on the other).
     book: dict[int, float] = {}
     basis: dict[int, str] = {}
     for espn_id in values:
@@ -406,7 +416,7 @@ def build_market_book(
         if rank:
             book[espn_id], basis[espn_id] = rank_value(rank, size), ESPN_RANK
         else:
-            book[espn_id], basis[espn_id] = rank_value(ours[espn_id], max(len(ordered), 2)), ROS_RANK
+            book[espn_id], basis[espn_id] = rank_value(ours[espn_id], size), ROS_RANK
     top = sorted((book[espn_id] for espn_id in starters if espn_id in book), reverse=True)
     scale = math.fsum(top) / len(top) if top else 1.0
     return MarketBook(
@@ -669,6 +679,8 @@ class TradeContext:
     settings: LeagueSettings
     now: datetime
     period: int
+    """The scoring period of the roster snapshot (``fm sync``'s last): what rosters, projections and ``p_active`` are
+    read for."""
     team_id: int
     team_names: Mapping[int, str]
     rosters: Mapping[int, frozenset[int]]
@@ -684,7 +696,24 @@ class TradeContext:
     untouchables: Mapping[int, str] = field(default_factory=dict)
     acceptance: AcceptanceParams = DEFAULT_ACCEPTANCE
     warnings: tuple[str, ...] = ()
+    current_period: int | None = None
+    """The scoring period current at ``now`` by the pro schedule (``None``: no schedule, or none at ``now``)."""
+    trades_made: int = 0
+    """Trades we are known to have made this season (verified ``trade_accept`` proposals); trades made outside this
+    tool, and offers of ours another manager accepted, are not seen."""
     cache: _Cache = field(default_factory=_Cache, repr=False, compare=False)
+
+    @property
+    def lock_period(self) -> int:
+        """The period roster locks, transaction cutoffs and proposal weeks are judged in: the current one, which is
+        ``period`` unless the last sync is from an earlier period (a stale period's cutoffs are all in the past)."""
+        return self.current_period if self.current_period is not None else self.period
+
+    def ir_eligible(self, espn_id: int) -> bool:
+        """Whether the player's injury designation lets him sit in an IR slot (:data:`IR_ELIGIBLE`); a player the store
+        does not know is not."""
+        player = self.players.get(espn_id)
+        return player is not None and self.settings.ids.injury_status(player.injury_status) in IR_ELIGIBLE
 
     @property
     def other_teams(self) -> tuple[int, ...]:
@@ -847,6 +876,9 @@ def load_trade_context(
     schedule_note = _lock_note(settings, schedule)
     if schedule_note:
         warnings.append(schedule_note)
+    current_period, period_note = _current_period(league, schedule, period, now)
+    if period_note:
+        warnings.append(period_note)
     if matchups is None:
         warnings.append("no mMatchup schedule given: deals are judged on rest-of-season value, not title odds")
     p_active = engine_p_active(
@@ -877,7 +909,41 @@ def load_trade_context(
         untouchables=MappingProxyType(untouchables),
         acceptance=acceptance,
         warnings=tuple(warnings),
+        current_period=current_period,
+        trades_made=len(
+            store.proposals.find(
+                league_id=league.row_id, kinds=[ProposalKind.TRADE_ACCEPT.value], statuses=["verified"]
+            )
+        ),
     )
+
+
+def _current_period(
+    league: LeagueRow, schedule: ScheduleLike | None, period: int, now: datetime
+) -> tuple[int | None, str | None]:
+    """The scoring period current at ``now`` and a warning when it is not the roster's ``period`` (as the lineup CLI's
+    ``_period_warning`` does). ``(None, None)`` without a schedule; a schedule with no period at ``now`` (or one the
+    plugin cannot number) falls back to ``period`` with a warning."""
+    if schedule is None:
+        return None, None
+    try:
+        current = plugin_for(league.sport).scoring_period_at(now, schedule)
+    except ValueError as exc:
+        return (
+            None,
+            f"{league.key}: the pro schedule cannot say which scoring period it is ({exc}); locks use period {period}",
+        )
+    if current is None:
+        return None, (
+            f"{league.key}: the pro schedule has no scoring period at {now:%Y-%m-%d %H:%MZ}; "
+            f"locks are judged in the synced period {period}"
+        )
+    if current != period:
+        return current, (
+            f"{league.key}: roster synced for scoring period {period} but period {current} is current; "
+            f"locks and cutoffs are judged in period {current}, the rosters are stale: run fm sync"
+        )
+    return current, None
 
 
 def _current_matchup(settings: LeagueSettings, matchups: MatchupsView | None, period: int) -> int | None:
@@ -1176,14 +1242,15 @@ def _after(
     ctx: TradeContext, team_id: int, out: Collection[int], incoming: Sequence[int], dropped: Collection[int] = ()
 ) -> _After:
     """``team_id``'s roster once ``out`` and ``dropped`` leave and ``incoming`` arrive. A player who was in someone's IR
-    slot goes to an IR slot here when the team has one free, else he takes a roster spot."""
+    slot goes to an IR slot here when the team has one free and he is IR-eligible by his injury designation
+    (:data:`IR_ELIGIBLE`; he may have healed since), else he takes a roster spot."""
     gone = set(out) | set(dropped)
     everyone = (ctx.rosters.get(team_id, frozenset()) - gone) | set(incoming)
     ir_kept = {espn_id for espn_id in ctx.ir.get(team_id, frozenset()) if espn_id not in gone}
     room = ctx.settings.ir_count - len(ir_kept)
     in_ir_elsewhere = {espn_id for held in ctx.ir.values() for espn_id in held}
     for espn_id in sorted(incoming):
-        if room > 0 and espn_id in in_ir_elsewhere:
+        if room > 0 and espn_id in in_ir_elsewhere and ctx.ir_eligible(espn_id):
             ir_kept.add(espn_id)
             room -= 1
     ir = frozenset(ir_kept)
@@ -1232,7 +1299,7 @@ def _locked_players(ctx: TradeContext, ids: Iterable[int]) -> dict[int, str]:
             continue
         try:
             cutoff = plugin.transaction_cutoff(
-                player.pro_team_id, ctx.period, ctx.schedule, lock_type=settings.roster_lock_type
+                player.pro_team_id, ctx.lock_period, ctx.schedule, lock_type=settings.roster_lock_type
             )
         except ValueError:
             continue
@@ -1278,6 +1345,23 @@ def check_legality(ctx: TradeContext, spec: TradeSpec) -> TradeLegality:
             problems.append(f"{ctx.name(espn_id)} is untouchable (policy)")
     for espn_id, why in _locked_players(ctx, (*spec.give, *spec.get)).items():
         problems.append(f"{ctx.name(espn_id)} is locked: {why}")
+    for team in (ctx.team_id, other):
+        stuck = sorted(espn_id for espn_id in ctx.ir.get(team, frozenset()) if not ctx.ir_eligible(espn_id))
+        if stuck:
+            name = "we hold" if team == ctx.team_id else f"{ctx.team_name(team)} holds"
+            problems.append(
+                f"{name} {_names(ctx, stuck)} in an IR slot without an IR-eligible injury status, and ESPN blocks "
+                "that team's moves until it is fixed"
+            )
+    limit_trades = ctx.settings.trade.max_trades
+    if limit_trades is not None:
+        if ctx.trades_made >= limit_trades:
+            problems.append(f"we have made {ctx.trades_made} trades and the league allows {limit_trades} a season")
+        else:
+            notes.append(
+                f"the league allows {limit_trades} trades a season; {ctx.trades_made} made through this tool are "
+                f"counted, {other}'s count is unknown"
+            )
     after_ours = _after(ctx, ctx.team_id, spec.give, spec.get)
     after_theirs = _after(ctx, other, spec.get, spec.give)
     drops: dict[int, tuple[int, ...]] = {}
@@ -1765,6 +1849,49 @@ def rationale(ctx: TradeContext, evaluation: TradeEvaluation) -> str:
     return " ".join(parts)
 
 
+@dataclass(slots=True)
+class TradeEtiquette:
+    """What our trade offers already in the league's queue allow (DESIGN 9.4): the teams with an open offer from us, the
+    open offers by dedupe key, and how many offers count against the weekly cap."""
+
+    open_teams: set[int]
+    open_keys: dict[str, ProposalRow]
+    recent: int
+    weekly_cap: int
+
+    def blocker(self, other_team_id: int, name: str | None = None) -> str | None:
+        """Why an offer to ``other_team_id`` may not be stored now (one open offer a team, the weekly cap), else
+        ``None``."""
+        if other_team_id in self.open_teams:
+            return f"one offer a team: {name or f'team {other_team_id}'} already has one from us"
+        if self.recent >= self.weekly_cap:
+            return f"already at the weekly cap of {self.weekly_cap} offers"
+        return None
+
+
+def trade_etiquette(
+    store: Store, league: LeagueRow, *, at: datetime, weekly_cap: int = WEEKLY_OFFERS
+) -> TradeEtiquette:
+    """Read the league's offer queue: the open ``trade_propose`` proposals and the offers that count toward
+    ``weekly_cap`` (any seven days, whatever their creator, unless rejected or expired)."""
+    open_teams: set[int] = set()
+    open_keys: dict[str, ProposalRow] = {}
+    for row in store.proposals.open(league.row_id):
+        if row.kind != ProposalKind.TRADE_PROPOSE.value:
+            continue
+        other = row.payload.get("other_team_id")
+        if isinstance(other, int):
+            open_teams.add(other)
+        if row.dedupe_key:
+            open_keys[row.dedupe_key] = row
+    recent = [
+        row
+        for row in store.proposals.find(league_id=league.row_id, kinds=[ProposalKind.TRADE_PROPOSE.value])
+        if row.status not in ("rejected", "expired") and at - row.created_at < timedelta(days=7)
+    ]
+    return TradeEtiquette(open_teams, open_keys, len(recent), weekly_cap)
+
+
 def propose_trades(
     store: Store,
     config: Config,
@@ -1786,22 +1913,9 @@ def propose_trades(
     ``blocked``, never raised; with ``dry_run`` policy is evaluated and nothing is stored.
     """
     at = now if now is not None else ctx.now
-    open_teams: set[int] = set()
-    open_keys: dict[str, ProposalRow] = {}
-    for row in store.proposals.open(ctx.league.row_id):
-        if row.kind != ProposalKind.TRADE_PROPOSE.value:
-            continue
-        other = row.payload.get("other_team_id")
-        if isinstance(other, int):
-            open_teams.add(other)
-        if row.dedupe_key:
-            open_keys[row.dedupe_key] = row
-    recent = [
-        row
-        for row in store.proposals.find(league_id=ctx.league.row_id, kinds=[ProposalKind.TRADE_PROPOSE.value])
-        if row.status not in ("rejected", "expired") and at - row.created_at < timedelta(days=7)
-    ]
-    room = min(max_offers, max(0, weekly_cap - len(recent)))
+    etiquette = trade_etiquette(store, ctx.league, at=at, weekly_cap=weekly_cap)
+    open_teams, open_keys = etiquette.open_teams, etiquette.open_keys
+    room = min(max_offers, max(0, weekly_cap - etiquette.recent))
     outcomes: list[ProposedTrade] = []
     fresh = 0
     for evaluation in evaluations:
@@ -1835,7 +1949,13 @@ def propose_trades(
         payload = spec.payload()
         if dry_run:
             verdict = evaluate(
-                store, config, ctx.league, ProposalKind.TRADE_PROPOSE, payload, scoring_period_id=ctx.period, now=at
+                store,
+                config,
+                ctx.league,
+                ProposalKind.TRADE_PROPOSE,
+                payload,
+                scoring_period_id=ctx.lock_period,
+                now=at,
             )
             blocked = None if verdict.allowed else "; ".join(verdict.reasons)
             outcomes.append(ProposedTrade(evaluation, blocked=blocked, dry=True))
@@ -1851,7 +1971,7 @@ def propose_trades(
                 ProposalKind.TRADE_PROPOSE,
                 payload,
                 created_by=TRADES_CREATED_BY,
-                scoring_period_id=ctx.period,
+                scoring_period_id=ctx.lock_period,
                 engine_numbers=engine_numbers(ctx, evaluation),
                 rationale=rationale(ctx, evaluation),
                 dedupe_key=key,

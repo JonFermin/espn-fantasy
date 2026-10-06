@@ -17,7 +17,7 @@ from __future__ import annotations
 import inspect
 import math
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import NormalDist
@@ -237,6 +237,28 @@ def test_a_category_without_spread_is_left_out_with_a_warning() -> None:
     assert plan.names == ("PTS",)
     assert any("BLK" in warning and "no spread" in warning for warning in plan.warnings)
     assert set(plan.weights) == {"PTS"}
+
+
+def test_categories_left_out_of_the_plan_count_against_the_punt_cap(model: CategoryModel) -> None:
+    names = model.categories
+    lost = {name: margin_at(0.001 * (i + 1)) for i, name in enumerate(names[2:])}  # the first two have no margin
+    plan = plan_categories(model, outlook_for(lost), games=GAMES)
+    assert plan.names == names[2:]
+    # four may be conceded in all and two already are: two punts, not four
+    assert plan.max_punts == 4 and plan.punts == names[2:4]
+    assert any("at most 2 may be conceded" in warning and "2 already left out" in warning for warning in plan.warnings)
+    conceded = len(plan.punts) + (len(names) - len(plan.names))
+    assert conceded <= plan.max_punts  # a majority of the categories is still in play
+
+
+def test_a_margin_without_a_spread_is_left_out_instead_of_raising(model: CategoryModel) -> None:
+    names = model.categories
+    margins = dict.fromkeys(names, 0.0)
+    outlook = outlook_for(margins)
+    broken = replace(outlook, sds={name: sd for name, sd in outlook.sds.items() if name != names[0]})
+    plan = plan_categories(model, broken, games=GAMES)
+    assert names[0] not in plan.names
+    assert any(names[0] in warning and "no spread" in warning for warning in plan.warnings)
 
 
 def test_game_sd_comes_from_the_models_tau(model: CategoryModel) -> None:

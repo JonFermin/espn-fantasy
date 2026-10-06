@@ -63,6 +63,10 @@ class Runtime:
     """UI mode: pages for the click-through and the Playwright trace."""
     member_id: str | None = None
     """The account's SWID, the envelope's ``memberId``."""
+    dry_run: bool = False
+    """Set by the opener when the runtime was opened as a dry run (``opener(row, dry_run=True)``): its transport
+    refuses every send and, live, its browser context aborts every write. A caller that must never write (the UI
+    drill) requires it rather than inferring it from the transport's type."""
 
 
 class RuntimeOpener(Protocol):
@@ -148,7 +152,11 @@ def open_live_runtime(league: LeagueRow, *, dry_run: bool, launch: LaunchOptions
         game = Game.from_sport(league.sport)
         with EspnClient(game, league.espn_league_id, league.season, session) as reader:
             yield Runtime(
-                reader=reader, transport=transport, browser=LiveBrowser(browser.context), member_id=session.swid
+                reader=reader,
+                transport=transport,
+                browser=LiveBrowser(browser.context),
+                member_id=session.swid,
+                dry_run=dry_run,
             )
 
 
