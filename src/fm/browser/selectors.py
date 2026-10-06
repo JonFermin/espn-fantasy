@@ -19,7 +19,11 @@ text. A ``HERE`` saves the move at once. The canary (#28) is the drift alarm. Th
 (#27) carry the names the same capture saw while an add and a claim were driven (``Add <Name> <Position> for
 <Team>`` and ``Claim ...`` on the list; ``Drop Player <Name>``, ``Continue to add <Name> and drop <Name>`` and the
 "Confirm Transaction" dialog's ``Confirm add <Name> and drop <Name>`` on the roster-fix page; docs/espn-api.md
-section 4). Trades (#44) add the trade builder.
+section 4). Trades (#44) add the trade builder (``/{sport}/team/trade?...&fromTeamId=``), which the 2026-10-06
+``trade-review`` capture drove to its review step without sending: a ``Trade <Player>`` checkbox per player on both
+rosters, ``Continue`` (disabled until something is picked), then an expiry select (``1 Days`` ... ``7 Days``, ``2 Days``
+by default), a message textarea and ``Send Trade Proposal``, the one state-changing click. Responding to or withdrawing
+an offer has no captured page, so it has no selectors: those flows run in API mode only.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ class WebPage(StrEnum):
     ROSTER = "roster"  # the team page: our roster by lineup slot, where lineup moves are made
     PLAYERS = "players"  # the player list: free agents and waiver players, where an add or a claim starts
     ROSTERFIX = "rosterfix"  # the roster-fix page: the drop an add or a claim needs when the roster is full
+    TRADE = "trade"  # the trade builder: pick players on both rosters, review, send the proposal
 
 
 class RosterFixType(StrEnum):
@@ -71,6 +76,17 @@ def roster_fix_url(
     return (
         f"{WEB_ROOT}/{path}/rosterfix?leagueId={league_id}&seasonId={season}&teamId={team_id}"
         f"&players={player_id}&type={RosterFixType(kind).value}"
+    )
+
+
+def trade_builder_url(game: Game | str, league_id: int, season: int, other_team_id: int, from_team_id: int) -> str:
+    """The trade builder (``fantasy.espn.com/{football|basketball}/team/trade?leagueId=...&teamId=<them>&fromTeamId=
+    <us>&seasonId=...``), reached from an opponent's ``Propose Trade`` link (seen by the 2026-10-06 trade-review
+    capture). Loading it sends nothing."""
+    path = _SPORT_PATHS[Game.coerce(game)]
+    return (
+        f"{WEB_ROOT}/{path}/team/trade?leagueId={league_id}&teamId={other_team_id}&fromTeamId={from_team_id}"
+        f"&seasonId={season}"
     )
 
 
@@ -125,6 +141,10 @@ CONTINUE_NAME = _whole_name(r"continue(?:\sto\s(?:add|claim)\s.+\sand drop\s.+)?
 picked (seen for a claim in NFL and an add in NBA); it opens the "Confirm Transaction" dialog."""
 CONFIRM_TRANSACTION_NAME = _whole_name(r"confirm (?:add|claim)\s.+\sand drop\s.+")
 """The dialog's button that sends the transaction (reads ``Confirm``): ``Confirm add <Name> and drop <Name>``."""
+TRADE_PLAYER_NAME = _whole_name(r"trade\s.+")
+"""The trade builder's checkbox per player on either roster: ``Trade <Player>`` (seen in both games)."""
+TRADE_SEND_NAME = _whole_name(r"send trade proposal")
+"""The review step's button that sends the offer: ``Send Trade Proposal`` (seen in both games, never clicked)."""
 SAVE_FAILED_TEXT = re.compile(r"^\s*oops! looks like something went wrong", re.IGNORECASE)
 """What the app shows when a save fails: ``Oops! Looks like something went wrong. Please try again``."""
 
@@ -400,6 +420,79 @@ SAVE_FAILED = _register(
     )
 )
 
+# --- the trade builder ------------------------------------------------------------------------------------------------
+
+TRADE_HEADING = _register(
+    Selector(
+        "trade.heading",
+        WebPage.TRADE,
+        "the builder's heading ('Propose Trade' plus the other team's name)",
+        role="heading",
+        name=re.compile(r"^\s*propose trade", re.IGNORECASE),
+    )
+)
+TRADE_PLAYER = _register(
+    Selector(
+        "trade.player",
+        WebPage.TRADE,
+        "a player's checkbox on either roster (named 'Trade <Player>'): checking it puts him in the offer, "
+        "changes nothing by itself",
+        role="checkbox",
+        name=TRADE_PLAYER_NAME,
+    )
+)
+TRADE_CONTINUE = _register(
+    Selector(
+        "trade.continue",
+        WebPage.TRADE,
+        "Continue (disabled until a player is picked): opens the review step, changes nothing by itself",
+        role="button",
+        name=_whole_name("continue"),
+    )
+)
+TRADE_CANCEL = _register(
+    Selector(
+        "trade.cancel",
+        WebPage.TRADE,
+        "Cancel Trade: abandons the draft offer in the builder (nothing was sent)",
+        role="button",
+        name=_whole_name("cancel trade"),
+    )
+)
+TRADE_EXPIRY = _register(
+    Selector(
+        "trade.expiry",
+        WebPage.TRADE,
+        "the review step's expiry select (options '1 Days' to '7 Days', default 2, which matches the 48 h expiries on "
+        "record)",
+        role="combobox",
+        presence=Presence.SOMETIMES,
+        after="trade.continue",
+    )
+)
+TRADE_MESSAGE = _register(
+    Selector(
+        "trade.message",
+        WebPage.TRADE,
+        "the review step's message box (a textarea, sent as the offer's comment)",
+        role="textbox",
+        presence=Presence.SOMETIMES,
+        after="trade.continue",
+    )
+)
+TRADE_SEND = _register(
+    Selector(
+        "trade.send",
+        WebPage.TRADE,
+        "Send Trade Proposal on the review step: the one state-changing click of the builder, a message to another "
+        "manager",
+        role="button",
+        name=TRADE_SEND_NAME,
+        presence=Presence.SOMETIMES,
+        after="trade.continue",
+    )
+)
+
 
 def _named(scope: PageLike | LocatorLike, role: str, pattern: str) -> LocatorLike:
     return scope.get_by_role(role, name=_whole_name(pattern))
@@ -438,3 +531,8 @@ def confirm_transaction_button(scope: PageLike | LocatorLike, add_name: str, dro
     return _named(
         scope, "button", rf"confirm (?:add|claim)\s+{re.escape(add_name)}\s+and drop\s+{re.escape(drop_name)}"
     )
+
+
+def trade_player_checkbox(scope: PageLike | LocatorLike, player_name: str) -> LocatorLike:
+    """The builder's ``Trade <player_name>`` checkbox."""
+    return _named(scope, "checkbox", rf"trade\s+{re.escape(player_name)}")

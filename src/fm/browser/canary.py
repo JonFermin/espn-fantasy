@@ -221,10 +221,19 @@ def _roster_fix_page(league: League, probe: PageProbe | None) -> str | None:
     )
 
 
+def _trade_page(league: League, probe: PageProbe | None) -> str:
+    """The trade builder, opened toward another team (the lowest id that is not ours: team ids start at 1 and a league
+    has at least two teams). Loading it only shows both rosters; nothing is sent unless Continue and Send Trade
+    Proposal are clicked, and the canary never clicks."""
+    other = 1 if league.team_id != 1 else 2
+    return selectors.trade_builder_url(league.game, league.espn_league_id, league.season, other, league.team_id)
+
+
 PAGE_ADDRESSES: Mapping[WebPage, PageAddress] = {
     WebPage.ROSTER: _team_page,
     WebPage.PLAYERS: _players_page,
     WebPage.ROSTERFIX: _roster_fix_page,
+    WebPage.TRADE: _trade_page,
 }
 """How to open each registered page. A page in the registry without an entry is reported as :attr:`FindingKind.
 NO_ADDRESS`, and ``tests/browser/test_canary.py`` fails until it has one. The address builders themselves belong in
