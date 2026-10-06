@@ -566,8 +566,8 @@ def test_command_source_filter_and_common(tmp_path: Path) -> None:
     assert "every source projects" in result.output
 
 
-def test_command_reports_missing_sport_and_bad_input() -> None:
-    nba = runner.invoke(app, ["backtest", "--sport", "nba", "--fixtures", str(BACKTEST_FIXTURES)])
+def test_command_reports_missing_sport_and_bad_input(tmp_path: Path) -> None:
+    nba = runner.invoke(app, ["backtest", "--sport", "nba", "--fixtures", str(tmp_path)])
     assert nba.exit_code == 1
     assert "no nba backtest fixture" in nba.output
     bad = runner.invoke(app, ["backtest", "--sport", "mlb", "--fixtures", str(BACKTEST_FIXTURES)])
