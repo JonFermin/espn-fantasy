@@ -93,7 +93,7 @@ Built: `fm.decide.lineup` (#20) solves a week's NFL lineup as an assignment prob
 - DONE [P2] [S] #34: FAAB bid model — scope: src/fm/decide/faab.py, src/fm/decide/waivers.py, tests/decide/test_faab.py — depends: #14 ✓, #21 ✓
   - Fits winning-bid behavior from league transaction history and replaces the heuristic.
   AC: test command passes for tests/decide/test_faab.py (bid monotonic in value; cap respected)
-- IN PROGRESS [P2] [S] #35: Rest-of-season rankings sheet — scope: src/fm/decide/rankings.py, src/fm/commands/rankings.py, tests/decide/test_rankings.py — depends: #21 ✓, #24 ✓
+- DONE [P2] [S] #35: Rest-of-season rankings sheet — scope: src/fm/decide/rankings.py, src/fm/commands/rankings.py, tests/decide/test_rankings.py — depends: #21 ✓, #24 ✓
   - League-tuned ROS values for rostered players and free agents in both leagues (points, or G-scores for categories) → CSV.
   - A sanity check for waiver and trade calls; replaces the draft sheet, since both drafts are done.
   - Phase 5: `fm.model.value_nba.scheduled_points`, `period_lines` and `fit_categories` / `rank` (#24) give the NBA side; `fm.model.valuation.load_valuation(include_rostered=True)` (#21) values every rostered NFL player too.
