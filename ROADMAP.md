@@ -103,7 +103,7 @@ Key files: src/fm/commands/{advise,schedule,canary,backtest,rankings}.py, src/fm
   - FastMCP read tools (status, lineup, waivers, trade eval) plus `create_proposal`; no execute tool.
   - `create_proposal` is `fm.proposals.propose` (policy verdict and dedupe included); the server exposes no approve or execute path.
   AC: test command passes for tests/test_mcp_server.py (tool list has no write/execute tool; `create_proposal` stores a proposal)
-- IN PROGRESS [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27 ✓
+- DONE [P2] [M] #41: UI fallback drills — scope: src/fm/browser/drills.py, src/fm/commands/drill.py, tests/browser/test_drills.py — depends: #14 ✓, #27 ✓
   - Weekly dry-run of each UI-mode flow against the live site, stopping before the final confirm, so the fallback is known-good when API mode breaks. Alerts on failure.
   AC: test command passes for tests/browser/test_drills.py against a fake page; `uv run fm drill --help` exits 0
 - IN PROGRESS [P2] [M] #42: NFL opportunity baseline — scope: src/fm/model/baseline_nfl.py, tests/model/test_baseline_nfl.py — depends: #13 ✓, #15 ✓, #33 ✓
