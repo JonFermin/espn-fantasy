@@ -80,6 +80,7 @@ MODULES = (
     "fm.advisor.client",
     "fm.advisor.news_triage",
     "fm.browser.canary",
+    "fm.browser.drills",
     "fm.decide.faab",
     "fm.decide.rankings",
     "fm.eval.backtest",
