@@ -288,6 +288,8 @@ class TradeEvaluation:
     warnings: tuple[str, ...] = ()
     runs: int = 0
     seed: int = DEFAULT_SEED
+    scale: float = 1.0
+    """One starter's rest-of-season value, the unit :attr:`gain` is in when there is no simulation."""
 
     @property
     def legal(self) -> bool:
@@ -302,9 +304,6 @@ class TradeEvaluation:
         """What we gain, in the units of :attr:`score_basis`: title odds, or starter seasons of rest-of-season value."""
         title = self.ours.delta_title
         return title if title is not None else self.ours.delta_ros / max(self.scale, 1e-9)
-
-    scale: float = 1.0
-    """One starter's rest-of-season value, the unit :attr:`gain` is in when there is no simulation."""
 
 
 # --- market values and P(accept) --------------------------------------------------------------------------------------
@@ -765,9 +764,7 @@ def _before_news(inputs: Mapping[str, Any], stored: float) -> float:
     return stored
 
 
-def _spans_for(
-    settings: LeagueSettings, current_matchup: int | None, *, last: int | None = None
-) -> dict[int, tuple[int, ...]] | None:
+def _spans_for(settings: LeagueSettings, current_matchup: int | None) -> dict[int, tuple[int, ...]] | None:
     """The scoring periods of each matchup period from the current one on, or ``None`` when they cannot be told."""
     days = league_matchup_days(settings)
     if days is None or current_matchup is None:
@@ -921,8 +918,10 @@ def _market_book(
         fetched = market.market_values(settings, rank_type=rank_type)
         found, as_of = fetched.data, fetched.as_of
         notes.extend(fetched.warnings)
-        if fetched.degraded or not fetched.data:
+        if not fetched.data:
             notes.append("market values are unavailable: P(accept) uses our own rest-of-season ranks")
+        elif fetched.degraded:
+            notes.append("market values are partial: players without one are ranked by our own values")
         elif fetched.stale:
             notes.append("market values are stale (the refresh failed)")
     warnings.extend(notes)

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import ast
 import json
-import math
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -23,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from typer.testing import CliRunner
 
 from fm.config import Config
@@ -35,13 +36,11 @@ from fm.decide.trades import (
     DECLINE,
     DEFAULT_SEED,
     TRADES_CREATED_BY,
-    Acceptance,
     AcceptanceParams,
     MarketBook,
     SearchOptions,
     TradeContext,
     TradeError,
-    TradeEvaluation,
     TradeSpec,
     acceptance_probability,
     build_market_book,
@@ -204,11 +203,13 @@ def seed_league(
     extra: Iterable[tuple[int, str, str, int, int, float]] = (),
     locked: Iterable[int] = (),
     ir: Iterable[int] = (),
+    unprojected: Iterable[int] = (),
     key: str = "nfl",
 ) -> LeagueRow:
     """The six-team league as ``fm sync`` would store it: every roster, the players, ESPN's week line and season line
     (``GP`` 14) for everyone, and a small wire. ``extra`` adds ``(team, name, position, slot, id, points)`` players;
-    ``ir`` moves players to the IR slot."""
+    ``ir`` moves players to the IR slot, ``unprojected`` leaves players without a
+    projection."""
     league = store.leagues.upsert(
         LeagueRow(key=key, sport="nfl", espn_league_id=LEAGUE_ID, season=SEASON, team_id=US, as_of=NOW)
     )
@@ -258,7 +259,10 @@ def seed_league(
         + [player_row(espn_id, name, position, 60 + n) for n, (espn_id, name, position, _) in enumerate(wire)]
     )
     rows: list[ProjectionRow] = []
+    silent = set(unprojected)
     for espn_id, points in [(row[4], row[5]) for row in people] + [(row[0], row[3]) for row in wire]:
+        if espn_id in silent:
+            continue
         for period, stats in ((WEEK, line(points)), (0, {**line(points * 14), GAMES_STAT: 14})):
             rows.append(
                 ProjectionRow(
@@ -428,6 +432,36 @@ def test_p_accept_is_bounded_and_a_forced_drop_costs_a_tenth() -> None:
     assert dropped.drops == 2 and "market" in middling.describe()
 
 
+@settings(max_examples=200, deadline=None)
+@given(
+    mine=st.floats(0.0, 10_000.0),
+    better=st.floats(0.0, 5_000.0),
+    theirs=st.floats(1.0, 10_000.0),
+    need=st.floats(-6.0, 6.0),
+    drops=st.integers(0, 3),
+)
+def test_p_accept_is_a_probability_that_never_falls_as_we_offer_more_or_he_needs_it_more(
+    mine: float, better: float, theirs: float, need: float, drops: int
+) -> None:
+    params = AcceptanceParams()
+    low = acceptance_probability(book_of({1: mine, 2: theirs}), [1], [2], need_gain=need, drops=drops)
+    high = acceptance_probability(book_of({1: mine + better, 2: theirs}), [1], [2], need_gain=need, drops=drops)
+    needier = acceptance_probability(book_of({1: mine, 2: theirs}), [1], [2], need_gain=need + 1.0, drops=drops)
+    for found in (low, high, needier):
+        assert params.floor <= found.p_accept <= params.ceiling
+        assert -1.0 <= found.surplus <= 1.0
+    assert high.p_accept >= low.p_accept - 1e-12
+    assert needier.p_accept >= low.p_accept - 1e-12
+
+
+@settings(max_examples=100, deadline=None)
+@given(st.integers(1, 500), st.integers(1, 500), st.integers(2, 500))
+def test_a_better_rank_is_never_worth_less(first: int, second: int, size: int) -> None:
+    better, worse = sorted((first, second))
+    assert rank_value(better, size) >= rank_value(worse, size)
+    assert 10.0 - 1e-9 <= rank_value(worse, size) <= 10_000.0 + 1e-9
+
+
 def test_every_weight_of_p_accept_is_a_parameter() -> None:
     book = book_of({1: 6000, 2: 5000})
     gentle = acceptance_probability(book, [2], [1], need_gain=0.0, params=AcceptanceParams(market_weight=1.0))
@@ -574,11 +608,20 @@ def test_a_symmetric_trade_changes_nothing_for_either_side(store: Store) -> None
     assert found.recommendation != ACCEPT  # nothing to gain
 
 
-def test_swapping_starters_of_equal_value_across_positions_is_not_a_wash_when_the_lineups_differ(store: Store) -> None:
+def test_a_roster_is_valued_by_its_lineup_not_by_the_sum_of_its_players(store: Store) -> None:
     ctx = context(store)
-    # Our RB1 for their WR1: they are worth about the same to a points league, but our lineup ends up with a thin RB.
-    found = evaluate_trade(ctx, TradeSpec(2, (pid(US, "RB1"),), (pid(2, "WR1"),)), simulate=False)
-    assert found.ours.delta_ros != 0.0 and not found.simulated and found.score_basis == BASIS_ROS
+    values = ctx.model.values
+    mine = ctx.playing(US)
+    # our spare tight end for their fourth receiver: the receiver is projected for more, but neither would start
+    give, get = pid(US, "TE2"), pid(2, "WR4")
+    bench = evaluate_trade(ctx, TradeSpec(2, (give,), (get,)), simulate=False)
+    assert values[get] > values[give] and bench.ours.delta_ros == pytest.approx(0.0, abs=1e-9)
+    # our best back for their best receiver: the change is the two lineups' difference
+    give, get = pid(US, "RB1"), pid(2, "WR1")
+    found = evaluate_trade(ctx, TradeSpec(2, (give,), (get,)), simulate=False)
+    assert found.ours.ros_before == pytest.approx(ctx.model.roster_value(mine))
+    assert found.ours.ros_after == pytest.approx(ctx.model.roster_value((mine - {give}) | {get}))
+    assert found.ours.delta_ros != 0.0
 
 
 def test_an_evaluation_is_reproducible_from_its_seed(store: Store) -> None:
@@ -634,11 +677,13 @@ def test_an_unknown_player_or_team_is_an_error_not_a_verdict(store: Store) -> No
         TradeSpec(2, (1, 1), (2,))
 
 
-def test_a_player_nothing_projects_is_flagged_and_counts_as_nothing(store: Store) -> None:
-    ctx = context(store, extra=((2, "Mystery", "RB", BENCH, 7100, 0.0),))
+def test_a_player_nothing_projects_is_flagged_and_never_asked_for(store: Store) -> None:
+    ctx = context(store, extra=((2, "Mystery", "RB", BENCH, 7100, 9.0),), unprojected=[7100])
+    assert 7100 not in ctx.model.values and ctx.model.knows(7100)  # known, but his value is unknown, not zero
     found = evaluate_trade(ctx, TradeSpec(2, (pid(US, "RB4"),), (7100,)), simulate=False)
-    assert found.legal
-    assert isinstance(found.acceptance, Acceptance)
+    assert found.legal and "Mystery has no projection: his value is unknown and counts as 0" in found.warnings
+    search = find_trades(ctx, opponents=[2], options=SearchOptions(runs=RUNS, limit=100, finalists=100))
+    assert all(7100 not in result.spec.get for result in search.results)
 
 
 # --- legality ---------------------------------------------------------------------------------------------------------
@@ -1094,16 +1139,6 @@ def test_the_module_has_no_way_to_write_to_espn() -> None:
     }
     assert not {name for name in imported if name.startswith(("fm.executor", "fm.browser", "playwright", "httpx"))}
     assert not any(name.endswith("transport") for name in imported)
-
-
-def test_a_symmetric_evaluation_of_the_same_player_for_himself_is_refused() -> None:
-    with pytest.raises(TradeError):
-        TradeSpec(2, (5,), (5,))
-
-
-def test_unused_names_stay_exercised() -> None:
-    assert math.isclose(rank_value(1, 2), 10_000.0) and isinstance(FBA, object)
-    assert ProjectionSourceRegistry is not None and isinstance(TradeEvaluation, type)
 
 
 # --- the NBA ----------------------------------------------------------------------------------------------------------
