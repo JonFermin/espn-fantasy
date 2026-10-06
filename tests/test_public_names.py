@@ -50,6 +50,7 @@ MODULES = (
     "fm.model.relevance",
     "fm.model.categories",
     "fm.model.value_nba",
+    "fm.model.baseline_nfl",
     "fm.sources.news",
     "fm.jobs.sync",
     "fm.notify",
