@@ -82,6 +82,7 @@ MODULES = (
     "fm.advisor.close_call",
     "fm.advisor.explain",
     "fm.browser.canary",
+    "fm.browser.drills",
     "fm.decide.faab",
     "fm.decide.rankings",
     "fm.eval.backtest",
