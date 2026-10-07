@@ -16,6 +16,10 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Typer forces a rich terminal when GITHUB_ACTIONS is set, and the ANSI codes split the option names that the
+      # CLI help tests look for.
+      _TYPER_FORCE_DISABLE_TERMINAL: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
