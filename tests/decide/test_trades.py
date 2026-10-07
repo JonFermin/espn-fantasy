@@ -35,7 +35,9 @@ from fm.decide.trades import (
     COUNTER,
     DECLINE,
     DEFAULT_SEED,
+    DRAFT_LIFETIME,
     TRADES_CREATED_BY,
+    TRADES_KIND,
     AcceptanceParams,
     MarketBook,
     RankCurve,
@@ -46,6 +48,8 @@ from fm.decide.trades import (
     acceptance_probability,
     build_market_book,
     check_legality,
+    clears_thresholds,
+    decide_trades,
     engine_p_active,
     evaluate_trade,
     find_trades,
@@ -62,7 +66,7 @@ from fm.espn.models import MatchupsView, ProSchedule
 from fm.espn.settings import LeagueSettings, LockType, load_league_settings, parse_league_settings
 from fm.model.projections import ESPN, BlendWeights, ProjectionSourceRegistry
 from fm.model.valuation import GAMES_STAT
-from fm.proposals import PolicyError, ProposalKind, TradePayload, parse_payload, pause, resume
+from fm.proposals import PolicyError, ProposalKind, TradePayload, parse_payload, pause, propose, reject, resume
 from fm.sources.base import Fetched
 from fm.sources.market import MarketValue
 from fm.store import (
@@ -1877,3 +1881,121 @@ def test_fm_trade_says_when_the_league_is_not_synced(tmp_path: Path) -> None:
     write_config()
     assert "nfl: not synced; run fm sync" in fm("trade", "find", "--no-market", "--as-of", AS_OF)
     assert "not synced; run fm sync" in fm("trade", "eval", "give a get b", "--no-market", "--as-of", AS_OF, expect=1)
+
+
+# --- the tick's outgoing offers (decide_trades) -----------------------------------------------------------------------
+
+
+def finder_config(**finder: Any) -> Config:
+    league = {"key": "nfl", "sport": "nfl", "espn_league_id": LEAGUE_ID, "season": SEASON, "team_id": US}
+    return Config.model_validate({"league": [{**league, "trade_finder": finder}]})
+
+
+LOOSE = {"enabled": True, "min_accept": 0.05, "min_title_gain": 0.001, "min_ros_gain": 0.01}
+FAST = SearchOptions(runs=RUNS)
+
+
+def run_finder(store: Store, config: Config, *, market: FakeMarket | None = None, now: datetime = NOW) -> Any:
+    return decide_trades(
+        store,
+        config,
+        "nfl",
+        now=now,
+        matchups=schedule_view(ppr()),
+        market=market if market is not None else FakeMarket(),
+        weights=EQUAL_WEIGHTS,
+        options=FAST,
+    )
+
+
+def test_the_finder_is_off_unless_enabled_and_then_searches_nothing(store: Store) -> None:
+    seed_league(store)
+    market = FakeMarket()
+    decision = run_finder(store, finder_config(), market=market)
+    assert decision.proposals == () and decision.considered == () and market.calls == []
+    assert store.proposals.open(decision.league.row_id) == []
+
+
+def test_the_finder_drafts_an_approve_only_offer_that_expires_unanswered(store: Store) -> None:
+    seed_league(store)
+    decision = run_finder(store, finder_config(**LOOSE))
+    assert decision.considered and len(decision.proposals) == 1  # max_offers defaults to one a run
+    row = decision.proposals[0]
+    assert (row.kind, row.status, row.policy, row.created_by) == (
+        ProposalKind.TRADE_PROPOSE.value,
+        "proposed",
+        "approve",
+        TRADES_CREATED_BY,
+    )
+    assert row.deadline == NOW + DRAFT_LIFETIME
+    finder = finder_config(**LOOSE).leagues[0].trade_finder
+    best = next(found for found in decision.considered if clears_thresholds(found, finder))
+    assert parse_payload(row) == best.spec.payload()
+
+
+def test_deals_below_the_thresholds_are_not_drafted(store: Store) -> None:
+    seed_league(store)
+    picky = finder_config(**{**LOOSE, "min_accept": 0.99})
+    decision = run_finder(store, picky)
+    assert decision.considered == () or not any(
+        clears_thresholds(found, picky.leagues[0].trade_finder) for found in decision.considered
+    )
+    assert decision.proposals == ()
+    greedy = finder_config(**{**LOOSE, "min_title_gain": 0.99})
+    assert run_finder(store, greedy).proposals == ()
+
+
+def test_the_gain_threshold_follows_the_basis_the_deal_was_scored_on(store: Store) -> None:
+    ctx = context(store, matchups=False)
+    found = evaluate_trade(ctx, swap_a_running_back_for_a_tight_end(), runs=RUNS)
+    assert not found.simulated and found.score_basis == BASIS_ROS
+    finder = finder_config(**{**LOOSE, "min_title_gain": 0.99, "min_ros_gain": found.gain}).leagues[0].trade_finder
+    assert clears_thresholds(found, finder)  # the title threshold does not apply without a simulation
+    stricter = finder.model_copy(update={"min_ros_gain": found.gain + 0.01})
+    assert not clears_thresholds(found, stricter)
+    shy = finder.model_copy(update={"min_accept": min(1.0, found.acceptance.p_accept + 0.01)})
+    assert not clears_thresholds(found, shy)
+
+
+def test_a_rejected_draft_is_never_drafted_again(store: Store) -> None:
+    seed_league(store)
+    config = finder_config(**LOOSE)
+    first = run_finder(store, config).proposals[0]
+    reject(store, first.row_id, decided_by="cli", now=NOW)
+    later = run_finder(store, config, now=NOW + timedelta(hours=1))
+    assert all(row.dedupe_key != first.dedupe_key for row in later.proposals)
+
+
+def test_the_finder_stops_at_the_weekly_cap_without_searching(store: Store) -> None:
+    league = seed_league(store)
+    config = finder_config(**LOOSE)
+    for team in (1, 4, 5):  # three offers this week, by hand
+        propose(
+            store,
+            config,
+            league,
+            ProposalKind.TRADE_PROPOSE,
+            TradePayload(other_team_id=team, give_espn_ids=(pid(US, "WR4"),), get_espn_ids=(pid(team, "WR4"),)),
+            created_by="cli",
+            now=NOW,
+        )
+    market = FakeMarket()
+    capped = run_finder(store, config, market=market, now=NOW + timedelta(hours=1))
+    assert capped.proposals == () and market.calls == []
+    assert capped.blocked == ("already at the weekly cap of 3 offers",)
+
+
+def test_the_finder_is_registered_for_both_sports_and_the_tick_loads_it() -> None:
+    import fm.jobs.tick  # noqa: F401
+    from fm.decide import registry
+
+    for sport in ("nfl", "nba"):
+        assert registry.lookup(sport, TRADES_KIND) is decide_trades
+
+
+def test_trade_finder_settings_are_not_a_trade_policy() -> None:
+    assert finder_config().leagues[0].trade_finder.enabled is False
+    with pytest.raises(ValueError, match="trade"):
+        config_for(trade_finder={"enabled": True})  # inside [league.policy] any trade* key is refused
+    with pytest.raises(ValueError):
+        finder_config(enabled=True, auto=True)  # unknown keys are errors

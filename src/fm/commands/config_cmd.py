@@ -51,6 +51,13 @@ def _summary(config: Config, config_path: Path, env_path: Path) -> list[str]:
             f"    max {policy.max_transactions_per_week} transactions/week, bids <= {policy.max_faab_pct_per_bid:.0%} "
             f"of FAAB, {len(policy.untouchables)} untouchable(s)",
         ]
+        finder = league.trade_finder
+        if finder.enabled:
+            lines.append(
+                f"    trade finder: drafts up to {finder.max_offers} offer(s) a period for approval when P(accept) >= "
+                f"{finder.min_accept:.0%} and title odds +{finder.min_title_gain * 100:g} pts "
+                f"(or +{finder.min_ros_gain:g} starter seasons)"
+            )
     lines.append(f"llm:    {config.llm.model}, ${config.llm.daily_budget_usd:.2f}/day budget")
     lines.append(f"notify: {config.notify.channel}")
     lines.append("secrets:")

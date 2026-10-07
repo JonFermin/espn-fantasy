@@ -406,6 +406,11 @@ the `as_of` of each input.
   - Both: the playoff-week schedule.
 - **Etiquette:** every trade is approval-gated, with at most one open offer per team and a weekly cap. Claude drafts a
   short pitch you can send.
+- **Scheduled finder (opt-in):** with `[league.trade_finder] enabled = true`, the tick runs the finder at each period's
+  opening and drafts the deals whose P(accept) is at least `min_accept` and whose gain clears `min_title_gain` (title
+  odds) or, without a simulation, `min_ros_gain` (starter seasons). It drafts at most `max_offers` a run under the same
+  etiquette, never redrafts a deal you rejected, and lets a draft expire after 3 days unanswered. Drafts are ordinary
+  `trade_propose` proposals: they reach your phone and wait for your approval.
 
 ### 9.5 Weekly strategy
 
@@ -542,6 +547,13 @@ waiver = "approve"
 max_transactions_per_week = 3
 max_faab_pct_per_bid = 0.35
 untouchables = []             # player names or ESPN IDs; resolved at sync
+
+[league.trade_finder]         # optional; drafts outgoing offers for approval, never sends one
+enabled = false
+min_accept = 0.4              # least P(accept)
+min_title_gain = 0.01         # least gain in title odds (0.01 = 1 point)
+min_ros_gain = 0.25           # without a simulation: least gain in starter seasons
+max_offers = 1                # drafts a run; the weekly cap of 3 still holds
 
 [[league]]
 key = "nba"

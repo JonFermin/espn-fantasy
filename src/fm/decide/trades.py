@@ -5,6 +5,11 @@ This module evaluates and ranks. It never executes anything and has no ESPN writ
 approval-only; workers propose, the executor acts): :func:`propose_trades` drafts :class:`fm.proposals.TradePayload`
 proposals through :func:`fm.proposals.propose`, whose trade kinds are hard-coded approve-only.
 
+**The tick's finder.** :func:`decide_trades`, registered as ``("nfl"|"nba", "trades")``, runs at each period's opening
+when ``[league.trade_finder]`` is enabled: it searches, keeps the deals whose P(accept) and gain clear the configured
+thresholds (:func:`clears_thresholds`), skips any deal we rejected before, and drafts the best through
+:func:`propose_trades` with a :data:`DRAFT_LIFETIME` deadline. The drafts still wait for a person to approve them.
+
 **The league's numbers.** :func:`load_trade_context` reads what ``fm sync`` stored (every roster, the players, ESPN's
 projection lines) and builds a :class:`TradeModel` for the league's sport and scoring kind. Rosters are valued by their
 best lineup, never by a sum of players.
@@ -67,7 +72,8 @@ import math
 import re
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from contextlib import ExitStack
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import cached_property
 from types import MappingProxyType
@@ -75,8 +81,10 @@ from typing import Any, Final, Protocol
 
 import numpy as np
 
-from fm.config import Config
+from fm.config import Config, TradeFinder
+from fm.decide.registry import register
 from fm.espn.calendar import league_matchup_days, matchup_period_of
+from fm.espn.client import EspnClient, EspnClientError
 from fm.espn.ids import Game, InjuryStatus
 from fm.espn.models import MatchupsView
 from fm.espn.settings import LeagueSettings, LockType, ScoringType
@@ -111,8 +119,9 @@ from fm.model.valuation import (
 )
 from fm.model.value_nba import SEASON_PERIOD, blend_day, period_lines, team_games
 from fm.proposals import PolicyError, ProposalKind, TradePayload, evaluate, find_untouchables, propose
+from fm.proposals.policy import as_utc
 from fm.sources.base import Fetched
-from fm.sources.market import LeagueShape, MarketValue
+from fm.sources.market import LeagueShape, MarketSource, MarketValue
 from fm.sports.base import ScheduleLike, plugin_for
 from fm.store import LeagueRow, PlayerRow, ProposalRow, Sport, Store
 
@@ -1959,6 +1968,7 @@ def propose_trades(
     weekly_cap: int = WEEKLY_OFFERS,
     dry_run: bool = False,
     now: datetime | None = None,
+    deadline: datetime | None = None,
 ) -> list[ProposedTrade]:
     """Draft ``trade_propose`` proposals for the best of ``evaluations`` through :func:`fm.proposals.propose`.
 
@@ -1967,7 +1977,8 @@ def propose_trades(
     one), at most ``max_offers`` new offers per call and ``weekly_cap`` in any seven days (offers the league's
     proposals already hold count, whatever their status, unless rejected or expired). A deal that is not legal, needs a
     drop on our side (a payload cannot carry one) or has no positive score is skipped. A policy refusal is reported in
-    ``blocked``, never raised; with ``dry_run`` policy is evaluated and nothing is stored.
+    ``blocked``, never raised; with ``dry_run`` policy is evaluated and nothing is stored. ``deadline`` expires an
+    unanswered draft (the tick's drafts go stale as rosters change); without one a draft stays open until answered.
     """
     at = now if now is not None else ctx.now
     etiquette = trade_etiquette(store, ctx.league, at=at, weekly_cap=weekly_cap)
@@ -2032,6 +2043,7 @@ def propose_trades(
                 engine_numbers=engine_numbers(ctx, evaluation),
                 rationale=rationale(ctx, evaluation),
                 dedupe_key=key,
+                deadline=deadline,
                 now=at,
             )
         except PolicyError as exc:
@@ -2041,6 +2053,116 @@ def propose_trades(
         fresh += 1
         open_teams.add(spec.other_team_id)
     return outcomes
+
+
+# --- the tick's outgoing offers ---------------------------------------------------------------------------------------
+
+
+DRAFT_LIFETIME: Final = timedelta(days=3)
+"""How long a draft the tick made waits for an answer before it expires: it was valued on that day's rosters."""
+
+
+@dataclass(frozen=True, slots=True)
+class FinderDecision:
+    """What :func:`decide_trades` returns. ``proposals``, ``blocked`` and ``warnings`` are what the tick reads;
+    ``considered`` are the deals the search ranked, before the thresholds."""
+
+    league: LeagueRow
+    outcomes: tuple[ProposedTrade, ...] = ()
+    considered: tuple[TradeEvaluation, ...] = ()
+    blocked: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def proposals(self) -> tuple[ProposalRow, ...]:
+        return tuple(
+            outcome.proposal for outcome in self.outcomes if outcome.proposal is not None and not outcome.existing
+        )
+
+
+def clears_thresholds(evaluation: TradeEvaluation, finder: TradeFinder) -> bool:
+    """A deal the tick may draft: likely enough to be taken, and a big enough gain for us in the units it was scored
+    in (title odds with a simulation, starter seasons without)."""
+    if evaluation.acceptance.p_accept < finder.min_accept:
+        return False
+    least = finder.min_title_gain if evaluation.simulated else finder.min_ros_gain
+    return evaluation.gain >= least
+
+
+def decide_trades(
+    store: Store,
+    config: Config,
+    league: str | LeagueRow,
+    *,
+    now: datetime | None = None,
+    schedule: ScheduleLike | None = None,
+    client: EspnClient | None = None,
+    matchups: MatchupsView | None = None,
+    market: MarketLike | None = None,
+    weights: BlendWeights | None = None,
+    options: SearchOptions = DEFAULT_OPTIONS,
+) -> FinderDecision:
+    """Search the league for outgoing deals and draft the ones that clear ``[league.trade_finder]``'s thresholds as
+    approve-only ``trade_propose`` proposals, which expire after :data:`DRAFT_LIFETIME` unanswered.
+
+    Off unless ``trade_finder.enabled``. Nothing is searched when the weekly cap of offers is already reached. A deal
+    we rejected before is never drafted again. ``matchups`` (the league's schedule, for title odds) is read through
+    ``client`` when not given; ``market`` (P(accept)'s market values) is FantasyCalc and ESPN's public pool when not
+    given. Neither has a write path: this drafts, the executor sends only what is approved.
+    """
+    at = as_utc(now)
+    row = _finder_row(store, league)
+    finder = config.league(row.key).trade_finder
+    if not finder.enabled:
+        return FinderDecision(row)
+    etiquette = trade_etiquette(store, row, at=at)
+    if etiquette.recent >= etiquette.weekly_cap:
+        return FinderDecision(row, blocked=(f"already at the weekly cap of {etiquette.weekly_cap} offers",))
+    warnings: list[str] = []
+    if matchups is None and client is not None:
+        try:
+            matchups = client.matchups().data
+        except EspnClientError as exc:
+            warnings.append(f"{row.key}: no mMatchup schedule ({exc}); deals judged on rest-of-season value")
+    with ExitStack() as stack:
+        if market is None:
+            market = stack.enter_context(MarketSource())
+        ctx = load_trade_context(
+            store, row, now=at, config=config, schedule=schedule, matchups=matchups, market=market, weights=weights
+        )
+    warnings.extend(ctx.warnings)
+    search = find_trades(ctx, options=replace(options, min_accept=max(options.min_accept, finder.min_accept)))
+    warnings.extend(search.warnings)
+    rejected = {
+        proposal.dedupe_key
+        for proposal in store.proposals.find(
+            league_id=row.row_id, statuses=("rejected",), kinds=[ProposalKind.TRADE_PROPOSE.value]
+        )
+        if proposal.dedupe_key
+    }
+    chosen = [
+        found
+        for found in search.results
+        if clears_thresholds(found, finder) and f"{row.key}:{found.spec.key}" not in rejected
+    ]
+    outcomes = propose_trades(
+        store, config, ctx, chosen, max_offers=finder.max_offers, now=at, deadline=at + DRAFT_LIFETIME
+    )
+    blocked = tuple(outcome.blocked for outcome in outcomes if outcome.blocked is not None)
+    return FinderDecision(row, tuple(outcomes), search.results, blocked, tuple(dict.fromkeys(warnings)))
+
+
+def _finder_row(store: Store, league: str | LeagueRow) -> LeagueRow:
+    if isinstance(league, LeagueRow):
+        return league
+    row = store.leagues.by_key(league)
+    if row is None:
+        raise TradeError(f"league {league!r} is not in the store; run fm sync")
+    return row
+
+
+for _sport in ("nfl", "nba"):
+    register(_sport, TRADES_KIND, decide_trades)
 
 
 # --- reading a deal from text -----------------------------------------------------------------------------------------

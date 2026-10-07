@@ -60,6 +60,7 @@ import fm.decide.lineup  # noqa: F401  (registers the NFL lineup decision)
 import fm.decide.lineup_daily  # noqa: F401  (registers the NBA daily lineup decision)
 import fm.decide.offers  # noqa: F401  (registers the incoming trade offer decision, both sports)
 import fm.decide.streaming  # noqa: F401  (registers the NBA streaming decision)
+import fm.decide.trades  # noqa: F401  (registers the outgoing trade finder, both sports; off unless configured)
 import fm.decide.waivers  # noqa: F401  (registers the NFL waiver decision)
 from fm import paths
 from fm.browser.flows import FlowRegistry

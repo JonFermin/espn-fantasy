@@ -1,6 +1,7 @@
 """Configuration: ``config.toml`` plus ``.env``, validated into frozen pydantic models (DESIGN section 14).
 
-``config.toml`` declares the leagues (``[[league]]``, each with a ``[league.policy]``), ``[llm]`` and ``[notify]``.
+``config.toml`` declares the leagues (``[[league]]``, each with a ``[league.policy]`` and an optional
+``[league.trade_finder]``), ``[llm]`` and ``[notify]``.
 ``.env`` next to it holds the secrets: ``ANTHROPIC_API_KEY``, ``ODDS_API_KEY`` and the phone channel's credentials
 (``TELEGRAM_BOT_TOKEN`` + ``TELEGRAM_CHAT_ID``, or ``NTFY_TOPIC`` + ``NTFY_REPLY_TOPIC``). A variable set in the
 process environment wins over the file. Nothing ESPN-related is configured here: the session lives in the browser
@@ -107,6 +108,28 @@ class Policy(BaseModel):
         return data
 
 
+class TradeFinder(BaseModel):
+    """Outgoing trade offers the tick looks for on its own (DESIGN 9.4), as ``[league.trade_finder]``.
+
+    This is not a policy: it decides which deals are worth *drafting*, never whether one is sent. Every draft is a
+    ``trade_propose`` proposal, approve-only by invariant, and reaches ESPN only after you approve it. A deal is drafted
+    when its P(accept) is at least ``min_accept`` and our gain clears ``min_title_gain`` (title odds, when the season
+    can be simulated) or ``min_ros_gain`` (rest-of-season value in starter seasons, when it cannot).
+    """
+
+    model_config = _TABLE
+
+    enabled: bool = Field(default=False, description="Run the trade finder at each period's opening.")
+    min_accept: float = Field(default=0.4, gt=0, le=1, description="Least P(accept) for a deal to be drafted.")
+    min_title_gain: float = Field(
+        default=0.01, gt=0, le=1, description="Least gain in title odds, as a fraction (0.01 is one point)."
+    )
+    min_ros_gain: float = Field(
+        default=0.25, gt=0, description="Without a simulation: least gain in starter seasons of rest-of-season value."
+    )
+    max_offers: int = Field(default=1, ge=1, le=3, description="Most drafts a run; the weekly cap of 3 still holds.")
+
+
 class League(BaseModel):
     """One ESPN league and the team this tool manages in it."""
 
@@ -118,6 +141,7 @@ class League(BaseModel):
     season: int = Field(ge=2000, le=2100, description="ESPN labels NBA seasons by their end year.")
     team_id: int = Field(ge=1, description="teamId= on the team page.")
     policy: Policy = Field(default_factory=Policy)
+    trade_finder: TradeFinder = Field(default_factory=TradeFinder)
 
     @property
     def game(self) -> EspnGame:
