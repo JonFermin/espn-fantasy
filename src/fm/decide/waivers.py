@@ -546,6 +546,8 @@ class _Board:
     kinds: frozenset[ProposalKind]
     bidding: Bidding | None
     candidates: int
+    add_drops: bool = True
+    """Free-agent adds may drop a player (``add_drop`` not off); otherwise only adds into an open spot (``add``)."""
 
 
 def _board(
@@ -558,6 +560,7 @@ def _board(
     kinds: Iterable[ProposalKind],
     bidding: Bidding | None,
     candidates: int,
+    add_drops: bool = True,
 ) -> _Board:
     if candidates < 0:
         raise ValueError(f"candidates must be >= 0, got {candidates!r}")
@@ -571,6 +574,7 @@ def _board(
         kinds=frozenset(kinds),
         bidding=bidding,
         candidates=candidates,
+        add_drops=add_drops,
     )
 
 
@@ -649,6 +653,8 @@ def _rank(board: _Board, valuer: RosterValuer, exclude: frozenset[int]) -> tuple
     for add, timing in _candidates(board, valuer, exclude, skipped):
         for drop in drops:
             outlook = valuer.outlooks[drop] if drop is not None else None
+            if outlook is not None and timing.kind is ProposalKind.ADD_DROP and not board.add_drops:
+                continue  # add_drop is off: a free agent may only fill an open spot (the add policy)
             if outlook is not None and _drop_locked(board.entries[outlook.espn_id], outlook, timing, board.clock):
                 continue
             if not _within_limits(board, valuer, add, drop):
@@ -1014,7 +1020,11 @@ def decide_waivers(
     )
     warnings = [*loaded.warnings, *valuation.warnings]
     protected = find_untouchables(store, row.sport, policy, sorted(entry.espn_id for entry in valuation.team))
-    kinds = [kind for kind in ACQUISITION_KINDS if effective_setting(kind, policy) != "off"]
+    kinds = [
+        kind
+        for kind in ACQUISITION_KINDS
+        if effective_setting(kind, policy) != "off" or (kind is ProposalKind.ADD_DROP and policy.add != "off")
+    ]
     team = store.teams.get(row.row_id, row.team_id)
     if team is None and settings.acquisition.uses_faab:
         warnings.append(f"{row.key}: team {row.team_id} has no synced FAAB spending; the whole budget is assumed left")
@@ -1041,6 +1051,7 @@ def decide_waivers(
         kinds=kinds,
         bidding=bidding,
         candidates=candidates,
+        add_drops=effective_setting(ProposalKind.ADD_DROP, policy) != "off",
     )
     valuer = valuation.valuer(pending=pending)
     moves, ranked, skipped = _plan(
@@ -1070,6 +1081,9 @@ def decide_waivers(
                     rationale=move.rationale(),
                     deadline=move.deadline,
                     dedupe_key=move.dedupe_key(row),
+                    # the gain is news-free (load_valuation assesses availability without news signals), so it may
+                    # make an add that drops nobody fire on its own under add = "auto"
+                    auto_gain=move.gain if move.drop is None else None,
                     now=at,
                 )
             except PolicyError as exc:

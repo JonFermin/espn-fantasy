@@ -56,8 +56,10 @@ class ConfigError(Exception):
 class Policy(BaseModel):
     """Per-league approval policy and guardrails (DESIGN section 11).
 
-    ``auto`` exists only for the lineup kinds; add/drop and waiver claims are approved or off. Trades are approval-only
-    by invariant and deliberately have no field here: any ``trade*`` key is rejected.
+    ``auto`` exists for the lineup kinds and for ``add``, a free-agent add with no drop: it fires only when the
+    engine's gain (without Claude-only news signals) is at least ``auto_add_min_gain``. A move that drops a player
+    (``add_drop``) and waiver claims are approved or off. Trades are approval-only by invariant and deliberately have no
+    field here: any ``trade*`` key is rejected.
     """
 
     model_config = _TABLE
@@ -67,7 +69,19 @@ class Policy(BaseModel):
         description="Benching an OUT, bye or no-game starter. auto fires only at T-15 when the proposal is unanswered.",
     )
     lineup: Approval = Field(default="auto", description="Other lineup optimizations.")
-    add_drop: ApprovalNoAuto = Field(default="approve", description="Free-agent adds and drops, including streaming.")
+    add: Approval = Field(
+        default="approve",
+        description="A free-agent add with no drop (an open roster spot). auto fires at once, and only for an add "
+        "whose engine gain is at least auto_add_min_gain; any other add waits for approval.",
+    )
+    auto_add_min_gain: float | None = Field(
+        default=None,
+        gt=0,
+        description="The least engine gain (rest-of-season lineup value, in league points) for add = auto to fire.",
+    )
+    add_drop: ApprovalNoAuto = Field(
+        default="approve", description="Free-agent adds that drop a player, including streaming. Never auto."
+    )
     waiver: ApprovalNoAuto = Field(default="approve", description="Waiver claims.")
     max_transactions_per_week: int = Field(default=3, ge=0, description="Our cap; ESPN's own limit is in settings.")
     max_faab_pct_per_bid: float = Field(
@@ -76,6 +90,12 @@ class Policy(BaseModel):
     untouchables: tuple[str | int, ...] = Field(
         default=(), description="Player names or ESPN player IDs never dropped or traded; resolved at sync."
     )
+
+    @model_validator(mode="after")
+    def _auto_add_needs_a_threshold(self) -> Policy:
+        if self.add == "auto" and self.auto_add_min_gain is None:
+            raise ValueError('add = "auto" needs auto_add_min_gain: the least engine gain an add fires on its own for')
+        return self
 
     @model_validator(mode="before")
     @classmethod

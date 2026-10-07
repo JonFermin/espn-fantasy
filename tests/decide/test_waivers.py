@@ -12,7 +12,7 @@ K), each player projected a flat number of points a game, with weeks 15-17 (the 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -55,8 +55,10 @@ from fm.proposals import (
     AddDropPayload,
     ProposalKind,
     WaiverPayload,
+    auto_approve_due,
     evaluate,
     faab_bid_cap,
+    get_proposal,
     parse_payload,
     pause,
     resume,
@@ -676,6 +678,7 @@ def seed(
     league_settings: LeagueSettings | None = None,
     spent: int = 20,
     wire: Iterable[tuple[int, str, str, int, float, WireStatus, datetime | None, bool]] = WIRE,
+    roster: Sequence[Any] = ROSTER,
 ) -> LeagueRow:
     """The hand-made roster and wire as ``fm sync`` would store them: ESPN's week line and season line (``GP`` 14)."""
     pool = tuple(wire)
@@ -702,13 +705,13 @@ def seed(
                 lineup_slot_id=row[4],
                 as_of=NOW,
             )
-            for row in ROSTER
+            for row in roster
         ],
     )
-    players = [player_row(row[0], row[1], row[2], row[3]) for row in (*ROSTER, *pool)]
+    players = [player_row(row[0], row[1], row[2], row[3]) for row in (*roster, *pool)]
     store.players.upsert_many(players)
     lines: list[ProjectionRow] = []
-    for espn_id, points, games in [(row[0], row[5], row[6]) for row in ROSTER] + [(row[0], row[4], 14) for row in pool]:
+    for espn_id, points, games in [(row[0], row[5], row[6]) for row in roster] + [(row[0], row[4], 14) for row in pool]:
         if points is None or games is None:
             continue
         for period, stats in ((WEEK, line(points if games else 0)), (0, {**line(points * games), GAMES_STAT: games})):
@@ -739,6 +742,30 @@ def test_the_store_backed_league_values_like_the_hand_made_one(store: Store) -> 
     made = valuation()
     for espn_id, outlook in made.outlooks.items():
         assert stored.outlooks[espn_id].weekly == pytest.approx(dict(outlook.weekly)), espn_id
+
+
+def test_a_good_add_that_drops_nobody_fires_on_its_own_and_anything_with_a_drop_waits(store: Store) -> None:
+    seed(store, roster=ROSTER[:-1])  # a roster spot is open
+    config = fixture_config(add="auto", auto_add_min_gain=1.0)
+    decision = decide(store, config, schedule=schedule())
+    alone = next(row for row in decision.proposals if parse_payload(row) == AddDropPayload(add_espn_id=FRED))
+    assert alone.policy == "auto" and alone.deadline is not None
+    assert all(row.policy == "approve" for row in decision.proposals if row.row_id != alone.row_id)
+    (fired,) = auto_approve_due(store, now=NOW)  # at once, not at T-15
+    assert fired.row_id == alone.row_id and fired.decided_by == "auto"
+    assert get_proposal(store, alone.row_id).status == "approved"
+
+
+def test_an_add_below_the_threshold_or_without_a_lock_waits_for_approval(store: Store) -> None:
+    seed(store, roster=ROSTER[:-1])
+    high = decide(store, fixture_config(add="auto", auto_add_min_gain=10_000.0), schedule=schedule())
+    assert {row.policy for row in high.proposals} == {"approve"}
+
+
+def test_an_auto_add_without_a_lock_to_time_it_by_waits_for_approval(store: Store) -> None:
+    seed(store, roster=ROSTER[:-1])
+    unscheduled = decide(store, fixture_config(add="auto", auto_add_min_gain=1.0))  # no schedule: no deadline
+    assert {row.policy for row in unscheduled.proposals} == {"approve"}
 
 
 def test_the_decision_proposes_its_plan_through_policy(store: Store) -> None:

@@ -450,8 +450,9 @@ verification, artifacts`. Its status runs `proposed → approved | rejected | ex
 | Kind | Default policy | Allowed settings |
 |---|---|---|
 | Bench an OUT / bye / no-game starter | approve; **auto if unanswered by T-15 min** (you confirmed this) | off · approve · auto |
-| Other lineup optimizations | approve | off · approve · auto |
-| Free-agent add/drop, waiver claim | approve | off · approve |
+| Other lineup optimizations | auto (T-15 if unanswered) | off · approve · auto |
+| Free-agent add into an open spot (`add`) | approve; **auto fires at once** when the engine's news-free gain is at least `auto_add_min_gain` (NFL waivers only; NBA streaming reports no such gain, so it waits) | off · approve · auto |
+| Free-agent add that drops a player (`add_drop`), waiver claim | approve | off · approve |
 | Trade propose / accept / decline | approve | approve only (hard-coded) |
 
 **Guardrails:**
@@ -649,8 +650,9 @@ Answered 2026-10-04:
    NBA default is H2H points.
 2. **Drafts:** both are done, so there's no draft tooling this season. The draft-sheet task became a rest-of-season
    rankings sheet.
-3. **Autonomy:** auto-benching an OUT/inactive starter at T-15 when unanswered is approved. Everything else waits for
-   approval.
+3. **Autonomy:** auto-benching an OUT/inactive starter and other lineup changes at T-15 when unanswered is approved,
+   and so is a free-agent add into an open spot whose engine gain clears `auto_add_min_gain` (it fires at once). Any
+   move that drops a player, waiver claims, and every trade wait for approval.
 4. **Phone approvals:** Telegram by default, which needs a free account. ntfy is the no-account alternative (§11).
 5. **Runtime:** your own Windows PC or Mac. This is effectively forced, because the NBA data sources block cloud IPs.
 

@@ -39,7 +39,7 @@ from typing import Any, Literal
 from fm.config import Approval, Config
 from fm.proposals.pause import pause_state
 from fm.proposals.payloads import Payload
-from fm.proposals.policy import ProposalError, ProposalKind, as_utc, evaluate, kind_spec
+from fm.proposals.policy import ProposalError, ProposalKind, as_utc, evaluate, is_add_only, kind_spec, parse_payload
 from fm.store import OPEN_PROPOSAL_STATUSES, LeagueRow, ProposalRow, ProposalStatus, Store
 
 AUTO_LEAD = timedelta(minutes=15)
@@ -84,6 +84,7 @@ def propose(
     deadline: datetime | None = None,
     dedupe_key: str | None = None,
     max_setting: Approval | None = None,
+    auto_gain: float | None = None,
     now: datetime | None = None,
 ) -> ProposalRow:
     """Store a proposal once it clears policy; raise ``PolicyError`` listing every reason it does not.
@@ -112,6 +113,7 @@ def propose(
             scoring_period_id=scoring_period_id,
             deadline=deadline,
             max_setting=max_setting,
+            auto_gain=auto_gain,
             now=at,
         )
         verdict.raise_if_blocked()
@@ -186,7 +188,9 @@ def expire_due(store: Store, *, now: datetime | None = None, league_id: int | No
 def auto_approve_due(
     store: Store, *, now: datetime | None = None, lead: timedelta = AUTO_LEAD, league_id: int | None = None
 ) -> list[ProposalRow]:
-    """Approve, as ``auto``, every unanswered ``auto`` proposal within ``lead`` of a deadline that has not passed.
+    """Approve, as ``auto``, every unanswered ``auto`` proposal within ``lead`` of a deadline that has not passed; an
+    ``auto`` free-agent add that drops nobody is approved at once (another manager can take the player while it waits),
+    and its producer already checked it against ``auto_add_min_gain``.
 
     Run :func:`expire_due` first so a proposal past its deadline expires rather than fires. Returns the rows approved;
     nothing happens while paused.
@@ -199,7 +203,8 @@ def auto_approve_due(
         for row in store.proposals.find(league_id=league_id, statuses=("proposed",)):
             if row.policy != "auto" or row.deadline is None:
                 continue
-            if row.deadline - lead <= at < row.deadline:
+            at_once = is_add_only(row.kind, parse_payload(row))
+            if (at_once or row.deadline - lead <= at) and at < row.deadline:
                 approved.append(approve(store, row.row_id, decided_by=DECIDED_BY_AUTO, now=at))
     return approved
 

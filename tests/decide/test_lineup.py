@@ -1020,7 +1020,7 @@ def test_propose_lineup_stores_each_draft_under_its_policy_once(store: Store) ->
     assert result.blocked == ()
     rescue, best = result.proposals
     assert (rescue.kind, rescue.policy, rescue.status) == ("bench_inactive", "auto", "proposed")
-    assert (best.kind, best.policy, best.status) == ("lineup", "approve", "proposed")
+    assert (best.kind, best.policy, best.status) == ("lineup", "auto", "proposed")  # lineup defaults to auto
     assert {rescue.created_by, best.created_by} == {CREATED_BY}
     assert (rescue.scoring_period_id, rescue.deadline) == (WEEK, SUNDAY_1PM)
     assert parse_payload(rescue) == result.decision.drafts[0].payload

@@ -48,6 +48,7 @@ from fm.store import LeagueRow, LeagueSettingsRow, PlayerRow, ProposalRow, Store
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+LATER = NOW + timedelta(hours=1)
 DEADLINE = NOW + timedelta(hours=2)
 TRADE_DEADLINE = datetime(2026, 11, 25, 17, 0, tzinfo=UTC)  # tradeSettings.deadlineDate in ffl_settings_ppr.json
 LINEUP = LineupPayload(moves=(LineupMove(espn_id=10, from_slot_id=20, to_slot_id=0),))
@@ -162,7 +163,7 @@ class TestKinds:
     def test_defaults_match_the_config_defaults(self) -> None:
         defaults = Policy()
         assert default_setting(ProposalKind.BENCH_INACTIVE) == defaults.bench_inactive == "auto"
-        assert default_setting(ProposalKind.LINEUP) == defaults.lineup == "approve"
+        assert default_setting(ProposalKind.LINEUP) == defaults.lineup == "auto"
         assert default_setting(ProposalKind.ADD_DROP) == defaults.add_drop == "approve"
         assert default_setting(ProposalKind.WAIVER) == defaults.waiver == "approve"
         assert default_setting("trade_propose") == "approve"
@@ -245,14 +246,14 @@ class TestAllowlistAndSettings:
 
     def test_a_league_missing_from_config_is_blocked(self, store: Store, config: Config) -> None:
         stray = seed_league(store, config.league("nfl"), key="dynasty", espn_league_id=999)
-        verdict = evaluate(store, config, stray, ProposalKind.LINEUP, LINEUP, now=NOW)
+        verdict = evaluate(store, config, stray, ProposalKind.LINEUP, LINEUP, deadline=LATER, now=NOW)
         assert verdict.reasons == ("league 'dynasty' is not in config.toml (league allowlist)",)
         with pytest.raises(PolicyError, match="lineup blocked: league 'dynasty' is not in config.toml"):
             verdict.raise_if_blocked()
 
     def test_a_league_row_pointing_elsewhere_is_blocked(self, store: Store, config: Config) -> None:
         moved = seed_league(store, config.league("nfl"), espn_league_id=999)
-        (reason,) = evaluate(store, config, moved, ProposalKind.LINEUP, LINEUP, now=NOW).reasons
+        (reason,) = evaluate(store, config, moved, ProposalKind.LINEUP, LINEUP, deadline=LATER, now=NOW).reasons
         assert reason.startswith("league 'nfl' in the store is ESPN nfl league 999 season 2026, but config.toml says")
 
     def test_off_kinds_are_blocked_but_still_report_their_setting(self, store: Store) -> None:
@@ -271,9 +272,13 @@ class TestAllowlistAndSettings:
             }
         )
         league = seed_league(store, config.league("nfl"))
-        verdict = evaluate(store, config, league, ProposalKind.ADD_DROP, AddDropPayload(add_espn_id=1), now=NOW)
+        pair = AddDropPayload(add_espn_id=1, drop_espn_id=2)
+        verdict = evaluate(store, config, league, ProposalKind.ADD_DROP, pair, now=NOW)
         assert verdict.setting == "off"
         assert verdict.reasons == ("add_drop is off for league 'nfl' ([league.policy] in config.toml)",)
+        # an add that drops nobody is governed by ``add`` (approve by default), not ``add_drop``
+        alone = evaluate(store, config, league, ProposalKind.ADD_DROP, AddDropPayload(add_espn_id=1), now=NOW)
+        assert alone.setting == "approve" and alone.allowed
 
     def test_auto_needs_a_deadline(self, store: Store, config: Config) -> None:
         league = seed_league(store, config.league("nfl"))  # bench_inactive = auto in the sample
@@ -562,7 +567,7 @@ class TestWeeklyCap:
         league = seed_league(store, nfl)
         with pytest.raises(PolicyError, match="0 of 0 transactions already used this week"):
             add_drop(store, config, league, 1, period=4)
-        assert evaluate(store, config, league, ProposalKind.LINEUP, LINEUP, now=NOW).allowed
+        assert evaluate(store, config, league, ProposalKind.LINEUP, LINEUP, deadline=LATER, now=NOW).allowed
 
 
 class TestFaabCap:

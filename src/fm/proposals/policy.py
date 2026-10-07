@@ -5,10 +5,13 @@ Kinds and settings
 Every move the executor can make is a :class:`ProposalKind`. :data:`KINDS` says, per kind, which ``[league.policy]``
 field in ``config.toml`` governs it, which settings that field may take, which payload model it carries, whether it
 spends one of the week's transactions and whether it can send players away. The lineup kinds allow ``auto`` (which
-fires only at T-15 when the proposal is unanswered, see :mod:`fm.proposals.queue`); adds, drops and claims are
-``approve`` or ``off``; **trade kinds have no policy field and are approve-only**. ``fm.config.Policy`` already refuses
-``trade*`` keys, and :func:`effective_setting` returns ``approve`` for a trade kind whatever the config says, so the
-rule holds even if the config layer were bypassed (CLAUDE.md).
+fires only at T-15 when the proposal is unanswered, see :mod:`fm.proposals.queue`). An ``add_drop`` with no drop is
+governed by the ``add`` field instead (:func:`policy_field_for`), whose ``auto`` holds only for an add whose producer
+reports an engine gain of at least ``auto_add_min_gain`` (else it runs under ``approve``) and fires at once; a move that
+drops a player and waiver claims are ``approve`` or ``off``; **trade kinds have no policy field and are
+approve-only**. ``fm.config.Policy`` already refuses ``trade*`` keys, and :func:`effective_setting` returns
+``approve`` for a trade kind whatever the config says, so the rule holds even if the config layer were bypassed
+(CLAUDE.md).
 
 Guardrails
 ----------
@@ -43,7 +46,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from fractions import Fraction
-from typing import cast
+from typing import Final, cast
 
 from fm.config import Approval, Config, League, Policy, Sport
 from fm.espn.calendar import matchup_scoring_periods
@@ -120,6 +123,9 @@ class KindSpec:
 
 
 _LINEUP: tuple[Approval, ...] = ("off", "approve", "auto")
+_ADD: tuple[Approval, ...] = ("off", "approve", "auto")
+ADD_FIELD: Final = "add"
+"""The ``fm.config.Policy`` field for a free-agent add that drops nobody (:func:`policy_field_for`)."""
 _TRANSACTION: tuple[Approval, ...] = ("off", "approve")
 _TRADE: tuple[Approval, ...] = ("approve",)
 
@@ -191,25 +197,42 @@ def default_setting(kind: ProposalKind | str) -> Approval:
     return kind_spec(kind).default
 
 
-def validate_setting(kind: ProposalKind | str, setting: str) -> Approval:
-    """Check that ``setting`` is allowed for ``kind``; trade kinds accept only ``approve``."""
+def is_add_only(kind: ProposalKind | str, payload: Payload | None) -> bool:
+    """A free-agent add that drops nobody: governed by the ``add`` field, the one acquisition that may be ``auto``."""
+    return (
+        kind_spec(kind).kind is ProposalKind.ADD_DROP
+        and isinstance(payload, AddDropPayload)
+        and payload.drop_espn_id is None
+    )
+
+
+def policy_field_for(kind: ProposalKind | str, payload: Payload | None = None) -> str | None:
+    """The ``fm.config.Policy`` field governing ``kind`` (with ``payload``, an add that drops nobody is ``add``)."""
+    return ADD_FIELD if is_add_only(kind, payload) else kind_spec(kind).policy_field
+
+
+def validate_setting(kind: ProposalKind | str, setting: str, payload: Payload | None = None) -> Approval:
+    """Check that ``setting`` is allowed for ``kind`` (and ``payload``); trade kinds accept only ``approve``."""
     spec = kind_spec(kind)
-    if setting not in spec.allowed:
+    allowed = _ADD if is_add_only(spec.kind, payload) else spec.allowed
+    if setting not in allowed:
         detail = (
             "trades are approval-only and not configurable (CLAUDE.md)"
             if spec.is_trade
-            else f"allowed: {', '.join(spec.allowed)}"
+            else f"allowed: {', '.join(allowed)}"
         )
         raise PolicyError(f"{spec.kind.value}: policy {setting!r} is not allowed; {detail}")
     return cast(Approval, setting)
 
 
-def effective_setting(kind: ProposalKind | str, policy: Policy) -> Approval:
-    """The setting a league's policy gives a kind: its policy field's value, or ``approve`` for every trade kind."""
+def effective_setting(kind: ProposalKind | str, policy: Policy, payload: Payload | None = None) -> Approval:
+    """The setting a league's policy gives a kind (and ``payload``: an add that drops nobody reads ``add``): its policy
+    field's value, or ``approve`` for every trade kind."""
     spec = kind_spec(kind)
-    if spec.policy_field is None:
+    field_name = policy_field_for(spec.kind, payload)
+    if field_name is None:
         return "approve"
-    return validate_setting(spec.kind, getattr(policy, spec.policy_field))
+    return validate_setting(spec.kind, getattr(policy, field_name), payload)
 
 
 _SETTING_RANK: Mapping[str, int] = {"off": 0, "approve": 1, "auto": 2}
@@ -264,9 +287,14 @@ def evaluate(
     scoring_period_id: int | None = None,
     deadline: datetime | None = None,
     max_setting: Approval | None = None,
+    auto_gain: float | None = None,
     now: datetime | None = None,
 ) -> Verdict:
     """Run every policy check and guardrail for a would-be proposal without storing anything.
+
+    ``auto_gain`` is the producer's engine gain for an add that drops nobody, computed without Claude-only news
+    signals: ``add = "auto"`` holds only when it is at least the policy's ``auto_add_min_gain``, and otherwise the add
+    runs under ``approve`` (a lower setting, not a block). Producers that cannot vouch for such a number pass ``None``.
 
     ``league`` is the store's row for the league the move is in; ``deadline`` is when the move stops making sense
     (lock, waiver run, first tip). ``max_setting`` is a ceiling a producer puts on the setting (``approve`` for a
@@ -282,7 +310,11 @@ def evaluate(
 
     configured = _allowlisted(config, league, reasons)
     policy = configured.policy if configured is not None else Policy()
-    setting = cap_setting(effective_setting(spec.kind, policy), max_setting)
+    setting = cap_setting(effective_setting(spec.kind, policy, payload), max_setting)
+    if setting == "auto" and is_add_only(spec.kind, payload):
+        threshold = policy.auto_add_min_gain
+        if auto_gain is None or threshold is None or auto_gain < threshold or deadline is None:
+            setting = "approve"  # not a good enough add (or no lock to time it by): it waits for a person
     if setting == "off":
         reasons.append(f"{spec.kind.value} is off for league {league.key!r} ([league.policy] in config.toml)")
     if setting == "auto" and deadline is None:

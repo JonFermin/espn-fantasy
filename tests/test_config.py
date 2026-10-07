@@ -103,7 +103,9 @@ class TestValid:
         (league,) = config.leagues
         assert league.policy == Policy()
         assert Policy().bench_inactive == "auto"  # the one auto default (DESIGN section 18)
-        assert (Policy().lineup, Policy().add_drop, Policy().waiver) == ("approve", "approve", "approve")
+        assert Policy().lineup == "auto"  # lineup optimizations fire at T-15 when unanswered
+        assert (Policy().add, Policy().add_drop, Policy().waiver) == ("approve", "approve", "approve")
+        assert Policy().auto_add_min_gain is None
         assert (Policy().max_transactions_per_week, Policy().max_faab_pct_per_bid) == (3, 0.35)
         assert Policy().untouchables == ()
         assert config.llm == Llm() and config.llm.model == "claude-opus-5-5"
@@ -151,6 +153,14 @@ BAD_CASES: dict[str, tuple[str, list[str]]] = {
     "add_drop cannot be auto": (
         MINIMAL + '[league.policy]\nadd_drop = "auto"\n',
         ["league[0].policy.add_drop: Input should be 'off' or 'approve' (got 'auto')"],
+    ),
+    "an auto add needs a threshold": (
+        MINIMAL + '[league.policy]\nadd = "auto"\n',
+        ['add = "auto" needs auto_add_min_gain'],
+    ),
+    "the auto add threshold is positive": (
+        MINIMAL + '[league.policy]\nadd = "auto"\nauto_add_min_gain = 0\n',
+        ["league[0].policy.auto_add_min_gain: Input should be greater than 0"],
     ),
     "waiver cannot be auto": (
         MINIMAL + '[league.policy]\nwaiver = "auto"\n',
@@ -203,6 +213,12 @@ BAD_CASES: dict[str, tuple[str, list[str]]] = {
     ),
     "toml syntax": ("[[league]\n", ["invalid TOML"]),
 }
+
+
+def test_an_auto_add_with_a_threshold_is_valid(tmp_path: Path) -> None:
+    text = MINIMAL + '[league.policy]\nadd = "auto"\nauto_add_min_gain = 20\nadd_drop = "approve"\n'
+    (league,) = load_config(write(tmp_path, text), environ={}).leagues
+    assert (league.policy.add, league.policy.auto_add_min_gain, league.policy.add_drop) == ("auto", 20.0, "approve")
 
 
 class TestInvalid:
@@ -358,7 +374,7 @@ class TestCheckCommand:
         assert f"env:    {FIXTURES / '.env'} (not found)" in result.output
         assert "nfl: nfl (ffl) league 1234567, season 2026, team 4" in result.output
         assert "nba: nba (fba) league 7654321, season 2027, team 9" in result.output
-        assert "bench_inactive=auto lineup=approve add_drop=approve waiver=approve" in result.output
+        assert "bench_inactive=auto lineup=approve add=approve add_drop=approve waiver=approve" in result.output
         assert "max 3 transactions/week, bids <= 35% of FAAB, 2 untouchable(s)" in result.output
         assert "max 7 transactions/week, bids <= 35% of FAAB, 0 untouchable(s)" in result.output
         assert "llm:    claude-opus-5-5, $2.00/day budget" in result.output

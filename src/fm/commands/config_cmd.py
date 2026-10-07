@@ -45,8 +45,9 @@ def _summary(config: Config, config_path: Path, env_path: Path) -> list[str]:
         lines += [
             f"  {league.key}: {league.sport} ({league.game}) league {league.espn_league_id}, season {league.season}, "
             f"team {league.team_id}",
-            f"    bench_inactive={policy.bench_inactive} lineup={policy.lineup} add_drop={policy.add_drop} "
-            f"waiver={policy.waiver}",
+            f"    bench_inactive={policy.bench_inactive} lineup={policy.lineup} add={policy.add}"
+            + (f" (min gain {policy.auto_add_min_gain:g})" if policy.add == "auto" else "")
+            + f" add_drop={policy.add_drop} waiver={policy.waiver}",
             f"    max {policy.max_transactions_per_week} transactions/week, bids <= {policy.max_faab_pct_per_bid:.0%} "
             f"of FAAB, {len(policy.untouchables)} untouchable(s)",
         ]
