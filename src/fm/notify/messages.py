@@ -1,21 +1,22 @@
 """What the phone shows (DESIGN sections 4 and 11): proposal pushes, decision confirmations, alerts and reports.
 
-:func:`proposal_message` describes a proposal so it can be decided from a lock screen: the move in player names and
-slot labels (an ESPN id only for a player the store has not seen), the engine's numbers, the rationale, the deadline
-in local time and the policy, since an ``auto`` proposal fires at T-15 when nobody answers. :func:`alert` is for
-something that needs attention now and can carry a deep link to the manual fix (DESIGN principle 6); :func:`report`
-is the quiet, longer push the weekly report sends.
+:func:`proposal_message` describes a proposal so it can be decided from a lock screen, and nothing more: the move as
+one line per action in player names and slot labels (an ESPN id only for a player the store has not seen), the
+rationale (which already states the numbers that matter), and the deadline in local time with what happens if nobody
+answers. The full ``engine_numbers`` stay in the store for ``fm`` and the audit. :func:`alert` is for something that
+needs attention now and can carry a deep link to the manual fix (DESIGN principle 6); :func:`report` is the quiet,
+longer push the weekly report sends.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timedelta, tzinfo
-from typing import Any
 
 from fm.espn.ids import ids_for
 from fm.notify.base import DecisionResult, Message
 from fm.proposals import (
+    AUTO_LEAD,
     AddDropPayload,
     LineupPayload,
     Payload,
@@ -28,8 +29,7 @@ from fm.proposals import (
 from fm.proposals.policy import as_utc
 from fm.store import LeagueRow, ProposalRow, Sport, Store
 
-MAX_ENGINE_NUMBERS = 6
-"""How many ``engine_numbers`` entries a proposal push shows."""
+SPORT_ICONS: Mapping[str, str] = {"nfl": "🏈", "nba": "🏀"}
 
 
 def proposal_message(
@@ -38,14 +38,13 @@ def proposal_message(
     """The push for a proposal waiting on a decision. ``tz`` is the zone the deadline is shown in (the machine's own
     zone by default)."""
     at = as_utc(now)
-    lines = [describe_payload(store, league, parse_payload(row))]
-    numbers = _engine_numbers(row.engine_numbers)
-    if numbers:
-        lines.append(numbers)
+    lines = _move_lines(store, league, parse_payload(row))
     if row.rationale and row.rationale.strip():
         lines.append(row.rationale.strip())
     lines.append(_timing(row, at, tz))
-    title = f"{league.key}: {kind_spec(row.kind).label} #{row.row_id}"
+    icon = SPORT_ICONS.get(league.sport, "")
+    label = kind_spec(row.kind).label
+    title = f"{icon} {league.key.upper()}: {label[:1].upper()}{label[1:]} (#{row.row_id})".strip()
     return Message(title=title, body="\n".join(lines), priority="high")
 
 
@@ -127,6 +126,49 @@ def relative(delta: timedelta) -> str:
     return f"in {minutes}m"
 
 
+def _move_lines(store: Store, league: LeagueRow, payload: Payload) -> list[str]:
+    """One line per action, verb first: ``Bench: A, B`` / ``Start: C (WR)`` for a lineup, ``+ Add`` / ``- Drop`` for a
+    transaction, ``Give`` / ``Get`` for a trade."""
+    names = player_names(store, league.sport, payload)
+
+    def who(espn_id: int) -> str:
+        return names.get(espn_id, f"player {espn_id}")
+
+    if isinstance(payload, LineupPayload):
+        slots = ids_for(league.sport)
+        benched: list[str] = []
+        started: list[str] = []
+        moved: list[str] = []
+        for move in payload.moves:
+            to_label = slots.slot_label(move.to_slot_id)
+            if move.to_slot_id == slots.bench_slot:
+                benched.append(who(move.espn_id))
+            elif not slots.is_active_slot(move.from_slot_id) and slots.is_active_slot(move.to_slot_id):
+                started.append(f"{who(move.espn_id)} ({to_label})")
+            else:
+                moved.append(f"{who(move.espn_id)} ({slots.slot_label(move.from_slot_id)} → {to_label})")
+        groups = (("Bench", benched), ("Start", started), ("Move", moved))
+        return [f"{verb}: {', '.join(group)}" for verb, group in groups if group]
+    if isinstance(payload, AddDropPayload | WaiverPayload):
+        verb = "Claim" if isinstance(payload, WaiverPayload) else "Add"
+        lines = []
+        if payload.add_espn_id is not None:
+            add = f"➕ {verb} {who(payload.add_espn_id)}"
+            if isinstance(payload, WaiverPayload) and payload.bid_amount is not None:
+                add += f" (bid ${payload.bid_amount})"
+            lines.append(add)
+        if payload.drop_espn_id is not None:
+            lines.append(f"➖ Drop {who(payload.drop_espn_id)}")
+        return lines
+    if isinstance(payload, TradePayload):  # TradeResponsePayload too
+        team = store.teams.get(league.row_id, payload.other_team_id)
+        other = team.name if team is not None else f"team {payload.other_team_id}"
+        give = ", ".join(who(espn_id) for espn_id in payload.give_espn_ids) or "nothing"
+        get = ", ".join(who(espn_id) for espn_id in payload.get_espn_ids) or "nothing"
+        return [f"With {other}", f"Give: {give}", f"Get: {get}"]
+    return [payload.summary()]
+
+
 def _player_ids(payload: Payload) -> list[int]:
     if isinstance(payload, LineupPayload):
         return [move.espn_id for move in payload.moves]
@@ -137,36 +179,27 @@ def _player_ids(payload: Payload) -> list[int]:
     return []
 
 
-def _engine_numbers(numbers: Mapping[str, Any]) -> str:
-    shown = [f"{key} {_number(value)}" for key, value in list(numbers.items())[:MAX_ENGINE_NUMBERS]]
-    if len(numbers) > MAX_ENGINE_NUMBERS:
-        shown.append(f"+{len(numbers) - MAX_ENGINE_NUMBERS} more")
-    return ", ".join(shown)
-
-
-def _number(value: Any) -> str:
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    if isinstance(value, float):
-        return f"{value:.2f}" if abs(value) < 1 else f"{value:.1f}"
-    return str(value)
-
-
 def _timing(row: ProposalRow, at: datetime, tz: tzinfo | None) -> str:
-    policy = f"policy {row.policy}"
-    if row.policy == "auto":
-        policy += " (fires at T-15 if unanswered)"
+    """When it is due and what silence means: ``auto`` goes ahead at T-15, anything else lapses at the deadline."""
     if row.deadline is None:
-        return f"No deadline; {policy}"
+        return "⏰ No deadline"
     local = row.deadline.astimezone(tz)
-    return f"Due {local:%a %d %b %H:%M} {_zone(local)} ({relative(row.deadline - at)}); {policy}"
+    when = f"⏰ Decide by {local:%a %d %b %H:%M} {_zone(local)} ({relative(row.deadline - at)})"
+    if row.policy == "auto":
+        lead = int(AUTO_LEAD.total_seconds()) // 60
+        return f"{when}\nNo answer: it goes ahead automatically {lead} min before"
+    return f"{when}\nNo answer: nothing happens"
 
 
 def _zone(value: datetime) -> str:
-    """A short zone name (``EDT``, ``UTC``), or the UTC offset when the platform only knows a long one."""
+    """A short zone name (``EDT``, ``UTC``): Windows' long names (``Mountain Daylight Time``) as their initials, else
+    the UTC offset."""
     name = value.tzname() or ""
     if 0 < len(name) <= 5:
         return name
+    words = name.split()
+    if len(words) > 1 and all(word[:1].isalpha() for word in words):
+        return "".join(word[0].upper() for word in words)
     offset = value.utcoffset() or timedelta()
     sign = "-" if offset < timedelta() else "+"
     minutes = abs(int(offset.total_seconds())) // 60

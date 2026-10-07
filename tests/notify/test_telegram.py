@@ -383,7 +383,7 @@ def test_a_press_from_our_chat_records_the_approval(
     row = lineup(store, config, league)
     notify_proposal(channel, store, row.row_id, now=NOW, tz=UTC)
     (message,) = api.messages
-    assert message["text"].startswith(f"nfl: lineup change #{row.row_id}\nSample Quarterback: BE -> QB\n")
+    assert message["text"].startswith(f"🏈 NFL: Lineup change (#{row.row_id})\nStart: Sample Quarterback (QB)\n")
     query = api.press(message, "Approve")
     results: list[DecisionResult] = []
     assert listen(store, channel, once=True, clock=lambda: at(1), on_result=results.append) == 1

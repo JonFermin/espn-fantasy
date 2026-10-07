@@ -1,5 +1,5 @@
-"""What the phone shows (``fm.notify.messages``): proposals in player names and slot labels, with the engine's numbers,
-the rationale and the deadline; confirmations, alerts and reports.
+"""What the phone shows (``fm.notify.messages``): proposals as one line per action in player names and slot labels, the
+rationale and the deadline (never the raw engine numbers); confirmations, alerts and reports.
 
 Leagues come from ``fixtures/config.sample.toml``; players and teams are seeded with placeholder names.
 """
@@ -85,7 +85,7 @@ def nfl(store: Store, config: Config) -> LeagueRow:
 
 
 class TestProposalMessage:
-    def test_a_lineup_proposal_reads_in_names_slots_numbers_rationale_and_deadline(
+    def test_a_lineup_proposal_reads_as_moves_rationale_and_deadline_without_engine_numbers(
         self, store: Store, config: Config, nfl: LeagueRow
     ) -> None:
         row = propose(
@@ -101,16 +101,18 @@ class TestProposalMessage:
             now=NOW,
         )
         message = proposal_message(store, nfl, row, now=NOW, tz=UTC)
-        assert message.title == f"nfl: lineup change #{row.row_id}"
+        assert message.title == f"🏈 NFL: Lineup change (#{row.row_id})"
         assert message.priority == "high"
         assert message.body.splitlines() == [
-            "Sample Quarterback: BE -> QB; Backup Passer: QB -> BE",
-            "delta_points 3.2, flagged yes, games 2, p_win 0.61",  # the store keeps keys sorted
+            "Bench: Backup Passer",
+            "Start: Sample Quarterback (QB)",
             "Backup Passer has the better matchup.",
-            "Due Sun 04 Oct 14:00 UTC (in 2h 00m); policy approve",
+            "⏰ Decide by Sun 04 Oct 14:00 UTC (in 2h 00m)",
+            "No answer: nothing happens",
         ]
+        assert "delta_points" not in message.body
 
-    def test_an_auto_proposal_says_it_fires_at_t_minus_15_and_the_deadline_is_local(
+    def test_an_auto_proposal_says_it_goes_ahead_and_the_deadline_is_local(
         self, store: Store, config: Config, nfl: LeagueRow
     ) -> None:
         bench = LineupPayload(moves=(LineupMove(espn_id=10, from_slot_id=0, to_slot_id=20),))
@@ -119,28 +121,43 @@ class TestProposalMessage:
         )
         mountain = timezone(timedelta(hours=-6))
         message = proposal_message(store, nfl, row, now=NOW, tz=mountain)
-        assert message.title == f"nfl: bench an OUT/bye/no-game starter #{row.row_id}"
+        assert message.title == f"🏈 NFL: Bench an OUT/bye/no-game starter (#{row.row_id})"
         assert message.body.splitlines() == [
-            "Sample Quarterback: QB -> BE",
-            "Due Sun 04 Oct 08:00 UTC-06:00 (in 2h 00m); policy auto (fires at T-15 if unanswered)",
+            "Bench: Sample Quarterback",
+            "⏰ Decide by Sun 04 Oct 08:00 UTC-06:00 (in 2h 00m)",
+            "No answer: it goes ahead automatically 15 min before",
         ]
 
-    def test_without_a_deadline_or_numbers(self, store: Store, config: Config, nfl: LeagueRow) -> None:
-        row = propose(
-            store, config, nfl, ProposalKind.ADD_DROP, AddDropPayload(add_espn_id=12), created_by="t", now=NOW
+    def test_a_long_windows_zone_name_shows_as_its_initials(self, store: Store, config: Config, nfl: LeagueRow) -> None:
+        row = propose(store, config, nfl, ProposalKind.LINEUP, SWAP, created_by="t", deadline=DEADLINE, now=NOW)
+        mountain = timezone(timedelta(hours=-6), "Mountain Daylight Time")
+        lines = proposal_message(store, nfl, row, now=NOW, tz=mountain).body.splitlines()
+        assert "Sun 04 Oct 08:00 MDT" in lines[-2]
+
+    def test_a_slot_to_slot_move_shows_both_slots(self, store: Store, config: Config, nfl: LeagueRow) -> None:
+        swap = LineupPayload(moves=(LineupMove(espn_id=10, from_slot_id=0, to_slot_id=23),))
+        row = propose(store, config, nfl, ProposalKind.LINEUP, swap, created_by="t", now=NOW)
+        assert proposal_message(store, nfl, row, now=NOW).body.splitlines()[0] == (
+            "Move: Sample Quarterback (QB → RB/WR/TE)"
         )
+
+    def test_an_add_drop_without_a_deadline(self, store: Store, config: Config, nfl: LeagueRow) -> None:
+        payload = AddDropPayload(add_espn_id=12, drop_espn_id=13)
+        row = propose(store, config, nfl, ProposalKind.ADD_DROP, payload, created_by="t", now=NOW)
         assert proposal_message(store, nfl, row, now=NOW).body.splitlines() == [
-            "add Waiver Runner",
-            "No deadline; policy approve",
+            "➕ Add Waiver Runner",
+            "➖ Drop Bench Tight End",
+            "⏰ No deadline",
         ]
 
-    def test_engine_numbers_beyond_six_are_counted_not_shown(
-        self, store: Store, config: Config, nfl: LeagueRow
-    ) -> None:
-        numbers = {f"n{index}": index for index in range(8)}
-        row = propose(store, config, nfl, ProposalKind.LINEUP, SWAP, created_by="t", engine_numbers=numbers, now=NOW)
-        lines = proposal_message(store, nfl, row, now=NOW).body.splitlines()
-        assert lines[1] == "n0 0, n1 1, n2 2, n3 3, n4 4, n5 5, +2 more"
+    def test_a_trade_reads_as_give_and_get(self, store: Store, config: Config, nfl: LeagueRow) -> None:
+        payload = TradePayload(other_team_id=3, give_espn_ids=(13,), get_espn_ids=(12,))
+        row = propose(store, config, nfl, ProposalKind.TRADE_PROPOSE, payload, created_by="t", now=NOW)
+        assert proposal_message(store, nfl, row, now=NOW).body.splitlines()[:3] == [
+            "With Sample Rivals",
+            "Give: Bench Tight End",
+            "Get: Waiver Runner",
+        ]
 
 
 class TestDescribePayload:

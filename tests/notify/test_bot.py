@@ -365,7 +365,7 @@ class TestNotifyProposal:
         row = lineup(store, config, league)
         notice = notify_proposal(channel, store, row.row_id, now=NOW, tz=UTC)
         assert channel.notices == [notice]
-        assert notice.proposal_id == row.row_id and notice.message.title == f"nfl: lineup change #{row.row_id}"
+        assert notice.proposal_id == row.row_id and notice.message.title == f"🏈 NFL: Lineup change (#{row.row_id})"
         assert notice.message.priority == "high"
         assert nonces.live(row.row_id, now=DEADLINE + LATE_GRACE - timedelta(seconds=1)) == 1
         assert nonces.live(row.row_id, now=DEADLINE + LATE_GRACE) == 0

@@ -381,7 +381,7 @@ def test_a_tapped_approve_records_the_approval_and_a_confirmation_push_follows(
     row = lineup(store, config, league)
     notify_proposal(channel, store, row.row_id, now=NOW, tz=UTC)
     (pushed,) = server.phone()
-    assert pushed["message"].startswith("Sample Quarterback: BE -> QB\nDue Sun 04 Oct 14:00 UTC")
+    assert pushed["message"].startswith("Start: Sample Quarterback (QB)\n⏰ Decide by Sun 04 Oct 14:00 UTC")
     server.tap(pushed, "Approve")
     assert listen(store, channel, once=True, clock=lambda: at(1)) == 1
     approved = get_proposal(store, row.row_id)
