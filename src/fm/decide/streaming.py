@@ -705,9 +705,7 @@ def plan_streaming(
     usable = [i for i in wanted if i in pool_rows and i in per_game_value and pool_rows[i].pro_team_id is not None]
     if len(usable) < len(wanted):
         warnings.append(f"{len(wanted) - len(usable)} free agents have no players row or projection line; left out")
-    usable.sort(
-        key=lambda i: (-per_game_value[i] * team_games(schedule, pool_rows[i].pro_team_id, inputs.days), i)
-    )
+    usable.sort(key=lambda i: (-per_game_value[i] * team_games(schedule, pool_rows[i].pro_team_id, inputs.days), i))
     pool: dict[int, DayPlayer] = {}
     for espn_id in usable[: max(0, screen)]:
         player = inputs.model.day_player(pool_rows[espn_id], NBA.ids.bench_slot)

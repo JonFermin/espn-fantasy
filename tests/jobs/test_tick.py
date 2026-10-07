@@ -461,8 +461,11 @@ def test_reconcile_and_expire_come_before_execution(world: World) -> None:
     assert outcome.proposal_id == live and outcome.ok and world.status(live) == "verified"
     assert world.slot(HUBBARD) == BENCH and world.slot(ALLGEIER) == FLEX
     assert len(world.transport.sent) == 1
-    assert world.channel.alerts() == [f"Execution of #{stale} was cut short", f"Missed: #{missed} expired unexecuted"]
-    assert any(message.title == f"#{live} executed: lineup" for message in world.channel.sent)
+    assert world.channel.alerts() == [
+        f"Check ESPN: NFL lineup change #{stale} may be half done",
+        f"Missed: NFL lineup change #{missed} didn't run",
+    ]
+    assert any(message.title == f"✅ Done: NFL lineup change #{live}" for message in world.channel.sent)
     assert report.ok
 
 
@@ -519,7 +522,7 @@ def test_executions_run_soonest_deadline_first_and_failures_are_alerted(world: W
     failed = report.executions[1]
     assert not failed.ok and "preconditions failed" in failed.detail  # Allgeier is at FLEX now, not on the bench
     assert world.status(later) == "failed" and not report.ok
-    assert world.channel.alerts() == [f"#{later} failed: lineup"]
+    assert world.channel.alerts() == [f"❌ Failed: NFL lineup change #{later}"]
     assert len(world.transport.sent) == 1
 
 
@@ -619,7 +622,7 @@ def test_the_first_tick_after_a_gap_reports_the_windows_it_missed(world: World) 
     (league,) = report.leagues
     assert [w.kind for w in league.missed] == [WindowKind.PERIOD_OPEN, WindowKind.PRE_LOCK]
     assert league.missed[1].closes_at == datetime(2026, 10, 2, 0, 15, tzinfo=UTC)  # Thursday night's kickoff
-    assert world.channel.alerts() == ["Missed window: nfl period_open", "Missed window: nfl pre_lock"]
+    assert world.channel.alerts() == ["Missed: NFL period open check", "Missed: NFL pre lock check"]
     assert all(message.link and "fantasy.espn.com" in message.link for message in world.channel.sent)
     again = world.tick(now=EARLY + timedelta(minutes=10))
     assert again.leagues[0].missed == () and len(world.channel.sent) == 2

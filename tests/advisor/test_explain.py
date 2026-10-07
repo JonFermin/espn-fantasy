@@ -144,7 +144,7 @@ def test_the_template_without_an_engine_rationale_describes_the_payload() -> Non
     assert template_rationale(row) == "Cancel waiver claim: cancel transaction tx-9."
     named = proposal("bench_inactive", {"moves": [MOVE_A, MOVE_B]})
     assert template_rationale(named, names={4426348: "Player A"}).startswith(
-        "Bench an OUT/bye/no-game starter: Player A (4426348): slot 20 -> 2; "
+        "Bench inactive starters: Player A (4426348): slot 20 -> 2; "
     )
     unknown = proposal("something_new", {"x": 1})
     assert template_rationale(unknown) == 'Something_new: {"x":1}.'

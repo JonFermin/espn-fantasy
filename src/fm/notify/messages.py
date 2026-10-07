@@ -20,6 +20,8 @@ from fm.proposals import (
     AddDropPayload,
     LineupPayload,
     Payload,
+    PolicyError,
+    ProposalError,
     TradePayload,
     TradeResponsePayload,
     WaiverPayload,
@@ -46,6 +48,33 @@ def proposal_message(
     label = kind_spec(row.kind).label
     title = f"{icon} {league.key.upper()}: {label[:1].upper()}{label[1:]} (#{row.row_id})".strip()
     return Message(title=title, body="\n".join(lines), priority="high")
+
+
+def proposal_name(league_key: str, kind: str, proposal_id: int) -> str:
+    """``NFL free-agent add/drop #3``: how an alert or execution push names a proposal."""
+    try:
+        label = kind_spec(kind).label
+    except PolicyError:
+        label = kind
+    return f"{league_key.upper()} {label} #{proposal_id}"
+
+
+def moves_text(store: Store, league: LeagueRow | None, row: ProposalRow) -> str:
+    """The move on one line in names and slot labels (``Bench: A; Start: B (WR)``), for alerts and execution pushes;
+    the payload's id summary when the league is unknown, the kind when the payload does not parse."""
+    try:
+        payload = parse_payload(row)
+    except (ProposalError, ValueError):
+        return row.kind
+    if league is None:
+        return payload.summary()
+    return "; ".join(_move_lines(store, league, payload))
+
+
+def local_time(value: datetime, tz: tzinfo | None = None) -> str:
+    """``Sun 11 Oct 07:30 MDT``, in ``tz`` (the machine's own zone by default)."""
+    local = value.astimezone(tz)
+    return f"{local:%a %d %b %H:%M} {_zone(local)}"
 
 
 def describe_payload(store: Store, league: LeagueRow, payload: Payload) -> str:
@@ -183,8 +212,7 @@ def _timing(row: ProposalRow, at: datetime, tz: tzinfo | None) -> str:
     """When it is due and what silence means: ``auto`` goes ahead at T-15, anything else lapses at the deadline."""
     if row.deadline is None:
         return "⏰ No deadline"
-    local = row.deadline.astimezone(tz)
-    when = f"⏰ Decide by {local:%a %d %b %H:%M} {_zone(local)} ({relative(row.deadline - at)})"
+    when = f"⏰ Decide by {local_time(row.deadline, tz)} ({relative(row.deadline - at)})"
     if row.policy == "auto":
         lead = int(AUTO_LEAD.total_seconds()) // 60
         return f"{when}\nNo answer: it goes ahead automatically {lead} min before"

@@ -98,11 +98,11 @@ from fm.model.ids import Crosswalk, CrosswalkError
 from fm.model.projections import BlendWeights
 from fm.model.relevance import opponent_from
 from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, notify_proposal, send_alert
+from fm.notify.messages import local_time, moves_text, proposal_name
 from fm.proposals import (
     ProposalError,
     auto_approve_due,
     expire_due,
-    parse_payload,
     pause_state,
     reject,
 )
@@ -626,17 +626,18 @@ class _Tick:
         reconciled = reconcile_executions(self.store, now=self.now)
         for row in reconciled:
             self._alert(
-                f"Execution of #{row.row_id} was cut short",
-                f"{row.kind} {_summary(row)}: the run never recorded an outcome; check the league before acting again",
+                f"Check ESPN: {self._name(row)} may be half done",
+                f"{_summary(self.store, row)}\nThe run stopped without recording a result. Check the league before "
+                "acting again.",
                 league_id=row.league_id,
             )
         expired = expire_due(self.store, now=self.now)
         for row in expired:
             if row.execution_token is not None or row.policy == "auto":
-                when = f" at {row.deadline.astimezone(UTC):%H:%M} UTC" if row.deadline is not None else ""
+                when = f" ({local_time(row.deadline)})" if row.deadline is not None else ""
                 self._alert(
-                    f"Missed: #{row.row_id} expired unexecuted",
-                    f"{row.kind} {_summary(row)} reached its deadline{when} without executing",
+                    f"Missed: {self._name(row)} didn't run",
+                    f"{_summary(self.store, row)}\nIts deadline{when} passed before it ran.",
                     league_id=row.league_id,
                 )
         self.session = check_session(self.session_loader, now=self.now)
@@ -751,9 +752,9 @@ class _Tick:
             missed = missed_windows(windows, now=self.now, last_tick=self.state.last_tick, ran=self.state.runs)
             for window in missed:
                 self._alert(
-                    f"Missed window: {key} {window.kind.value}",
-                    f"{window.describe()} closed at {window.closes_at.astimezone(UTC):%H:%M} UTC with no tick "
-                    "running (PC asleep?); check the lineup",
+                    f"Missed: {key.upper()} {window.kind.value.replace('_', ' ')} check",
+                    f"Nothing ran before the {window.deadline.kind.value.replace('_', ' ')} at "
+                    f"{local_time(window.closes_at)} (PC asleep?). Check the lineup.",
                     link=ctx.team_url(),
                 )
             due = due_windows(windows, now=self.now, ran=self.state.runs)
@@ -939,8 +940,8 @@ class _Tick:
             )
         if outcome.ok:
             message = Message(
-                title=f"#{row.row_id} executed: {outcome.kind}",
-                body=f"{outcome.summary} in {outcome.league_key}; verified on ESPN",
+                title=f"✅ Done: {proposal_name(outcome.league_key, outcome.kind, row.row_id)}",
+                body=f"{outcome.summary}\nVerified on ESPN.",
                 tags=("white_check_mark",),
                 link=link,
             )
@@ -950,12 +951,16 @@ class _Tick:
                 self.warnings.append(f"execution of #{row.row_id} not reported: {exc}")
         else:
             self._alert(
-                f"#{row.row_id} failed: {outcome.kind}",
-                f"{outcome.summary} in {outcome.league_key}: {outcome.detail}",
+                f"❌ Failed: {proposal_name(outcome.league_key, outcome.kind, row.row_id)}",
+                f"{outcome.summary}\n{outcome.detail}",
                 link=link,
             )
 
     # --- alerts
+
+    def _name(self, row: ProposalRow) -> str:
+        league = self.store.leagues.get(row.league_id)
+        return proposal_name(league.key if league is not None else "", row.kind, row.row_id).strip()
 
     def _alert(
         self, title: str, body: str, *, key: str | None = None, link: str | None = None, league_id: int | None = None
@@ -996,7 +1001,7 @@ def execute_proposal(
     with the proposal unchanged, never an exception."""
     league = store.leagues.get(row.league_id)
     key = league.key if league is not None else f"league {row.league_id}"
-    summary = _summary(row)
+    summary = _summary(store, row)
     try:
         result = execute(
             store, row.row_id, token=row.execution_token, opener=opener, registry=flows, options=options, clock=clock
@@ -1103,11 +1108,8 @@ def _strings(value: object) -> list[str]:
     return found
 
 
-def _summary(row: ProposalRow) -> str:
-    try:
-        return parse_payload(row).summary()
-    except (ProposalError, ValueError):
-        return row.kind
+def _summary(store: Store, row: ProposalRow) -> str:
+    return moves_text(store, store.leagues.get(row.league_id), row)
 
 
 def _result_detail(result: ExecutionResult) -> str:

@@ -18,8 +18,11 @@ from fm.notify.messages import (
     alert,
     decision_message,
     describe_payload,
+    local_time,
+    moves_text,
     player_names,
     proposal_message,
+    proposal_name,
     relative,
     report,
 )
@@ -121,7 +124,7 @@ class TestProposalMessage:
         )
         mountain = timezone(timedelta(hours=-6))
         message = proposal_message(store, nfl, row, now=NOW, tz=mountain)
-        assert message.title == f"🏈 NFL: Bench an OUT/bye/no-game starter (#{row.row_id})"
+        assert message.title == f"🏈 NFL: Bench inactive starters (#{row.row_id})"
         assert message.body.splitlines() == [
             "Bench: Sample Quarterback",
             "⏰ Decide by Sun 04 Oct 08:00 UTC-06:00 (in 2h 00m)",
@@ -158,6 +161,20 @@ class TestProposalMessage:
             "Give: Bench Tight End",
             "Get: Waiver Runner",
         ]
+
+
+class TestAlertHelpers:
+    def test_moves_text_is_the_push_lines_on_one_line(self, store: Store, config: Config, nfl: LeagueRow) -> None:
+        payload = AddDropPayload(add_espn_id=12, drop_espn_id=13)
+        row = propose(store, config, nfl, ProposalKind.ADD_DROP, payload, created_by="t", now=NOW)
+        assert moves_text(store, nfl, row) == "➕ Add Waiver Runner; ➖ Drop Bench Tight End"
+        assert moves_text(store, None, row) == payload.summary()  # no league: the ids
+
+    def test_proposal_name_and_local_time(self) -> None:
+        assert proposal_name("nfl", "add_drop", 3) == "NFL free-agent add/drop #3"
+        assert proposal_name("nba", "something_new", 4) == "NBA something_new #4"
+        mountain = timezone(timedelta(hours=-6), "Mountain Daylight Time")
+        assert local_time(DEADLINE, mountain) == "Sun 04 Oct 08:00 MDT"
 
 
 class TestDescribePayload:

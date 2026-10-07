@@ -132,9 +132,7 @@ _TRADE: tuple[Approval, ...] = ("approve",)
 KINDS: Mapping[ProposalKind, KindSpec] = {
     spec.kind: spec
     for spec in (
-        KindSpec(
-            ProposalKind.BENCH_INACTIVE, "bench an OUT/bye/no-game starter", "bench_inactive", _LINEUP, LineupPayload
-        ),
+        KindSpec(ProposalKind.BENCH_INACTIVE, "bench inactive starters", "bench_inactive", _LINEUP, LineupPayload),
         KindSpec(ProposalKind.LINEUP, "lineup change", "lineup", _LINEUP, LineupPayload),
         KindSpec(
             ProposalKind.ADD_DROP,
