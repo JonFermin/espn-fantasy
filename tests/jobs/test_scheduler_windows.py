@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from fm import paths
 from fm.commands import schedule as schedule_cmd
+from fm.jobs import scheduler_base
 from fm.jobs import scheduler_windows as scheduler
 from fm.jobs.scheduler_windows import (
     DEFAULT_INTERVAL_MINUTES,
@@ -57,7 +58,7 @@ def _never_run_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(f"the scheduler backend ran a real command in a unit test: {args[0]!r}")
 
     monkeypatch.setattr(scheduler.subprocess, "run", refuse)
-    monkeypatch.setattr(scheduler, "find_uv", lambda: UV)
+    monkeypatch.setattr(scheduler_base, "find_uv", lambda: UV)
 
 
 class FakeRunner:
@@ -133,7 +134,7 @@ def test_spec_rejects_a_bad_interval_or_task_name_and_needs_uv_unless_told_other
         ScheduleSpec.build(uv_path=UV, repo_root=REPO, interval_minutes=0, environ={})
     with pytest.raises(SchedulerError, match="task name"):
         spec(task_name="bad/name")
-    monkeypatch.setattr(scheduler, "find_uv", lambda: None)
+    monkeypatch.setattr(scheduler_base, "find_uv", lambda: None)
     with pytest.raises(SchedulerError, match="uv not found"):
         ScheduleSpec.build(repo_root=REPO, environ={})
     assert ScheduleSpec.build(repo_root=REPO, environ={}, require_uv=False).uv_path == Path("uv")
@@ -311,7 +312,8 @@ def run(*args: str, expect: int = 0) -> str:
 @pytest.fixture
 def fake_runner(monkeypatch: pytest.MonkeyPatch) -> FakeRunner:
     fake = FakeRunner(installed=False)
-    monkeypatch.setattr(scheduler, "default_runner", fake)
+    monkeypatch.setattr(schedule_cmd, "backend", lambda: scheduler.WINDOWS)
+    monkeypatch.setattr(schedule_cmd, "default_runner", fake)
     return fake
 
 
@@ -332,7 +334,7 @@ def test_schedule_install_dry_run_renders_and_runs_nothing(fake_runner: FakeRunn
 
 def test_schedule_install_show_uninstall_round_trip(fake_runner: FakeRunner) -> None:
     output = run("schedule", "install")
-    assert "installed: fm tick every 10 minutes" in output
+    assert "installed: fm tick every 10 minutes (Windows Task Scheduler)" in output
     wrapper = paths.config_dir() / "scripts" / f"{TASK_NAME}.cmd"
     assert wrapper.is_file()
     assert "HostName: PC" in run("schedule", "show")
@@ -342,7 +344,8 @@ def test_schedule_install_show_uninstall_round_trip(fake_runner: FakeRunner) -> 
 
 
 def test_schedule_install_reports_a_failed_create(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(scheduler, "default_runner", FakeRunner(installed=False, create_ok=False))
+    monkeypatch.setattr(schedule_cmd, "backend", lambda: scheduler.WINDOWS)
+    monkeypatch.setattr(schedule_cmd, "default_runner", FakeRunner(installed=False, create_ok=False))
     result = runner.invoke(cli(), ["schedule", "install"], catch_exceptions=False)
     assert result.exit_code == 1
     assert "error: schtasks /Create" in result.output

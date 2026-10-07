@@ -43,11 +43,11 @@ is a :class:`DrillReport` per league; :func:`drill_alert` turns reports into one
 (``fm.commands.drill``) does.
 
 Scheduling: ``fm schedule`` installs the tick only, and this module is out of the tick on purpose (a drill opens a
-browser for minutes). To run it weekly, register a second Windows task that runs ``fm drill`` (the wrapper
-``fm.jobs.scheduler_windows`` writes for the tick shows how), or have the tick's health checks call
-``fm.commands.drill.run_live`` when the last drill is a week old. The alert is sent by the command, so either path
-alerts the same way. Selectors live in ``fm.browser.selectors`` alone; the drill spells none out and clicks only
-what the flows click.
+browser for minutes). To run it weekly, register a second scheduled job that runs ``fm drill`` (the wrapper
+``fm.jobs.scheduler_windows`` or ``fm.jobs.scheduler_macos`` writes for the tick shows how), or have the tick's
+health checks call ``fm.commands.drill.run_live`` when the last drill is a week old. The alert is sent by the
+command, so either path alerts the same way. Selectors live in ``fm.browser.selectors`` alone; the drill spells none
+out and clicks only what the flows click.
 """
 
 from __future__ import annotations

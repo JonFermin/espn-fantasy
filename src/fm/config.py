@@ -66,7 +66,7 @@ class Policy(BaseModel):
         default="auto",
         description="Benching an OUT, bye or no-game starter. auto fires only at T-15 when the proposal is unanswered.",
     )
-    lineup: Approval = Field(default="approve", description="Other lineup optimizations.")
+    lineup: Approval = Field(default="auto", description="Other lineup optimizations.")
     add_drop: ApprovalNoAuto = Field(default="approve", description="Free-agent adds and drops, including streaming.")
     waiver: ApprovalNoAuto = Field(default="approve", description="Waiver claims.")
     max_transactions_per_week: int = Field(default=3, ge=0, description="Our cap; ESPN's own limit is in settings.")

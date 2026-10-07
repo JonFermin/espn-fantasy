@@ -27,7 +27,8 @@ from fm import paths
 
 
 class Channel(StrEnum):
-    """Installed browsers Playwright can drive as a channel, in fallback order. Edge first: it ships with Windows.
+    """Installed browsers Playwright can drive as a channel, in fallback order. Edge first: it ships with
+    Windows. On macOS either may be absent; a channel that is not installed is skipped.
 
     The CLI types its ``--channel`` option with this enum so an unknown browser is rejected before any launch.
     """

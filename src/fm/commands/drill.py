@@ -14,7 +14,8 @@ against the live site.
 
 Run it weekly, on a day with no games (a player whose game has started is locked, so the drill has nothing to move
 and skips that flow). ``fm schedule`` installs the tick only, so a weekly run is a second scheduled task that runs ``fm
-drill`` (the wrapper :mod:`fm.jobs.scheduler_windows` writes for the tick is the model), or a call to :func:`run_live`
+drill`` (the wrapper :mod:`fm.jobs.scheduler_windows` or :mod:`fm.jobs.scheduler_macos` writes for the tick is the
+model), or a call to :func:`run_live`
 and :func:`send_alert_for` from the tick's health checks once the last drill is a week old.
 """
 

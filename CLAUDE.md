@@ -25,8 +25,11 @@ order and status live in `ROADMAP.md`.
 
 ## Paths
 
-- Config, state DB, browser profile, audit artifacts: `~/.config/espn-fantasy/`. Not `%APPDATA%`, because MSIX
-  virtualizes it.
+- Config, state DB, browser profile, audit artifacts: `~/.config/espn-fantasy/` on Windows and macOS alike. Not
+  `%APPDATA%`, because MSIX virtualizes it.
+- Runs on Windows and macOS. Platform-specific code stays behind a backend (`fm schedule`:
+  `jobs/scheduler_windows.py` / `jobs/scheduler_macos.py` over `jobs/scheduler_base.py`); everything else must stay
+  portable. CI runs the suite on both.
 - Deletable cache: `~/.cache/espn-fantasy/`.
 - Never commit secrets, cookies, browser profiles, or unscrubbed fixtures (real manager names).
 

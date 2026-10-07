@@ -1,1 +1,1 @@
-"""Scheduled work: sync, tick, deadlines, weekly report, Windows Task Scheduler install."""
+"""Scheduled work: sync, tick, deadlines, weekly report, scheduler install (Windows Task Scheduler, macOS launchd)."""

@@ -34,6 +34,9 @@ only (`--fixtures` serves recorded views offline).
 
 ## Running
 
+It runs on Windows and macOS. You need [uv](https://docs.astral.sh/uv/) and Microsoft Edge or Google Chrome installed
+(`fm login` drives the installed browser, never a bundled one). State lives in `~/.config/espn-fantasy/` on both.
+
 `fm` is installed into the project's virtual environment, not onto your PATH, so a bare `fm` in PowerShell says it is
 not recognized. From the repo root, prefix commands with `uv run`:
 
@@ -48,6 +51,30 @@ with `uv tool install --editable .` (then `uv tool update-shell` if `fm` is stil
 PowerShell window opened before that install keeps its old `PATH`, so `fm` stays unrecognized there until you open a
 new window (or, in the current one, run
 `$env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')`).
+
+### macOS
+
+```bash
+brew install uv            # or: curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+uv run fm --help
+uv run fm login            # opens Chrome or Edge once for the manual ESPN sign-in
+```
+
+To type `fm` directly, `source .venv/bin/activate`, or `uv tool install --editable .` once.
+
+### Scheduling the tick
+
+`uv run fm schedule install` registers `fm tick` every 10 minutes with the platform's scheduler (`--dry-run` prints
+what it would do, `show` and `uninstall` inspect and remove it):
+
+- **Windows:** a Task Scheduler task that may wake the PC and run on battery.
+- **macOS:** a launchd LaunchAgent, `~/Library/LaunchAgents/local.espn-fantasy-tick.plist`. launchd cannot wake a
+  sleeping Mac, so keep it awake around lineup locks (System Settings > Battery > Options, or `sudo pmset`). A tick
+  missed during sleep runs on wake and reports what it missed.
+
+The log is `~/.config/espn-fantasy/logs/tick.log` on both. The browser profile and `state.db` are per machine: run the
+tick on one machine at a time, and run `fm login` on each.
 
 ## License
 

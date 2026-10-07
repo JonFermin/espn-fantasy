@@ -6,37 +6,64 @@ the report. ``--no-execute`` runs everything but the writes and lists what would
 on the stored state. The exit code is 1 when a decision failed or an execution did not verify, so the scheduler's log
 shows it.
 
-``fm schedule`` registers that tick with the Windows Task Scheduler through :mod:`fm.jobs.scheduler_windows`: a
-``.cmd`` wrapper under the config dir, ``schtasks /Create`` every ``--every`` minutes, and the power settings that let
-the task wake the PC and run on battery. ``install --dry-run`` prints the wrapper and the commands without running
-anything, ``show`` queries the task (and never fails when it is not installed), ``uninstall`` deletes it.
+``fm schedule`` registers that tick with the platform's scheduler (:func:`backend`): on Windows the Task Scheduler
+through :mod:`fm.jobs.scheduler_windows` (a ``.cmd`` wrapper, ``schtasks /Create`` every ``--every`` minutes, and the
+power settings that let the task wake the PC and run on battery); on macOS launchd through
+:mod:`fm.jobs.scheduler_macos` (a ``.sh`` wrapper and a per-user LaunchAgent). ``install --dry-run`` prints the
+wrapper and the commands without running anything, ``show`` queries the job (and never fails when it is not
+installed), ``uninstall`` removes it.
 """
 
 from __future__ import annotations
 
+import sys
 from typing import Annotated, NoReturn
 
 import typer
 
 from fm.config import ConfigError, load_config
-from fm.jobs import scheduler_windows as scheduler
+from fm.jobs.scheduler_base import (
+    DEFAULT_INTERVAL_MINUTES,
+    MAX_INTERVAL_MINUTES,
+    Backend,
+    SchedulerError,
+    default_runner,
+)
+from fm.jobs.scheduler_macos import MACOS
+from fm.jobs.scheduler_windows import WINDOWS
 from fm.jobs.tick import TickOptions, tick
 from fm.notify import NotifyError, open_channel
 from fm.store import Store
 
-app = typer.Typer(help="Install the tick as a Windows scheduled task, or show and remove it.", no_args_is_help=True)
+app = typer.Typer(
+    help="Install the tick as a scheduled job (Windows Task Scheduler or macOS launchd), or show and remove it.",
+    no_args_is_help=True,
+)
+
+BACKENDS: dict[str, Backend] = {"win32": WINDOWS, "darwin": MACOS}
+"""The scheduler backend per ``sys.platform``."""
+
+
+def backend(platform: str | None = None) -> Backend:
+    """The scheduler backend for ``platform`` (default: this machine). Raises :class:`SchedulerError` elsewhere."""
+    key = sys.platform if platform is None else platform
+    try:
+        return BACKENDS[key]
+    except KeyError:
+        raise SchedulerError(f"fm schedule supports Windows and macOS, not {key!r}") from None
+
 
 EveryOption = Annotated[
     int,
     typer.Option(
         "--every",
         min=1,
-        max=scheduler.MAX_INTERVAL_MINUTES,
+        max=MAX_INTERVAL_MINUTES,
         help="Minutes between ticks (DESIGN section 13: one cheap tick every 10 minutes).",
     ),
 ]
 DryRunOption = Annotated[
-    bool, typer.Option("--dry-run", help="Print the wrapper and the schtasks commands without running anything.")
+    bool, typer.Option("--dry-run", help="Print the wrapper and the scheduler commands without running anything.")
 ]
 LeagueOption = Annotated[
     list[str] | None,
@@ -68,9 +95,7 @@ def tick_(league: LeagueOption = None, no_execute: NoExecuteOption = False, no_s
     except NotifyError as exc:
         channel = None
         typer.echo(f"note: no phone channel ({exc}); proposals and alerts stay in the store and this log")
-    options = TickOptions(
-        execute=not no_execute, sync=not no_sync, leagues=None if league is None else tuple(league)
-    )
+    options = TickOptions(execute=not no_execute, sync=not no_sync, leagues=None if league is None else tuple(league))
     try:
         with Store.open() as store:
             report = tick(store, config, channel=channel, options=options)
@@ -87,33 +112,35 @@ def tick_(league: LeagueOption = None, no_execute: NoExecuteOption = False, no_s
 
 
 @app.command("install")
-def install_(every: EveryOption = scheduler.DEFAULT_INTERVAL_MINUTES, dry_run: DryRunOption = False) -> None:
-    """Write the .cmd wrapper and create the scheduled task (replacing one that exists), then allow wake and battery."""
+def install_(every: EveryOption = DEFAULT_INTERVAL_MINUTES, dry_run: DryRunOption = False) -> None:
+    """Write the wrapper and register the scheduled job (replacing one that exists)."""
     try:
-        spec = scheduler.ScheduleSpec.build(interval_minutes=every)
-    except scheduler.SchedulerError as exc:
+        chosen = backend()
+        spec = chosen.build_spec(interval_minutes=every)
+    except SchedulerError as exc:
         _fail(str(exc))
     if dry_run:
         typer.echo("dry run: nothing is written or installed")
-        for line in scheduler.render_plan(spec):
+        for line in chosen.plan(spec):
             typer.echo(line)
         return
     try:
-        report = scheduler.install(spec, scheduler.default_runner)
-    except scheduler.SchedulerError as exc:
+        report = chosen.install(spec, default_runner)
+    except SchedulerError as exc:
         _fail(str(exc))
     for line in report.lines():
         typer.echo(line)
-    typer.echo(f"installed: fm tick every {every} minutes; log at {spec.log_path}")
+    typer.echo(f"installed: fm tick every {every} minutes ({chosen.scheduler}); log at {spec.log_path}")
 
 
 @app.command("uninstall")
 def uninstall_() -> None:
-    """Delete the scheduled task (a missing one is not an error) and remove the wrapper."""
+    """Remove the scheduled job (a missing one is not an error) and its wrapper."""
     try:
-        spec = scheduler.ScheduleSpec.build(require_uv=False)
-        report = scheduler.uninstall(spec, scheduler.default_runner)
-    except scheduler.SchedulerError as exc:
+        chosen = backend()
+        spec = chosen.build_spec(require_uv=False)
+        report = chosen.uninstall(spec, default_runner)
+    except SchedulerError as exc:
         _fail(str(exc))
     for line in report.lines():
         typer.echo(line)
@@ -121,12 +148,13 @@ def uninstall_() -> None:
 
 @app.command("show")
 def show_() -> None:
-    """Show the scheduled task as Task Scheduler reports it, and what the wrapper runs."""
+    """Show the scheduled job as the platform scheduler reports it, and what the wrapper runs."""
     try:
-        spec = scheduler.ScheduleSpec.build(require_uv=False)
-    except scheduler.SchedulerError as exc:
+        chosen = backend()
+        spec = chosen.build_spec(require_uv=False)
+    except SchedulerError as exc:
         _fail(str(exc))
-    typer.echo(scheduler.show(spec, scheduler.default_runner))
+    typer.echo(chosen.show(spec, default_runner))
     typer.echo(f"Runs:                                 {' '.join(spec.argv())}")
     typer.echo(f"Log:                                  {spec.log_path}")
 

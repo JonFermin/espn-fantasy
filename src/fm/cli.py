@@ -76,7 +76,8 @@ def _command_names(commands: Iterable[CommandInfo], groups: Iterable[TyperInfo])
 
 
 def _utf8_console() -> None:
-    """Windows consoles default to cp1252; switch to UTF-8 with replacement so player names never raise."""
+    """Windows consoles default to cp1252 (and a POSIX ``LANG=C`` to ASCII); switch to UTF-8 with replacement so
+    player names never raise."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:

@@ -492,11 +492,17 @@ verification, artifacts`. Its status runs `proposed → approved | rejected | ex
 
 ## 13. Runtime and scheduling
 
-- Runs on the Windows PC that holds the browser profile. This isn't optional: stats.nba.com and the NBA CDN block
-  cloud IPs, and ESPN may block datacenter IPs too.
+- Runs on the local machine (Windows PC or Mac) that holds the browser profile. This isn't optional: stats.nba.com
+  and the NBA CDN block cloud IPs, and ESPN may block datacenter IPs too. Each machine has its own profile and
+  `state.db`; run the tick on one of them at a time.
 - **One scheduled job: `fm tick` every 10 minutes.** This is software-factory's model: a cheap, idempotent tick that
-  works out what is due. Install it with `schtasks` + a `.cmd` wrapper and the wake/battery settings from
-  software-factory's `scheduler/windows.py`.
+  works out what is due. `fm schedule install` picks the backend by platform:
+  - **Windows:** `schtasks` + a `.cmd` wrapper and the wake/battery settings from software-factory's
+    `scheduler/windows.py` (`jobs/scheduler_windows.py`).
+  - **macOS:** a per-user launchd LaunchAgent (`~/Library/LaunchAgents/local.espn-fantasy-tick.plist`,
+    `StartInterval`, loaded into `gui/<uid>`) + a `.sh` wrapper (`jobs/scheduler_macos.py`). launchd runs on battery
+    but cannot wake a sleeping Mac; a tick missed during sleep runs on wake and reports the missed windows, so keep
+    the Mac awake at locks with the energy settings or `pmset`.
 - Each tick:
   1. Refresh stale data.
   2. Compute upcoming deadlines (kickoffs and tips from the pro schedule; the waiver run from league settings).
@@ -580,7 +586,8 @@ espn-fantasy/
     proposals/    queue.py, policy.py
     executor/     run.py, verify.py
     notify/       base.py, telegram.py, ntfy.py
-    jobs/         sync.py, tick.py, deadlines.py, report.py, scheduler_windows.py
+    jobs/         sync.py, tick.py, deadlines.py, report.py, scheduler_base.py, scheduler_windows.py,
+                  scheduler_macos.py
     eval/         backtest.py, tune.py, report_card.py
     render/       CLI tables
   tests/          mirrors src/; fixtures/ holds scrubbed ESPN JSON and recorded source responses
@@ -645,7 +652,7 @@ Answered 2026-10-04:
 3. **Autonomy:** auto-benching an OUT/inactive starter at T-15 when unanswered is approved. Everything else waits for
    approval.
 4. **Phone approvals:** Telegram by default, which needs a free account. ntfy is the no-account alternative (§11).
-5. **Runtime:** your Windows PC. This is effectively forced, because the NBA data sources block cloud IPs.
+5. **Runtime:** your own Windows PC or Mac. This is effectively forced, because the NBA data sources block cloud IPs.
 
 Nothing blocking is left open. The setup items on your side are the ESPN league and team IDs, a one-time `fm login`,
 and the phone channel.
@@ -658,6 +665,6 @@ and the phone channel.
 | ESPN reads | JSON API | DOM scraping | Structured, fast, and the same calls the web app makes |
 | ESPN writes | The web app's own transaction calls sent from the logged-in Playwright session, with UI click-through as fallback | UI click-through only; plain HTTP outside the browser | The API path was verified live by several projects in Sept 2026, while UI-only bots broke on every redesign. Keeping it in the browser keeps one session and a real client |
 | LLM role | Narrow workers on a deterministic engine | One agent deciding everything | Testable, auditable, predictable cost |
-| Runtime | Local PC + `schtasks` tick | Cloud VPS, scheduled cloud agents | The ESPN session and browser profile live locally, and NBA data sources block cloud IPs |
+| Runtime | Local PC or Mac + `schtasks` / launchd tick | Cloud VPS, scheduled cloud agents | The ESPN session and browser profile live locally, and NBA data sources block cloud IPs |
 | Storage | SQLite + parquet cache | Postgres, DuckDB | Single user, zero ops |
 | Approvals | Telegram bot (default) or ntfy | Discord, Pushover, openclaw | Both give tap-to-approve with no inbound ports; ntfy needs no account |

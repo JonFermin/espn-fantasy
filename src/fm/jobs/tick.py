@@ -1,6 +1,7 @@
 """The tick: one cheap, idempotent run every few minutes that works out what is due (DESIGN section 13, ROADMAP #29).
 
-``fm tick`` (scheduled by :mod:`fm.jobs.scheduler_windows`) calls :func:`tick`, which does, in this order:
+``fm tick`` (scheduled by :mod:`fm.jobs.scheduler_windows` or :mod:`fm.jobs.scheduler_macos`) calls :func:`tick`,
+which does, in this order:
 
 1. **Reconcile** what a killed process left ``executing`` (:func:`fm.executor.reconcile_executions`, once a run is
    :data:`fm.executor.STALE_EXECUTION` old; a run going in ``fm bot`` is never touched) and **expire** every proposal
