@@ -38,6 +38,7 @@ from fm.decide.trades import (
     TRADES_CREATED_BY,
     AcceptanceParams,
     MarketBook,
+    RankCurve,
     SearchOptions,
     TradeContext,
     TradeError,
@@ -383,6 +384,34 @@ def test_market_values_prefer_fantasycalc_then_espn_rank_then_our_own_rank() -> 
     assert book.value(99) == 0.0
     assert book.scale == pytest.approx((7000.0 + rank_value(10, 40)) / 2)
     assert build_market_book(None, values, rank_type="PPR").basis == dict.fromkeys(values, "ros_rank")
+
+
+def test_espn_ranks_are_priced_on_fantasycalcs_curve_not_the_generic_one() -> None:
+    # Live NFL, 2026 week 5: FantasyCalc prices skill players only; a kicker and a D/ST ranked 281 and 244 by ESPN in a
+    # 1762-deep feed came out at 3334 and 3855 on rank_value, above Davante Adams (2937), so K + D/ST "bought" a QB and
+    # an RB at 68% P(accept).
+    priced = {
+        10 + n: (rank, value)
+        for n, (rank, value) in enumerate(
+            [(5, 9000), (20, 6000), (45, 2937), (50, 2845), (56, 824), (90, 1500), (150, 600), (220, 250), (300, 120)]
+        )
+    }
+    market = {
+        espn_id: MarketValue(espn_id=espn_id, name=str(espn_id), trade_value=value, espn_ranks={"PPR": rank})
+        for espn_id, (rank, value) in priced.items()
+    }
+    market[1] = MarketValue(espn_id=1, name="K", espn_ranks={"PPR": 281}, total_ranking=1762)
+    market[2] = MarketValue(espn_id=2, name="D/ST", espn_ranks={"PPR": 244})
+    values = {espn_id: float(100 - i) for i, espn_id in enumerate([*priced, 1, 2, 3])}
+    book = build_market_book(market, values, rank_type="PPR")
+    assert book.basis[1] == book.basis[2] == "espn_rank" and book.basis[3] == "ros_rank"
+    assert 120 <= book.value(1) <= 250 and 120 <= book.value(2) <= 250  # between FantasyCalc's 220th and 300th
+    assert book.value(2) > book.value(1)  # ranked higher, worth more
+    assert book.value(1) + book.value(2) < 2845  # together less than one starting RB
+    assert book.value(3) < book.value(13)  # our own 12th is priced on the same curve, below FantasyCalc's ranked ones
+    fit = RankCurve.fit([(rank, float(value)) for rank, value in priced.values()], 1762)
+    assert fit.value(50) >= fit.value(56) >= fit.value(90)  # the 824 outlier is pooled: values never rise with rank
+    assert RankCurve.fit([(1, 9000.0)], 100).value(10) == pytest.approx(rank_value(10, 100))  # too few: generic
 
 
 def test_espn_ranked_and_fallback_players_are_valued_on_one_scale() -> None:

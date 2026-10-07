@@ -73,6 +73,8 @@ from functools import cached_property
 from types import MappingProxyType
 from typing import Any, Final, Protocol
 
+import numpy as np
+
 from fm.config import Config
 from fm.espn.calendar import league_matchup_days, matchup_period_of
 from fm.espn.ids import Game, InjuryStatus
@@ -359,6 +361,47 @@ def rank_value(rank: int, size: int) -> float:
     return MARKET_TOP * math.exp(-decay * (min(rank, size) - 1))
 
 
+CURVE_MIN_POINTS: Final = 5
+"""The fewest (rank, trade value) pairs a :class:`RankCurve` is fitted from; below it ranks use :func:`rank_value`."""
+
+
+@dataclass(frozen=True, slots=True)
+class RankCurve:
+    """Market value by rank on FantasyCalc's own scale: a non-increasing fit (isotonic, pooled adjacent violators) of
+    the trade values of players with a rank, interpolated in log value between fitted ranks, and following
+    :func:`rank_value`'s shape beyond them. With no fit (``ranks`` empty) it is :func:`rank_value` itself."""
+
+    size: int
+    ranks: tuple[float, ...] = ()
+    logs: tuple[float, ...] = ()
+
+    @classmethod
+    def fit(cls, points: Iterable[tuple[int, float]], size: int) -> RankCurve:
+        ordered = sorted((float(rank), value) for rank, value in points if rank >= 1 and value > 0)
+        if len(ordered) < CURVE_MIN_POINTS:
+            return cls(size)
+        # pooled adjacent violators on log value, decreasing in rank: blocks of (mean rank, mean log, weight)
+        blocks: list[list[float]] = []
+        for rank, value in ordered:
+            blocks.append([rank, math.log(value), 1.0])
+            while len(blocks) > 1 and blocks[-2][1] < blocks[-1][1]:
+                r2, l2, w2 = blocks.pop()
+                r1, l1, w1 = blocks.pop()
+                w = w1 + w2
+                blocks.append([(r1 * w1 + r2 * w2) / w, (l1 * w1 + l2 * w2) / w, w])
+        return cls(size, tuple(b[0] for b in blocks), tuple(b[1] for b in blocks))
+
+    def value(self, rank: int) -> float:
+        if not self.ranks:
+            return rank_value(rank, self.size)
+        first, last = self.ranks[0], self.ranks[-1]
+        if rank <= first or rank >= last:
+            edge, log = (first, self.logs[0]) if rank <= first else (last, self.logs[-1])
+            shape = rank_value(rank, self.size) / rank_value(max(1, round(edge)), self.size)
+            return math.exp(log) * shape
+        return math.exp(float(np.interp(rank, self.ranks, self.logs)))
+
+
 class MarketLike(Protocol):
     """What :func:`load_trade_context` needs of a market source: :class:`fm.sources.market.MarketSource` has it."""
 
@@ -402,21 +445,35 @@ def build_market_book(
         rank for entry in found.values() for rank in (entry.espn_ranks.get(rank_type), entry.total_ranking) if rank
     ]
     size = max([*ranks, len(ordered), 2])
+
     # One ``size`` for both bases: a rank is a place among the league's players, so our 100th-best player is worth what
     # ESPN's 100th-ranked is, whether the feed is 1000 deep or our own pool is 300 (a per-basis size would put the same
     # rank at about 5000 on one basis and 1800 on the other).
+    # FantasyCalc's values fall far more steeply than :func:`rank_value`, so a rank is priced on FantasyCalc's own
+    # curve, fitted from the players that have both a rank and a trade value (an uncalibrated ESPN rank 244 of 1762
+    # would be worth more than a FantasyCalc top-50 player). Without enough such players both keep :func:`rank_value`.
+    def _espn_rank(entry: MarketValue | None) -> int | None:
+        return (entry.espn_ranks.get(rank_type) or entry.espn_rank or entry.total_ranking) if entry else None
+
+    priced = {
+        espn_id: float(entry.trade_value)
+        for espn_id, entry in found.items()
+        if entry.trade_value is not None and entry.trade_value > 0
+    }
+    espn_curve = RankCurve.fit(
+        [(rank, value) for espn_id, value in priced.items() if (rank := _espn_rank(found[espn_id]))], size
+    )
+    ros_curve = RankCurve.fit([(ours[espn_id], value) for espn_id, value in priced.items() if espn_id in ours], size)
     book: dict[int, float] = {}
     basis: dict[int, str] = {}
     for espn_id in values:
         entry = found.get(espn_id)
-        if entry is not None and entry.trade_value is not None and entry.trade_value > 0:
-            book[espn_id], basis[espn_id] = float(entry.trade_value), FANTASYCALC
-            continue
-        rank = (entry.espn_ranks.get(rank_type) or entry.espn_rank or entry.total_ranking) if entry else None
-        if rank:
-            book[espn_id], basis[espn_id] = rank_value(rank, size), ESPN_RANK
+        if espn_id in priced:
+            book[espn_id], basis[espn_id] = priced[espn_id], FANTASYCALC
+        elif rank := _espn_rank(entry):
+            book[espn_id], basis[espn_id] = espn_curve.value(rank), ESPN_RANK
         else:
-            book[espn_id], basis[espn_id] = rank_value(ours[espn_id], size), ROS_RANK
+            book[espn_id], basis[espn_id] = ros_curve.value(ours[espn_id]), ROS_RANK
     top = sorted((book[espn_id] for espn_id in starters if espn_id in book), reverse=True)
     scale = math.fsum(top) / len(top) if top else 1.0
     return MarketBook(
