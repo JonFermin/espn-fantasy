@@ -103,6 +103,7 @@ MODULES = (
     "fm.decide.trades",
     "fm.model.baseline_nba",
     "fm.mcp_server",
+    "fm.health",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
