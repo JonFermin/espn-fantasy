@@ -1,0 +1,47 @@
+{
+  "id": "{00000000-0000-0000-0000-000000000001}",
+  "preferences": [
+    {
+      "id": "team:nba:21",
+      "type": {"id": 1, "name": "team"},
+      "metaData": {
+        "team": {
+          "id": "21",
+          "abbreviation": "PHX",
+          "links": [{"href": "https://www.espn.com/nba/team/_/name/phx"}]
+        }
+      }
+    },
+    {
+      "id": "4:4040404:5",
+      "type": {"id": 9, "name": "fantasy"},
+      "metaData": {
+        "entry": {
+          "abbrev": "FHL",
+          "gameId": 4,
+          "seasonId": 2027,
+          "entryId": 5,
+          "entryMetadata": {"teamName": "Fixture Team 5"},
+          "entryURL": "https://fantasy.espn.com/hockey/team?leagueId=4040404&teamId=5&seasonId=2027",
+          "groups": [{"groupId": 4040404, "groupName": "League D", "groupManager": false}]
+        }
+      }
+    },
+    {
+      "id": "2:5050505:4",
+      "type": {"id": 9, "name": "fantasy"},
+      "metaData": {
+        "entry": {
+          "abbrev": "FLB",
+          "gameId": 2,
+          "seasonId": 2026,
+          "entryId": 4,
+          "entryMetadata": {"teamName": "Fixture Team 4"},
+          "entryURL": "https://fantasy.espn.com/baseball/team?leagueId=5050505&teamId=4&seasonId=2026",
+          "groups": [{"groupId": 5050505, "groupName": "League E", "groupManager": false}]
+        }
+      }
+    }
+  ],
+  "links": [{"rel": "scores", "href": "https://www.espn.com/nhl/scoreboard"}]
+}
