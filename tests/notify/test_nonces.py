@@ -44,14 +44,14 @@ def test_buttons_work_a_grace_period_past_the_deadline_or_a_week_without_one() -
 
 def test_every_notification_gets_a_fresh_nonce() -> None:
     assert len({nonces.issue(1, now=NOW).nonce for _ in range(50)}) == 50
-    assert nonces.live() == 50
+    assert nonces.live(now=NOW) == 50
 
 
 def test_a_nonce_is_consumed_exactly_once() -> None:
     issued = nonces.issue(3, deadline=DEADLINE, now=NOW)
     assert nonces.consume(issued.nonce, 3, now=NOW) == issued
     assert nonces.consume(issued.nonce, 3, now=NOW) is None
-    assert nonces.live() == 0
+    assert nonces.live(now=NOW) == 0
 
 
 def test_a_nonce_presented_for_another_proposal_is_refused_and_burnt() -> None:
@@ -75,7 +75,7 @@ def test_unknown_and_malformed_nonces_are_refused_quietly(nonce: str) -> None:
     nonces.issue(1, now=NOW)
     assert nonces.consume(nonce, 1, now=NOW) is None
     assert nonces.discard(nonce) is False
-    assert nonces.live() == 1
+    assert nonces.live(now=NOW) == 1
 
 
 def test_a_nonce_differing_only_in_case_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
