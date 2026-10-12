@@ -1,0 +1,100 @@
+{
+  "id": "{00000000-0000-0000-0000-000000000001}",
+  "preferences": [
+    {
+      "id": "1:1010101:7",
+      "type": {"id": 9, "name": "fantasy"},
+      "metaData": {
+        "entry": {
+          "abbrev": "FFL",
+          "gameId": 1,
+          "seasonId": 2026,
+          "entryId": 7,
+          "entryLocation": "Fixture",
+          "entryNickname": "Seven",
+          "entryMetadata": {"teamName": "Fixture Team 7", "teamAbbrev": "FX7"},
+          "entryURL": "https://fantasy.espn.com/football/team?leagueId=1010101&teamId=7&seasonId=2026",
+          "logoUrl": "https://g.espncdn.com/lm-static/logo-packs/core/placeholder.svg",
+          "groups": [
+            {
+              "groupId": 1010101,
+              "groupName": "League A",
+              "groupManager": false,
+              "fantasyCastHref": "https://fantasy.espn.com/football/fantasycast?leagueId=1010101"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3:2020202:3",
+      "type": {"id": 9, "name": "fantasy"},
+      "metaData": {
+        "entry": {
+          "abbrev": "FBA",
+          "gameId": 3,
+          "seasonId": 2027,
+          "entryId": 3,
+          "entryLocation": "Fixture Team",
+          "entryNickname": "Three",
+          "entryURL": "https://fantasy.espn.com/basketball/team?leagueId=2020202&teamId=3&seasonId=2027",
+          "groups": [{"groupId": 2020202, "groupName": "League B", "groupManager": true}]
+        }
+      }
+    },
+    {
+      "id": "1:3030303:2",
+      "type": {"id": 9, "name": "fantasy"},
+      "metaData": {
+        "entry": {
+          "abbrev": "FFL",
+          "gameId": 1,
+          "seasonId": 2025,
+          "entryId": 2,
+          "entryMetadata": {"teamName": "Fixture Team 2"},
+          "entryURL": "https://fantasy.espn.com/football/team?leagueId=3030303&teamId=2&seasonId=2025",
+          "groups": [{"groupId": 3030303, "groupName": "League C", "groupManager": false}]
+        }
+      }
+    },
+    {
+      "id": "4:4040404:5",
+      "type": {"id": 9, "name": "fantasy"},
+      "metaData": {
+        "entry": {
+          "abbrev": "FHL",
+          "gameId": 4,
+          "seasonId": 2027,
+          "entryId": 5,
+          "entryMetadata": {"teamName": "Fixture Team 5"},
+          "entryURL": "https://fantasy.espn.com/hockey/team?leagueId=4040404&teamId=5&seasonId=2027",
+          "groups": [{"groupId": 4040404, "groupName": "League D", "groupManager": false}]
+        }
+      }
+    },
+    {
+      "id": "team:nfl:1",
+      "type": {"id": 1, "name": "team"},
+      "metaData": {
+        "team": {
+          "id": "1",
+          "abbreviation": "ATL",
+          "links": [{"href": "https://www.espn.com/nfl/team/_/name/atl"}]
+        }
+      }
+    },
+    {
+      "id": "1:1010101:7:duplicate",
+      "type": {"id": 9, "name": "fantasy"},
+      "metaData": {
+        "entry": {
+          "gameId": 1,
+          "seasonId": 2026,
+          "entryId": 7,
+          "entryURL": "https://fantasy.espn.com/football/league?leagueId=1010101&seasonId=2026",
+          "groups": [{"groupId": 1010101}]
+        }
+      }
+    }
+  ]
+}

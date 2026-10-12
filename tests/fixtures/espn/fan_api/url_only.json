@@ -1,0 +1,29 @@
+{
+  "fan": {
+    "id": "{00000000-0000-0000-0000-000000000001}",
+    "links": [
+      {"rel": "fantasy", "href": "https://fantasy.espn.com/football/league?leagueId=1010101&seasonId=2026"},
+      {"rel": "fantasy", "href": "https://fantasy.espn.com/football/team?leagueId=1010101&teamId=7&seasonId=2026"},
+      {"rel": "fantasy", "href": "https://fantasy.espn.com/basketball/league/scoreboard?leagueId=2020202&seasonId=2027&matchupPeriodId=2"},
+      {"rel": "fantasy", "href": "https://fantasy.espn.com/football/league/standings?leagueId=3030303&seasonId=2025"},
+      {"rel": "fantasy", "href": "https://fantasy.espn.com/hockey/team?leagueId=4040404&teamId=5&seasonId=2027"},
+      {"rel": "news", "href": "https://www.espn.com/nfl/story/_/id/1/placeholder"}
+    ]
+  },
+  "modules": [
+    {
+      "name": "fantasy-cards",
+      "cards": [
+        {
+          "title": "Your team",
+          "body": "Set your lineup: https://fantasy.espn.com/basketball/team?leagueId=2020202&teamId=3 before tip-off."
+        },
+        {
+          "title": "Scores",
+          "body": "https://www.espn.com/nba/scoreboard"
+        }
+      ]
+    }
+  ],
+  "preferences": []
+}
