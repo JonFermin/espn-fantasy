@@ -1,4 +1,4 @@
-"""The MCP server (ROADMAP #40): read tools and ``create_proposal``, with no way to act.
+"""The MCP server (ROADMAP #40, #55): read tools, ``health``, ``report`` and ``create_proposal``, with no way to act.
 
 The tools are called through FastMCP's in-memory client against a private copy of ``tests/fixtures/home`` (config,
 state DB and the captured views the sync left in the cache), so ``create_proposal`` may store rows without touching the
@@ -29,7 +29,8 @@ from typer.testing import CliRunner
 import fm.mcp_server as server_module
 from fm import paths
 from fm.cli import app
-from fm.mcp_server import MCP_CREATED_BY, TOOL_NAMES, build_server
+from fm.jobs.report import REPORTS_DIRNAME, LeagueReport, render_markdown
+from fm.mcp_server import INSTRUCTIONS, MCP_CREATED_BY, NO_REPORT, SERVER_NAME, TOOL_NAMES, build_server, league_section
 from fm.proposals import approve, auto_approve_due, pause
 from fm.store import Store
 
@@ -40,7 +41,8 @@ NOW = datetime(2026, 10, 4, 15, 0, tzinfo=UTC)
 DEADLINE = "2026-10-04T17:00:00Z"  # the early games' kickoff, after AS_OF
 ALLEGIER, SHAHEED, ALLEN, DOWDLE, BARKLEY = 4373626, 4249836, 3918298, 4038815, 3929630
 OPEN_SLOT, BENCH_SLOT = 4, 20  # WR and the bench
-READ_TOOLS = ("status", "lineup", "waivers", "trade_eval", "list_proposals")
+READ_TOOLS = ("status", "lineup", "waivers", "trade_eval", "list_proposals", "health", "report")
+CHECK_NAMES = ("config", "session", "browser", "notify", "tick", "pause", "proposals", "deadlines")
 WRITEY = ("approv", "execut", "writ", "send", "submit", "delet", "paus", "resum")
 
 
@@ -97,6 +99,19 @@ def test_the_tool_list_is_exactly_the_allowlist() -> None:
         assert annotations is not None and annotations.readOnlyHint is True
     stores = by_name["create_proposal"].annotations
     assert stores is not None and stores.destructiveHint is False and stores.openWorldHint is False
+
+
+def test_the_server_instructions_give_the_rules() -> None:
+    async def go() -> str | None:
+        async with Client(build_server()) as client:
+            result = client.initialize_result
+            return None if result is None else result.instructions
+
+    sent = asyncio.run(go())
+    assert sent == INSTRUCTIONS
+    for needle in ("Start with status", "health", "report", "create_proposal only when the user asks", "fm ui"):
+        assert needle in INSTRUCTIONS, needle
+    assert "Never say a move was made" in INSTRUCTIONS and "fm doctor" in INSTRUCTIONS
 
 
 def test_no_tool_name_description_or_parameter_implies_a_write() -> None:
@@ -247,6 +262,107 @@ def test_list_proposals_shows_the_queue_without_the_execution_token(home: Path) 
     assert "execution_token" not in json.dumps(listed)
     assert call("list_proposals", include_closed=True)["count"] == 1
     assert call("status")["leagues"][0]["open_proposals"][0]["id"] == item["id"]
+
+
+# --- health and report ------------------------------------------------------------------------------------------------
+
+
+def call_list(tool: str, **arguments: Any) -> list[dict[str, Any]]:
+    result = call_raw(tool, **arguments)
+    assert not result.is_error, result.content
+    assert isinstance(result.data, list)
+    json.dumps(result.data)
+    return result.data
+
+
+def test_health_lists_every_check_with_its_fix(home: Path) -> None:
+    checks = call_list("health")
+    names = [check["name"] for check in checks]
+    assert set(CHECK_NAMES) <= set(names) and "sync:nfl" in names
+    for check in checks:
+        assert set(check) == {"name", "status", "detail", "fix"}
+        assert check["status"] in {"ok", "warn", "fail", "skip"}
+    assert next(check for check in checks if check["name"] == "session")["fix"] == "fm login"  # no profile in fixture
+
+
+def test_health_never_launches_a_browser(home: Path) -> None:
+    """With a signed-in profile and no fresh tick record, fm doctor would launch a browser to read the cookie; the
+    tool says "not checked recently" instead (conftest turns a real launch into a failure)."""
+    (home / "browser-profile" / "Default").mkdir(parents=True)
+    session = next(check for check in call_list("health") if check["name"] == "session")
+    assert session["status"] == "warn" and "not checked recently" in session["detail"]
+    assert session["fix"] == "fm doctor"
+
+
+def test_health_on_a_fresh_install_creates_no_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = tmp_path / "fresh"
+    config.mkdir()
+    shutil.copy(HOME / "config.toml", config / "config.toml")
+    monkeypatch.setenv(paths.CONFIG_DIR_ENV, str(config))
+    monkeypatch.setattr(server_module, "_now", lambda: NOW)
+    checks = {check["name"]: check for check in call_list("health")}
+    assert checks["tick"]["status"] == "fail"
+    assert any("no state yet" in check["detail"] for check in checks.values())
+    assert not (config / "state.db").exists()
+
+
+def weekly(*keys: str, notes: tuple[str, ...] = ()) -> str:
+    reports = [
+        LeagueReport(
+            key=key,
+            name=f"League {key}",
+            team=f"Team {key}",
+            record="3-1",
+            deadlines=(f"{key} waivers run Wednesday",),
+            notes=(f"{key}: no mMatchup capture",),
+        )
+        for key in keys
+    ]
+    return render_markdown(reports, as_of=NOW, notes=notes)
+
+
+def test_league_section_takes_one_league_and_its_notes() -> None:
+    both = weekly("nfl", "nba", notes=("odds history reset",))
+    section = league_section(both, "nfl")
+    assert section is not None
+    assert section.startswith("# Weekly report 2026-10-04")
+    assert "## nfl: League nfl" in section and "nfl waivers run Wednesday" in section
+    assert "nba" not in section
+    assert section.rstrip().endswith("- nfl: no mMatchup capture")
+    assert league_section(both, "nba") is not None and "## nfl" not in (league_section(both, "nba") or "")
+    assert league_section(weekly("nba"), "nfl") is None
+    assert league_section(weekly("nfl2"), "nfl") is None  # a key is matched whole
+
+
+def test_report_returns_each_leagues_newest_section(home: Path) -> None:
+    reports = home / "cache" / REPORTS_DIRNAME
+    reports.mkdir(parents=True, exist_ok=True)
+    older = reports / "weekly-2026-09-27.md"
+    older.write_text(weekly("nfl").replace("3-1", "2-1"), encoding="utf-8")
+    newest_without_nfl = reports / "weekly-2026-10-04.md"
+    newest_without_nfl.write_text(weekly("nba"), encoding="utf-8")
+    (reports / "odds-nfl.json").write_text("[]", encoding="utf-8")  # the odds sidecar is not a report
+    out = call("report")
+    assert list(out) == ["nfl"]
+    found = out["nfl"]
+    assert found["path"] == str(older) and found["note"] is None
+    assert "Team nfl (2-1)" in found["markdown"] and "nba" not in found["markdown"]
+    assert datetime.fromisoformat(found["written_at"]).tzinfo is not None
+    newest_without_nfl.write_text(weekly("nfl", "nba"), encoding="utf-8")
+    assert call("report", league="nfl")["nfl"]["path"] == str(newest_without_nfl)
+
+
+def test_report_without_a_report_says_how_to_make_one(home: Path) -> None:
+    assert call("report") == {"nfl": {"path": None, "written_at": None, "markdown": None, "note": NO_REPORT}}
+    assert "fm report" in NO_REPORT
+    assert not (home / "cache" / REPORTS_DIRNAME).exists()  # nothing created by asking
+    assert call_raw("report", league="nope").is_error
+
+
+def test_the_server_name_is_the_one_fm_claude_installs() -> None:
+    from fm.claude import MCP_SERVER_NAME
+
+    assert SERVER_NAME == MCP_SERVER_NAME
 
 
 # --- create_proposal --------------------------------------------------------------------------------------------------

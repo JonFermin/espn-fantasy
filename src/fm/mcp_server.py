@@ -1,7 +1,8 @@
-"""The MCP server (DESIGN section 12, ROADMAP #40): read tools plus ``create_proposal``, which never acts.
+"""The MCP server (DESIGN section 12, ROADMAP #40, #55): read tools plus ``create_proposal``, which never acts.
 
 It lets Claude Code or Claude Desktop answer "who should I start at FLEX?" from the store ``fm sync`` filled. Run it
-with ``fm mcp`` (stdio). Tools, all returning JSON-able dicts (no ANSI text):
+with ``fm mcp`` (stdio); ``fm claude install`` registers it with both clients (:mod:`fm.claude`). Tools, all returning
+JSON (no ANSI text):
 
 - ``status``, ``lineup``, ``waivers``, ``trade_eval`` and ``list_proposals``: the read views of :mod:`fm.views`
   (:func:`~fm.views.status`, :func:`~fm.views.lineup`, :func:`~fm.views.waivers`, :func:`~fm.views.trade_eval` and
@@ -9,8 +10,19 @@ with ``fm mcp`` (stdio). Tools, all returning JSON-able dicts (no ANSI text):
   parameters the client sees, pins the clock to :func:`_now` unless ``as_of`` is given, and turns a
   :class:`fm.views.ViewError` into a ``ToolError``. What each view returns, and that it stores nothing, is documented
   there.
+- ``health``: :func:`fm.health.run_checks`, offline and with ``launch_browser=False``, as a list of checks (``name``,
+  ``status``, ``detail``, ``fix``). The session verdict comes from the last tick's record: a browser launched here
+  would collide with a tick's, so only ``fm doctor`` may launch one.
+- ``report``: the latest weekly report per league, read from the reports dir ``fm report`` saves to
+  (``<cache dir>/reports/weekly-YYYY-MM-DD.md``, :data:`fm.jobs.report.REPORTS_DIRNAME`). One file holds every league
+  it was run for, so each league gets its own section (with its notes) from the newest file that has one
+  (:func:`league_section`). A report saved elsewhere with ``fm report --out`` is not seen.
 - ``create_proposal``: :func:`fm.proposals.propose` with the policy verdict. It stores one ``proposed`` row, tagged
   ``created_by = "mcp"``, and nothing else.
+
+The server's ``instructions`` (:data:`INSTRUCTIONS`) give the client the rules the ``fm claude install`` skill does:
+start with ``status``, cite the engine's numbers, store a proposal only when the user asks, and never say a move was
+made.
 
 No write path
 -------------
@@ -29,15 +41,18 @@ Workers propose, the executor acts (CLAUDE.md). This module is a worker, so it h
 - Policy refusals come back as a result (``status: "blocked"`` with every reason), never as an exception.
 
 Every tool opens the store and config per call (``FM_CONFIG_DIR`` / ``FM_CACHE_DIR`` as for the CLI), so a long-lived
-server sees what ``fm sync`` stored since it started.
+server sees what ``fm sync`` stored since it started. ``health`` and ``report`` never create state: a missing
+``state.db`` or reports dir is an answer, not something to make.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
@@ -45,9 +60,10 @@ from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field, ValidationError
 
-from fm import views
-from fm.config import Config, ConfigError, load_config
+from fm import health, paths, views
+from fm.config import Config, ConfigError, League, load_config
 from fm.decide.trades import DEFAULT_SEED, trade_etiquette
+from fm.jobs.report import REPORTS_DIRNAME
 from fm.proposals import (
     PolicyError,
     ProposalKind,
@@ -63,17 +79,35 @@ from fm.store import LeagueRow, Store
 SERVER_NAME = "espn-fantasy"
 MCP_CREATED_BY = "mcp"
 """``proposals.created_by`` of every proposal this server stores."""
-TOOL_NAMES = ("status", "lineup", "waivers", "trade_eval", "list_proposals", "create_proposal")
+TOOL_NAMES = (
+    "status",
+    "lineup",
+    "waivers",
+    "trade_eval",
+    "list_proposals",
+    "health",
+    "report",
+    "create_proposal",
+)
 """The whole tool list. Adding a tool means changing this tuple and the test that guards it."""
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 STORES_PROPOSAL = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 INSTRUCTIONS = (
-    "Personal ESPN fantasy manager for NFL (ffl) and NBA (fba) leagues. The read tools (status, lineup, waivers, "
-    "trade_eval, list_proposals) answer from the local store and change nothing. create_proposal records a suggestion "
-    "for the user to review in the fm CLI or on their phone; it never changes a league, and trades always need the "
-    "user's explicit review. Names are looked up for display, but every move is made of ESPN ids."
+    "Personal ESPN fantasy manager for the user's own NFL and NBA leagues. Start with status: it lists the leagues and "
+    "their keys, how fresh each sync is and what is queued. Then use lineup, waivers and trade_eval for advice, report "
+    "for the latest weekly report and health when data looks stale or a tool fails; when health shows a problem, give "
+    "the user the fix it names (fm doctor shows every check, fm setup repairs the configuration). These tools answer "
+    "from the local store and change nothing. Cite the engine's numbers (expected points, win probability, value, "
+    "odds) rather than your own estimates, and say when an input is missing instead of guessing. Call create_proposal "
+    "only when the user asks to queue a move: it records a suggestion and changes no league. Never say a move was "
+    "made: the user decides on their phone or in the dashboard (fm ui), and only fm itself acts on ESPN after that. "
+    "Trades always need the user's explicit decision. Names are looked up for display, but every move is made of ESPN "
+    "ids."
 )
 MAX_RATIONALE = 2000
+REPORT_GLOB = "weekly-*.md"
+"""The weekly reports ``fm report`` saves (``fm.jobs.report.report_path``); the name sorts by date."""
+NO_REPORT = "no weekly report for this league yet; run fm report"
 
 LeagueArg = Annotated[
     str | None,
@@ -161,6 +195,66 @@ def _list_proposals(
     limit: Annotated[int, Field(ge=1, le=200, description="At most this many, newest first.")] = 50,
 ) -> dict[str, Any]:
     return _answer(views.list_proposals, league, include_closed=include_closed, limit=limit)
+
+
+def _health() -> list[dict[str, str | None]]:
+    # Never launch a browser from here: a launch beside a tick's makes the tick's own session check fail.
+    return [check.as_dict() for check in health.run_checks(now=_now(), launch_browser=False)]
+
+
+def _report(league: LeagueArg = None) -> dict[str, Any]:
+    config = _config()
+    selected = _select(config, league)
+    directory = paths.cache_dir() / REPORTS_DIRNAME
+    files = sorted(directory.glob(REPORT_GLOB), key=lambda path: path.name, reverse=True) if directory.is_dir() else []
+    texts: dict[Path, str] = {}
+    found: dict[str, Any] = {}
+    for configured in selected:
+        found[configured.key] = {"path": None, "written_at": None, "markdown": None, "note": NO_REPORT}
+        for path in files:
+            if path not in texts:
+                texts[path] = path.read_text(encoding="utf-8", errors="replace")
+            section = league_section(texts[path], configured.key)
+            if section is not None:
+                found[configured.key] = {
+                    "path": str(path),
+                    "written_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+                    "markdown": section,
+                    "note": None,
+                }
+                break
+    return found
+
+
+def _select(config: Config, key: str | None) -> list[League]:
+    if key is None:
+        return list(config.leagues)
+    chosen = [configured for configured in config.leagues if configured.key == key]
+    if not chosen:
+        known = ", ".join(configured.key for configured in config.leagues) or "none"
+        raise ToolError(f"no league {key!r} in config.toml; known: {known}")
+    return chosen
+
+
+def league_section(markdown: str, key: str) -> str | None:
+    """One league's part of a weekly report (:func:`fm.jobs.report.render_markdown`): the title lines, its
+    ``## <key>: <name>`` section and its own lines from ``## Notes``. ``None`` when the report does not cover the
+    league (``fm report --league`` covers one)."""
+    lines = markdown.splitlines()
+    heading = re.compile(rf"^## {re.escape(key)}: ")
+    start = next((index for index, line in enumerate(lines) if heading.match(line)), None)
+    if start is None:
+        return None
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")), len(lines))
+    first_section = next(index for index, line in enumerate(lines) if line.startswith("## "))
+    notes_at = next((index for index, line in enumerate(lines) if line == "## Notes"), None)
+    notes = [] if notes_at is None else [line for line in lines[notes_at + 1 :] if line.startswith(f"- {key}: ")]
+    body = [*lines[:first_section], *lines[start:end]]
+    while body and not body[-1].strip():
+        body.pop()
+    if notes:
+        body += ["", "## Notes", "", *notes]
+    return "\n".join(body) + "\n"
 
 
 # --- create_proposal --------------------------------------------------------------------------------------------------
@@ -338,6 +432,23 @@ def build_server() -> FastMCP:
         _list_proposals,
         name="list_proposals",
         description="The proposal queue with each proposal's kind, status, policy, payload and rationale.",
+        annotations=READ_ONLY,
+    )
+    server.tool(
+        _health,
+        name="health",
+        description="Is the fm installation healthy? One check each for the config, the ESPN session, the browser, "
+        "the phone channel, the last tick, each league's sync age, the kill switch, the open proposals and their "
+        "deadlines, and today's LLM spend: status ok, warn, fail or skip, a detail and the command that fixes it. "
+        "Local state only; nothing is launched.",
+        annotations=READ_ONLY,
+    )
+    server.tool(
+        _report,
+        name="report",
+        description="The latest weekly report per league (from fm report): matchup outlook, playoff odds and their "
+        "trend, moves made and upcoming deadlines, as markdown with the file and its time, or a note when there is "
+        "none yet. Read from disk; nothing is generated.",
         annotations=READ_ONLY,
     )
     server.tool(
