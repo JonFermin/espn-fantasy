@@ -3,11 +3,18 @@
 # Columns:
 #   espn_id    the ESPN player id
 #   source     nba (the nba.com person id, as stats.nba.com and DARKO key players)
-#   source_id  the player's nba.com person id (digits, like 203999); leave it empty to keep him unmapped
+#   source_id  the player's nba.com person id: the digits in his www.nba.com/player/<id>/ address, like 203999. Leave
+#              it empty to run him without one, as a player with no history (DARKO and the stats baseline key players
+#              by nba.com id and skip him; ESPN's projection values him)
 #   name,note  for humans: who this is, and why matching by name, team and position needed help
 #
+# Example (synthetic): 9000001,nba,1641999,Veteran Two,ESPN has him on DEN after a trade; nba.com still on SAC
+#
 # A row pins the player to that nba.com id whatever the name match says, and takes the id out of play for everyone
-# else. When `fm sync` stops on an unmapped rostered player (no nba.com player with that name, several of them, or one
-# on another team at another position), the error says why and names the near misses on his team; add a row here and
-# run it again. A row also confirms a partial match (Herb Jones -> Herbert Jones) and silences its warning.
+# else. The match already maps a player whose name only one nba.com player has, even when the team and position
+# disagree (a warning), and lets a rostered player nba.com lists nobody for through as no history (a rookie: also a
+# warning). `fm sync` stops only on a rostered player whose identity is in doubt: several nba.com players fit him, or
+# his namesake is mapped to someone else. Its error says why, names the candidates and prints the line to complete;
+# add it here and sync again. A row also confirms a partial match (Herb Jones -> Herbert Jones) and silences its
+# warning, and one with an empty source_id undoes a wrong match on the name alone.
 espn_id,source,source_id,name,note
