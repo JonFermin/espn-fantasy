@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="fm-token" content="__FM_TOKEN__">
+<title>espn-fantasy</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <h1>espn-fantasy</h1>
+  <p class="top-status muted" id="top-status" aria-live="polite">Loading…</p>
+  <button type="button" id="refresh" class="ghost">Refresh</button>
+</header>
+
+<div class="banner" id="pause-banner" role="status" hidden>
+  <p><strong>Paused.</strong> <span id="pause-detail"></span> Nothing automatic runs and nothing executes.</p>
+  <button type="button" id="resume">Resume</button>
+</div>
+
+<nav class="tabs" aria-label="Sections">
+  <a href="#overview" data-tab="overview">Overview</a>
+  <a href="#proposals" data-tab="proposals">Proposals <span class="count" id="proposal-count" hidden></span></a>
+  <a href="#lineup" data-tab="lineup">Lineup</a>
+  <a href="#waivers" data-tab="waivers">Waivers</a>
+  <a href="#reports" data-tab="reports">Reports</a>
+  <a href="#settings" data-tab="settings">Settings</a>
+  <a href="#health" data-tab="health">Health</a>
+</nav>
+
+<main id="main" tabindex="-1">
+  <section id="overview" data-section="overview" aria-labelledby="overview-title" hidden>
+    <h2 id="overview-title">Overview</h2>
+    <div class="body" aria-live="polite"></div>
+  </section>
+
+  <section id="proposals" data-section="proposals" aria-labelledby="proposals-title" hidden>
+    <h2 id="proposals-title">Proposals</h2>
+    <p class="muted">Approving records your decision; <code>fm run</code> (or the scheduled tick) executes it at its time.
+      Trades always wait for you.</p>
+    <label class="check"><input type="checkbox" id="proposals-all"> Show decided and finished proposals</label>
+    <div class="body" aria-live="polite"></div>
+  </section>
+
+  <section id="lineup" data-section="lineup" aria-labelledby="lineup-title" hidden>
+    <h2 id="lineup-title">Lineup</h2>
+    <p class="muted">The engine's plan for the synced scoring period. Read-only: nothing is stored or sent.</p>
+    <label class="field">League <select id="lineup-league"></select></label>
+    <div class="body" aria-live="polite"></div>
+  </section>
+
+  <section id="waivers" data-section="waivers" aria-labelledby="waivers-title" hidden>
+    <h2 id="waivers-title">Waivers</h2>
+    <p class="muted">The pickups the engine would make and the best free agents by rest-of-season value. Read-only.</p>
+    <label class="field">League <select id="waivers-league"></select></label>
+    <div class="body" aria-live="polite"></div>
+  </section>
+
+  <section id="reports" data-section="reports" aria-labelledby="reports-title" hidden>
+    <h2 id="reports-title">Reports</h2>
+    <div class="body"></div>
+    <article class="report" id="report-view" aria-live="polite"></article>
+  </section>
+
+  <section id="settings" data-section="settings" aria-labelledby="settings-title" hidden>
+    <h2 id="settings-title">Settings</h2>
+    <p class="muted">Changes are written to <code>config.toml</code> (the previous file is kept as
+      <code>config.toml.bak</code>) and apply from the next tick.</p>
+    <div class="body"></div>
+  </section>
+
+  <section id="health" data-section="health" aria-labelledby="health-title" hidden>
+    <h2 id="health-title">Health</h2>
+    <p class="muted">The offline checks of <code>fm doctor</code>; run <code>fm doctor --online</code> in a terminal
+      for the ESPN and phone checks.</p>
+    <div class="body" aria-live="polite"></div>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="alert" hidden></div>
+</body>
+</html>

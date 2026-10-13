@@ -116,6 +116,9 @@ MODULES = (
     "fm.notify.setup",
     "fm.setup",
     "fm.setup.wizard",
+    "fm.web",
+    "fm.web.app",
+    "fm.web.server",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
