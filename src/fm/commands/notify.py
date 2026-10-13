@@ -7,31 +7,23 @@ command prints a one-time code and a ``t.me`` link that sends it; the private ch
 way a test push follows, so the command doubles as a check that the channel works. Run again with ``.env`` already
 filled in, it only sends the test push; ``--replace`` captures or generates afresh. A config with ``channel = "none"``
 (no phone) has nothing to set up, so the command then needs ``--channel`` to say which one to add.
+
+The setup itself lives in :mod:`fm.notify.setup`, which the ``fm setup`` wizard shares; this command reads the current
+secrets from ``config.toml``'s ``.env`` and hands them over.
 """
 
 from __future__ import annotations
 
-import secrets
 from enum import StrEnum
-from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
-from dotenv import set_key
 
-from fm import paths
-from fm.config import Config, ConfigError, config_paths, load_config
-from fm.notify import Message, NotifyError, NtfyChannel, TelegramChannel, generate_topic
-from fm.notify.ntfy import DEFAULT_SERVER, REPLY_TOPIC_ENV, SINCE_FILE, TOPIC_ENV
-from fm.notify.telegram import CHAT_ID_ENV, TOKEN_ENV
+from fm.config import ConfigError, config_paths, load_config
+from fm.notify import NotifyError
+from fm.notify.setup import DEFAULT_WAIT_S, saved_token, saved_topics, setup_code, setup_ntfy, setup_telegram
 
 app = typer.Typer(help="Phone notifications and approvals: Telegram or ntfy.", no_args_is_help=True)
-
-DEFAULT_WAIT_S = 180.0
-TEST_MESSAGE = Message(
-    title="espn-fantasy: notifications are set up",
-    body="Proposals arrive here with Approve and Reject buttons; fm bot records what you press.",
-)
 
 
 class ChannelChoice(StrEnum):
@@ -66,69 +58,26 @@ def setup(
     if name == "none":
         _fail(
             f'{config_path} says channel = "none" (no phone): pass --channel telegram or --channel ntfy to set one up, '
-            'then set that channel under [notify]'
+            "then set that channel under [notify]"
         )
+    found = config.secrets
     try:
         if name == "telegram":
-            _setup_telegram(config, env_path, timeout, replace)
+            setup_telegram(
+                env_path,
+                token=saved_token(found),
+                chat_id=found.telegram_chat_id,
+                echo=typer.echo,
+                timeout_s=timeout,
+                replace=replace,
+                code=setup_code,  # looked up at call time, so a test can pin the code
+            )
         else:
-            _setup_ntfy(config, env_path, replace)
+            setup_ntfy(env_path, topics=saved_topics(found), echo=typer.echo, replace=replace)
     except NotifyError as exc:
         _fail(str(exc))
     if name != config.notify.channel:
-        typer.echo(f'Set channel = "{name}" under [notify] in {config_path} so fm bot listens on it.')
-
-
-def setup_code() -> str:
-    """The one-time code the Telegram chat must send: six random digits."""
-    return f"{secrets.randbelow(1_000_000):06d}"
-
-
-def _setup_telegram(config: Config, env_path: Path, timeout_s: float, replace: bool) -> None:
-    token = config.secrets.telegram_bot_token
-    if token is None:
-        raise NotifyError(
-            f"{TOKEN_ENV} is not set in {env_path}: create a bot with @BotFather (/newbot) and put its token there"
-        )
-    chat_id = None if replace else config.secrets.telegram_chat_id
-    with TelegramChannel(token.get_secret_value(), chat_id) as telegram:
-        username = telegram.username()
-        typer.echo(f"Bot token works: @{username}.")
-        if telegram.chat_id is None:
-            code = setup_code()
-            typer.echo(f"On your phone, open https://t.me/{username}?start={code} and tap Start,")
-            typer.echo(f"or send @{username} the code {code}. Waiting {timeout_s:.0f}s...")
-            capture = telegram.wait_for_chat(code, timeout_s=timeout_s)
-            if capture is None:
-                raise NotifyError("the code did not reach the bot in time; run fm notify setup again")
-            telegram.chat_id = capture.chat_id
-            set_key(env_path, CHAT_ID_ENV, str(capture.chat_id), quote_mode="never")
-            who = f" with {capture.name}" if capture.name else ""
-            typer.echo(f"Saved {CHAT_ID_ENV} (your private chat{who}) to {env_path}.")
-        else:
-            typer.echo(f"{CHAT_ID_ENV} is already set; --replace captures it again.")
-        telegram.send(TEST_MESSAGE)
-    typer.echo("Sent a test message to that chat. Run fm bot to record what you press.")
-
-
-def _setup_ntfy(config: Config, env_path: Path, replace: bool) -> None:
-    topic, reply_topic = config.secrets.ntfy_topic, config.secrets.ntfy_reply_topic
-    if replace or topic is None or reply_topic is None:
-        names = (generate_topic(), generate_topic())
-        set_key(env_path, TOPIC_ENV, names[0], quote_mode="never")
-        set_key(env_path, REPLY_TOPIC_ENV, names[1], quote_mode="never")
-        (paths.config_dir() / SINCE_FILE).unlink(missing_ok=True)  # it points into the old reply topic
-        typer.echo(f"Generated {TOPIC_ENV} and {REPLY_TOPIC_ENV} and saved them to {env_path}.")
-    else:
-        names = (topic.get_secret_value(), reply_topic.get_secret_value())
-        typer.echo(f"{TOPIC_ENV} and {REPLY_TOPIC_ENV} are already set; --replace generates new ones.")
-    typer.echo(f"In the ntfy app, subscribe to this topic on {DEFAULT_SERVER} (the name is the secret; share it with")
-    typer.echo("nobody, and never subscribe to the reply topic, which is for the PC):")
-    typer.echo(f"  {names[0]}")
-    with NtfyChannel(*names) as ntfy:
-        ntfy.send(TEST_MESSAGE)
-    typer.echo("Sent a test notification (subscribed later? run fm notify setup again for a fresh one).")
-    typer.echo("Run fm bot to record what you press.")
+        typer.echo(f'Set channel = "{name}" under [notify] in {config_path} so fm run listens on it.')
 
 
 def _fail(message: str) -> NoReturn:
