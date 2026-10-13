@@ -19,6 +19,13 @@ macOS:
 Every ``render_*`` function is pure and :func:`install_agent`, :func:`uninstall_agent` and :func:`show_agent` take an
 injectable :class:`Runner`, so tests render the commands and never touch launchd. ``fm schedule`` drives this backend
 through :data:`MACOS`.
+
+The logon job for ``fm run`` (PLUG_AND_PLAY section 4, :data:`MACOS_AUTOSTART`, driven by ``fm autostart``) is a
+second LaunchAgent, ``local.espn-fantasy-run.plist``, with ``RunAtLoad`` (start at login) and ``KeepAlive`` (restart
+whenever it exits), loaded into the same GUI domain. It needs no wrapper: the ``FM_*`` overrides go in the plist's
+``EnvironmentVariables``, and the loop writes its own ``logs/run.log``; launchd's capture of its stdout/stderr (what
+``uv run`` prints before Python starts) goes to ``logs/run-launchd.log``. The tick agent stays installed beside it
+(the run lock, :mod:`fm.jobs.runlock`, makes a tick that meets the loop exit at once).
 """
 
 from __future__ import annotations
@@ -31,7 +38,11 @@ import time
 from pathlib import Path
 
 from fm.jobs.scheduler_base import (
+    WAKE_TIMER_NOTE,
+    AutostartBackend,
+    AutostartSpec,
     Backend,
+    JobSpec,
     Runner,
     RunResult,
     ScheduleReport,
@@ -45,6 +56,8 @@ LABEL_PREFIX = "local."
 LAUNCHCTL = "launchctl"
 LAUNCHD_LOG_FILENAME = "launchd.log"
 """launchd's own stdout/stderr for the job: what the wrapper printed before its redirect (a failed ``cd``)."""
+RUN_LAUNCHD_LOG_FILENAME = "run-launchd.log"
+"""launchd's capture of the run agent's stdout/stderr, separate from the loop's own ``run.log``."""
 AGENT_NOT_FOUND_MARKERS = ("could not find service", "no such process", "service is not loaded")
 """Substrings (lower-case) that mean "no such job" in launchctl output."""
 SHELL = "/bin/sh"
@@ -72,11 +85,11 @@ def current_uid() -> int:
     return int(getuid())
 
 
-def agent_label(spec: ScheduleSpec) -> str:
+def agent_label(spec: JobSpec) -> str:
     return f"{LABEL_PREFIX}{spec.task_name}"
 
 
-def plist_path(spec: ScheduleSpec) -> Path:
+def plist_path(spec: JobSpec) -> Path:
     return launch_agents_dir() / f"{agent_label(spec)}.plist"
 
 
@@ -84,7 +97,7 @@ def _domain() -> str:
     return f"gui/{current_uid()}"
 
 
-def _service(spec: ScheduleSpec) -> str:
+def _service(spec: JobSpec) -> str:
     return f"{_domain()}/{agent_label(spec)}"
 
 
@@ -136,20 +149,20 @@ def render_plist(spec: ScheduleSpec) -> bytes:
     return plistlib.dumps(agent, fmt=plistlib.FMT_XML, sort_keys=False)
 
 
-def render_launchctl_enable(spec: ScheduleSpec) -> list[str]:
+def render_launchctl_enable(spec: JobSpec) -> list[str]:
     """Clears a ``launchctl disable`` left from before, which would make the bootstrap fail."""
     return [LAUNCHCTL, "enable", _service(spec)]
 
 
-def render_launchctl_bootstrap(spec: ScheduleSpec) -> list[str]:
+def render_launchctl_bootstrap(spec: JobSpec) -> list[str]:
     return [LAUNCHCTL, "bootstrap", _domain(), str(plist_path(spec))]
 
 
-def render_launchctl_bootout(spec: ScheduleSpec) -> list[str]:
+def render_launchctl_bootout(spec: JobSpec) -> list[str]:
     return [LAUNCHCTL, "bootout", _service(spec)]
 
 
-def render_launchctl_print(spec: ScheduleSpec) -> list[str]:
+def render_launchctl_print(spec: JobSpec) -> list[str]:
     return [LAUNCHCTL, "print", _service(spec)]
 
 
@@ -178,7 +191,7 @@ WAKE_NOTE = (
 )
 
 
-def _report(action: str, spec: ScheduleSpec) -> ScheduleReport:
+def _report(action: str, spec: JobSpec) -> ScheduleReport:
     return ScheduleReport(action=action, task_name=agent_label(spec), backend="macos", unit="agent")
 
 
@@ -216,7 +229,7 @@ def install_agent(spec: ScheduleSpec, runner: Runner) -> ScheduleReport:
     return report
 
 
-def _wait_unloaded(spec: ScheduleSpec, runner: Runner, report: ScheduleReport) -> None:
+def _wait_unloaded(spec: JobSpec, runner: Runner, report: ScheduleReport) -> None:
     argv = render_launchctl_print(spec)
     for attempt in range(UNLOAD_WAIT_ATTEMPTS):
         if is_agent_missing(runner(argv)):
@@ -283,13 +296,122 @@ MACOS = Backend(
 )
 """This backend as ``fm schedule`` drives it."""
 
+
+# --- the logon job: fm run as a KeepAlive agent -----------------------------------------------------------------------
+
+
+def render_run_plist(spec: AutostartSpec) -> bytes:
+    """The run agent's plist (XML): ``fm run`` from the repo at login, kept alive, with the ``FM_*`` overrides."""
+    launchd_log = str(spec.logs_dir / RUN_LAUNCHD_LOG_FILENAME)
+    agent: dict[str, object] = {
+        "Label": agent_label(spec),
+        "ProgramArguments": spec.argv(),
+        "WorkingDirectory": str(spec.repo_root),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ProcessType": "Interactive",
+        "StandardOutPath": launchd_log,
+        "StandardErrorPath": launchd_log,
+    }
+    env = spec.env()
+    if env:
+        agent["EnvironmentVariables"] = env
+    return plistlib.dumps(agent, fmt=plistlib.FMT_XML, sort_keys=False)
+
+
+def render_autostart_agent_plan(spec: AutostartSpec) -> list[str]:
+    """What :func:`install_autostart_agent` would do, as lines, for ``fm autostart install --dry-run``."""
+    lines = [f"agent {plist_path(spec)}:"]
+    lines.extend(f"  {line}" for line in render_run_plist(spec).decode("utf-8").splitlines())
+    lines.append("commands:")
+    for argv in (render_launchctl_bootout(spec), render_launchctl_enable(spec), render_launchctl_bootstrap(spec)):
+        lines.append("  " + shlex.join(argv))
+    return lines
+
+
+def install_autostart_agent(spec: AutostartSpec, runner: Runner) -> ScheduleReport:
+    """Write the plist, unload an older copy, then load the agent (which starts ``fm run`` at once, ``RunAtLoad``).
+    Raises :class:`SchedulerError` when the bootstrap fails. The tick agent is left alone."""
+    report = _report("install", spec)
+    spec.logs_dir.mkdir(parents=True, exist_ok=True)
+    plist = plist_path(spec)
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_bytes(render_run_plist(spec))
+    report.files.append(plist)
+
+    bootout = render_launchctl_bootout(spec)
+    report.commands.append(bootout)
+    if runner(bootout).ok:
+        _wait_unloaded(spec, runner, report)
+    enable = render_launchctl_enable(spec)
+    report.commands.append(enable)
+    enabled = runner(enable)
+    if not enabled.ok:
+        report.notes.append(f"{agent_label(spec)}: launchctl enable failed ({enabled.output or enabled.returncode})")
+    bootstrap = render_launchctl_bootstrap(spec)
+    report.commands.append(bootstrap)
+    result = runner(bootstrap)
+    if not result.ok:
+        raise SchedulerError(f"launchctl bootstrap {agent_label(spec)} failed ({result.returncode}): {result.output}")
+    report.installed = True
+    report.notes.append(WAKE_TIMER_NOTE)
+    return report
+
+
+def uninstall_autostart_agent(spec: AutostartSpec, runner: Runner) -> ScheduleReport:
+    """Unload the agent (which stops ``fm run``; a missing agent is not an error) and remove the plist."""
+    report = _report("uninstall", spec)
+    argv = render_launchctl_bootout(spec)
+    report.commands.append(argv)
+    result = runner(argv)
+    if not result.ok:
+        if is_agent_missing(result):
+            report.notes.append(f"{agent_label(spec)}: not loaded")
+        else:
+            raise SchedulerError(f"launchctl bootout {agent_label(spec)} failed ({result.returncode}): {result.output}")
+    plist = plist_path(spec)
+    if plist.exists():
+        plist.unlink()
+        report.files.append(plist)
+    return report
+
+
+def show_autostart_agent(spec: AutostartSpec, runner: Runner) -> str:
+    """``launchctl print`` for the run agent plus the plist's location. Never raises."""
+    label = agent_label(spec)
+    plist = plist_path(spec)
+    files = f"Plist:                                {plist}{'' if plist.is_file() else ' (not written)'}"
+    try:
+        result = runner(render_launchctl_print(spec))
+    except SchedulerError as exc:
+        return f"{label}: cannot query launchd ({exc})\n{files}"
+    if result.ok:
+        return result.stdout.strip() + "\n" + files
+    if is_agent_missing(result):
+        return f"{label}: not installed (fm autostart install)\n{files}"
+    return f"{label}: error ({result.returncode}): {result.output}"
+
+
+MACOS_AUTOSTART = AutostartBackend(
+    name="macos",
+    scheduler="launchd",
+    build_spec=AutostartSpec.build,
+    plan=render_autostart_agent_plan,
+    install=install_autostart_agent,
+    uninstall=uninstall_autostart_agent,
+    show=show_autostart_agent,
+)
+"""The logon job as ``fm autostart`` drives it."""
+
 __all__ = [
     "AGENT_NOT_FOUND_MARKERS",
     "LABEL_PREFIX",
     "LAUNCHCTL",
     "LAUNCHD_LOG_FILENAME",
     "MACOS",
+    "MACOS_AUTOSTART",
     "MACOS_WRAPPER_SUFFIX",
+    "RUN_LAUNCHD_LOG_FILENAME",
     "SHELL",
     "UNLOAD_WAIT_ATTEMPTS",
     "UNLOAD_WAIT_SECONDS",
@@ -298,16 +420,21 @@ __all__ = [
     "agent_wrapper_env",
     "current_uid",
     "install_agent",
+    "install_autostart_agent",
     "is_agent_missing",
     "launch_agents_dir",
     "plist_path",
     "render_agent_plan",
+    "render_autostart_agent_plan",
     "render_launchctl_bootout",
     "render_launchctl_bootstrap",
     "render_launchctl_enable",
     "render_launchctl_print",
     "render_plist",
+    "render_run_plist",
     "render_wrapper_sh",
     "show_agent",
+    "show_autostart_agent",
     "uninstall_agent",
+    "uninstall_autostart_agent",
 ]
