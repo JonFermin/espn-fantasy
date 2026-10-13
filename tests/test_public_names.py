@@ -113,6 +113,9 @@ MODULES = (
     "fm.jobs.proctree",
     "fm.claude",
     "fm.claude.install",
+    "fm.notify.setup",
+    "fm.setup",
+    "fm.setup.wizard",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""

@@ -57,7 +57,7 @@ from fm.config_edit import add_leagues, render_config, set_notify_channel, set_v
 from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus, describe
 from fm.espn.discover import DiscoveredLeague, DiscoveryError, LeagueRef, parse_league_url
 from fm.notify import NotifyError
-from fm.notify.setup import Echo, saved_token, saved_topics, setup_ntfy, setup_telegram
+from fm.notify.setup import DEFAULT_WAIT_S, Echo, saved_token, saved_topics, setup_ntfy, setup_telegram
 from fm.presets import PRESET_DESCRIPTIONS, PRESET_NAMES, PresetName
 
 DEFAULT_PRESET: PresetName = "balanced"
@@ -91,8 +91,8 @@ SECRET_PROMPTS: tuple[SecretPrompt, ...] = (
     ),
     SecretPrompt(
         "ODDS_API_KEY",
-        "The Odds API key, optional (hidden; Enter skips)",
-        "optional: projections go without betting lines",
+        "The Odds API key (the-odds-api.com, free tier), optional (hidden; Enter skips)",
+        "it only adds the sportsbooks' posted team totals; ESPN's lines are read either way",
     ),
 )
 
@@ -334,15 +334,17 @@ def notify_setup(
     *,
     prompts: Prompts,
     echo: Echo,
+    timeout_s: float = DEFAULT_WAIT_S,
 ) -> None:
     """The live :class:`ChannelSetup`: :mod:`fm.notify.setup`, with the Telegram token asked for (hidden) when
-    ``.env`` has none."""
+    ``.env`` has none, and ``timeout_s`` to wait for the chat to send its code."""
     if channel == "telegram":
         setup_telegram(
             env_path,
             token=saved_token(found),
             chat_id=found.telegram_chat_id,
             echo=echo,
+            timeout_s=timeout_s,
             ask_token=lambda: prompts.secret("Telegram bot token from @BotFather (hidden)"),
         )
     else:
