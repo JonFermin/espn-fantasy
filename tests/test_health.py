@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -32,9 +33,11 @@ from fm.espn.auth import EspnSession, NotLoggedInError
 from fm.espn.client import EspnClient
 from fm.health import (
     DEADLINE_SOON,
+    NO_STATE,
     SYNC_FAIL_AFTER,
     SYNC_WARN_AFTER,
     TICK_FAIL_AFTER,
+    TICK_LATE_FIX,
     TICK_STATE_FILE,
     TICK_WARN_AFTER,
     Check,
@@ -43,6 +46,7 @@ from fm.health import (
     has_failure,
     run_checks,
 )
+from fm.jobs.runlock import RunLock
 from fm.proposals import pause
 from fm.store import LlmUsageRow, ProposalRow, Store
 
@@ -95,9 +99,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def checks(**overrides: Any) -> dict[str, Check]:
-    """Run the checks with a pinned clock, a saved OK session and Edge installed unless overridden."""
+    """Run the checks as ``fm doctor`` does (allowed to load the session when no fresh tick record says it) with a
+    pinned clock, a saved OK session and Edge installed unless overridden."""
     kwargs: dict[str, Any] = {
         "now": NOW,
+        "launch_browser": True,
         "session_loader": lambda: SESSION,
         "browsers": lambda: {"msedge": EDGE},
         # Online collaborators default to fakes, so no test reaches the network by leaving one out.
@@ -117,9 +123,28 @@ def make_profile(home: Path) -> None:
     (profile / "Default").mkdir()  # any entry inside counts as "a browser wrote here"
 
 
-def write_tick(home: Path, at: datetime | str) -> None:
+def write_tick(home: Path, at: datetime | str, *, session: dict[str, str | None] | None = None) -> None:
     stamp = at if isinstance(at, str) else at.isoformat()
-    (home / TICK_STATE_FILE).write_text(json.dumps({"last_tick": stamp, "runs": {}}), encoding="utf-8")
+    state: dict[str, Any] = {"last_tick": stamp, "runs": {}}
+    if session is not None:
+        state["session"] = session
+    (home / TICK_STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
+
+
+def session_record(
+    status: str, *, checked: timedelta = timedelta(minutes=5), expires_at: datetime | None = None, detail: str = ""
+) -> dict[str, str | None]:
+    """A tick's session record (``fm.jobs.tick.session_record``) checked ``checked`` before NOW."""
+    return {
+        "status": status,
+        "expires_at": None if expires_at is None else expires_at.isoformat(),
+        "checked_at": (NOW - checked).isoformat(),
+        "detail": detail or f"recorded verdict {status}",
+    }
+
+
+def refuse_launch() -> EspnSession:
+    raise AssertionError("the session loader starts a browser; this check must not call it")
 
 
 def make_ready(home: Path) -> None:
@@ -282,6 +307,98 @@ def test_the_profile_dir_is_injectable(home: Path, tmp_path: Path) -> None:
     assert checks(profile_dir=tmp_path / "nowhere")["session"].status is CheckStatus.FAIL
 
 
+# --- session: the tick's record first, a browser only for fm doctor with the lock free --------------------------------
+
+
+@pytest.mark.parametrize("launch_browser", [False, True])
+def test_a_fresh_tick_record_is_the_verdict_and_no_browser_starts(home: Path, launch_browser: bool) -> None:
+    make_profile(home)
+    write_tick(home, NOW - timedelta(minutes=5), session=session_record("ok", expires_at=NOW + timedelta(days=30)))
+    check = checks(session_loader=refuse_launch, launch_browser=launch_browser)["session"]
+    assert check.status is CheckStatus.OK and check.fix is None
+    assert check.detail.startswith("ESPN session OK until") and "(the tick checked it 5 min ago)" in check.detail
+    assert not (home / "run.lock").exists()  # no launch, so the run lock was not even taken
+
+
+@pytest.mark.parametrize(
+    ("record", "status", "fix", "fragment"),
+    [
+        (session_record("expiring", expires_at=NOW + timedelta(days=3)), CheckStatus.WARN, "fm login", "expires soon"),
+        (session_record("expired", expires_at=NOW - timedelta(days=1)), CheckStatus.FAIL, "fm login", "expired on"),
+        (session_record("missing", detail="no ESPN session in the profile"), CheckStatus.FAIL, "fm login", "no ESPN"),
+        (session_record("unavailable", detail="could not read the ESPN session"), CheckStatus.WARN, None, "held"),
+        # The tick judged it OK a few minutes ago, but the cookie has expired since: judged again against now.
+        (session_record("ok", expires_at=NOW - timedelta(minutes=1)), CheckStatus.FAIL, "fm login", "expired on"),
+    ],
+)
+def test_a_fresh_tick_record_gives_each_verdict(
+    home: Path, record: dict[str, str | None], status: CheckStatus, fix: str | None, fragment: str
+) -> None:
+    make_profile(home)
+    write_tick(home, NOW - timedelta(minutes=5), session=record)
+    check = checks(session_loader=refuse_launch)["session"]
+    assert (check.status, check.fix) == (status, fix)
+    assert fragment in check.detail
+
+
+def test_the_dashboard_never_launches_and_points_at_fm_doctor(home: Path) -> None:
+    make_profile(home)
+    found = checks(session_loader=refuse_launch, launch_browser=False)
+    assert found["session"] == Check(
+        "session",
+        CheckStatus.WARN,
+        "ESPN session not checked recently: no tick has recorded it yet; fm doctor checks it",
+        fix="fm doctor",
+    )
+    write_tick(home, NOW - timedelta(minutes=5), session=session_record("ok", checked=timedelta(hours=2)))
+    check = checks(session_loader=refuse_launch, launch_browser=False)["session"]
+    assert check.status is CheckStatus.WARN and check.fix == "fm doctor"
+    assert "the last tick checked it 2 h 0 min ago (ok)" in check.detail
+    assert not (home / "run.lock").exists()
+
+
+def test_fm_doctor_does_not_launch_beside_a_run_lock_holder(home: Path) -> None:
+    make_profile(home)
+    with RunLock(command="fm run"):
+        check = checks(session_loader=refuse_launch)["session"]
+        assert check.status is CheckStatus.WARN and check.fix == "fm login --check"
+        assert f"fm run (pid {os.getpid()})" in check.detail and "no browser is started beside it" in check.detail
+        # A fresh record still answers while the lock is held.
+        write_tick(home, NOW - timedelta(minutes=5), session=session_record("ok"))
+        assert checks(session_loader=refuse_launch)["session"].status is CheckStatus.OK
+
+
+def test_fm_doctor_holds_the_run_lock_while_it_launches_and_releases_it(home: Path) -> None:
+    make_profile(home)
+    write_tick(home, NOW - timedelta(minutes=5), session=session_record("ok", checked=timedelta(hours=1)))
+    seen: list[str | None] = []
+
+    def loader() -> EspnSession:
+        holder = RunLock().holder()
+        seen.append(holder.command if holder is not None and RunLock().is_locked() else None)
+        return SESSION
+
+    check = checks(session_loader=loader)["session"]
+    assert check.status is CheckStatus.OK and "ESPN session OK until" in check.detail
+    assert seen == ["fm doctor"]  # a tick that fires now skips instead of launching beside it
+    assert not RunLock().is_locked() and RunLock().holder() is None
+
+
+def test_an_online_doctor_loads_the_cookies_even_with_a_fresh_record(home: Path) -> None:
+    make_ready(home)
+    write_tick(home, NOW - timedelta(minutes=5), session=session_record("ok"))
+    loads: list[str] = []
+
+    def loader() -> EspnSession:
+        loads.append("loaded")
+        return SESSION
+
+    found = checks(online=True, session_loader=loader, client_factory=espn_factory(_status_ok))
+    assert loads == ["loaded"] and found["espn:nfl"].status is CheckStatus.OK
+    found = checks(online=True, session_loader=refuse_launch, launch_browser=False)
+    assert found["espn:nfl"].status is CheckStatus.SKIP  # the dashboard never launches, so it has no cookies
+
+
 # --- browser ----------------------------------------------------------------------------------------------------------
 
 
@@ -321,6 +438,21 @@ def test_the_ntfy_channel_needs_both_topics(home: Path) -> None:
     assert checks()["notify"] == Check("notify", CheckStatus.OK, "ntfy configured")
 
 
+def test_no_phone_channel_is_a_warning_not_a_failure(home: Path) -> None:
+    (home / "config.toml").write_text(NTFY_CONFIG.replace('channel = "ntfy"', 'channel = "none"'), encoding="utf-8")
+    (home / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-test\n", encoding="utf-8")
+    found = checks(online=True, http_client=httpx.Client(transport=httpx.MockTransport(_refuse_request)))
+    assert found["notify"].status is CheckStatus.WARN and found["notify"].fix == "fm notify setup"
+    assert 'notify.channel = "none"' in found["notify"].detail
+    assert found["config"].status is CheckStatus.OK  # no channel secrets are missing
+    assert found["channel"].status is CheckStatus.SKIP
+    assert not has_failure([found[name] for name in ("config", "notify", "channel")])
+
+
+def _refuse_request(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"unexpected request to {request.url}")
+
+
 # --- tick -------------------------------------------------------------------------------------------------------------
 
 
@@ -340,6 +472,19 @@ def test_the_last_tick_warns_after_30_min_and_fails_after_6_h(home: Path, age: t
     assert check.status is status
     assert check.fix == (None if status is CheckStatus.OK else "fm run")
     assert "last tick" in check.detail and "ago" in check.detail
+
+
+def test_the_tick_fix_is_fm_run_only_when_nothing_holds_the_run_lock(home: Path) -> None:
+    write_tick(home, NOW - TICK_FAIL_AFTER)
+    assert checks()["tick"].fix == "fm run"
+    assert not (home / "run.lock").exists()  # the probe never creates the lock file
+    with RunLock(command="fm run"):
+        check = checks()["tick"]
+        assert check.status is CheckStatus.FAIL and check.fix == TICK_LATE_FIX
+        assert TICK_LATE_FIX == "fm run is running but ticks are late: check logs/run.log"
+        (home / TICK_STATE_FILE).unlink()
+        assert checks()["tick"].fix == TICK_LATE_FIX  # fm run just started and has not ticked yet
+    assert checks()["tick"].fix == "fm run"
 
 
 def test_a_never_run_or_unreadable_tick_state_fails(home: Path) -> None:
@@ -395,6 +540,33 @@ def test_an_unopenable_store_fails_once_and_skips_its_checks(home: Path) -> None
     assert found["store"].status is CheckStatus.FAIL and "locked" in found["store"].detail
     assert {found[name].status for name in ("sync", "proposals", "deadlines", "llm")} == {CheckStatus.SKIP}
     assert found["pause"].status is CheckStatus.OK  # the pause marker is a file, not a table
+
+
+def test_a_fresh_install_without_state_db_is_warned_and_never_creates_it(home: Path) -> None:
+    (home / "state.db").unlink()
+
+    def opener() -> Store:
+        raise AssertionError("opening state.db would create and migrate it")
+
+    found = checks(store_opener=opener)
+    assert list(found) == OFFLINE_NAMES
+    for name in ("sync:nfl", "proposals", "deadlines", "llm"):
+        assert found[name] == Check(name, CheckStatus.WARN, NO_STATE, fix="fm sync")
+    assert "no state yet" in NO_STATE and found["pause"].status is CheckStatus.OK
+    assert not (home / "state.db").exists()
+    (home / "config.toml").unlink()
+    found = checks(store_opener=opener)
+    assert found["sync"] == Check("sync", CheckStatus.WARN, NO_STATE, fix="fm setup")
+    assert not (home / "state.db").exists()
+
+
+def test_fm_doctor_on_a_fresh_install_writes_nothing(home: Path) -> None:
+    (home / "state.db").unlink()
+    before = listing(home)
+    result = runner.invoke(cli(), ["doctor", "--json"], catch_exceptions=False)
+    by_name = {item["name"]: item for item in json.loads(result.output)}
+    assert by_name["llm"]["status"] == "warn" and by_name["llm"]["detail"] == NO_STATE
+    assert listing(home) == before  # no state.db, no run.lock
 
 
 # --- pause, proposals, deadlines --------------------------------------------------------------------------------------
@@ -641,8 +813,9 @@ def test_fm_doctor_json_on_the_fixture_home_is_complete_and_writes_nothing(home:
 
 
 def fake_checks(*checks: Check) -> Callable[..., list[Check]]:
-    def run_checks(*, online: bool = False) -> list[Check]:
+    def run_checks(*, online: bool = False, launch_browser: bool = False) -> list[Check]:
         run_checks.online = online  # type: ignore[attr-defined]
+        assert launch_browser, "fm doctor is the one caller allowed to load the session"
         return list(checks)
 
     return run_checks

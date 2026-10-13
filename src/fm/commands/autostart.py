@@ -9,6 +9,8 @@ The tick job from ``fm schedule install`` is left installed on purpose: on Windo
 never wakes a Mac). A tick that fires while ``fm run`` holds the run lock prints ``fm run is active; skipping`` and
 exits 0, and the woken loop ticks on its own because its next tick is due by wall clock.
 
+``install`` also starts ``fm run`` at once (``Start-ScheduledTask`` on Windows, where an at-logon trigger would wait
+for the next logon; launchd's ``RunAtLoad`` on macOS); ``--no-start`` registers only, on Windows.
 ``install --dry-run`` prints the files and the commands without running anything, ``show`` reports the job and
 whether ``fm run`` holds the lock right now (and never fails), ``uninstall`` removes the job. Every command runs
 through :func:`fm.jobs.scheduler_base.default_runner`, which tests replace with a fake.
@@ -24,7 +26,7 @@ import typer
 from fm.jobs.runlock import RunLock
 from fm.jobs.scheduler_base import AutostartBackend, SchedulerError, default_runner
 from fm.jobs.scheduler_macos import MACOS_AUTOSTART
-from fm.jobs.scheduler_windows import WINDOWS_AUTOSTART
+from fm.jobs.scheduler_windows import WINDOWS_AUTOSTART, WINDOWS_AUTOSTART_NO_START
 
 app = typer.Typer(
     help="Start `fm run` at logon (Windows Task Scheduler or macOS launchd), or show and remove that job.",
@@ -32,16 +34,26 @@ app = typer.Typer(
 )
 
 BACKENDS: dict[str, AutostartBackend] = {"win32": WINDOWS_AUTOSTART, "darwin": MACOS_AUTOSTART}
-"""The logon-job backend per ``sys.platform``."""
+"""The logon-job backend per ``sys.platform``: each starts ``fm run`` at once as well as at every logon."""
+NO_START_BACKENDS: dict[str, AutostartBackend] = {"win32": WINDOWS_AUTOSTART_NO_START}
+"""``install --no-start`` per ``sys.platform``. launchd starts a loaded agent at once (``RunAtLoad``), so macOS has
+no register-only variant and ``--no-start`` is a note there."""
 
 DryRunOption = Annotated[
     bool, typer.Option("--dry-run", help="Print the files and the scheduler commands without running anything.")
 ]
+NoStartOption = Annotated[
+    bool,
+    typer.Option("--no-start", help="Register only; fm run first starts at the next logon (Windows)."),
+]
 
 
-def backend(platform: str | None = None) -> AutostartBackend:
-    """The logon-job backend for ``platform`` (default: this machine). Raises :class:`SchedulerError` elsewhere."""
+def backend(platform: str | None = None, *, start: bool = True) -> AutostartBackend:
+    """The logon-job backend for ``platform`` (default: this machine), the register-only one when ``start`` is off
+    and the platform has one. Raises :class:`SchedulerError` elsewhere."""
     key = sys.platform if platform is None else platform
+    if not start and key in NO_START_BACKENDS:
+        return NO_START_BACKENDS[key]
     try:
         return BACKENDS[key]
     except KeyError:
@@ -49,14 +61,16 @@ def backend(platform: str | None = None) -> AutostartBackend:
 
 
 @app.command("install")
-def install_(dry_run: DryRunOption = False) -> None:
-    """Register `fm run` to start at logon (replacing the job if it exists). The `fm schedule` tick task stays
-    installed as the wake timer."""
+def install_(dry_run: DryRunOption = False, no_start: NoStartOption = False) -> None:
+    """Register `fm run` to start at logon (replacing the job if it exists) and start it now unless --no-start. The
+    `fm schedule` tick task stays installed as the wake timer."""
     try:
-        chosen = backend()
+        chosen = backend(start=not no_start)
         spec = chosen.build_spec()
     except SchedulerError as exc:
         _fail(str(exc))
+    if no_start and chosen not in NO_START_BACKENDS.values():
+        typer.echo(f"note: --no-start does not apply to {chosen.scheduler}: it starts fm run as soon as it is loaded")
     if dry_run:
         typer.echo("dry run: nothing is written or installed")
         for line in chosen.plan(spec):

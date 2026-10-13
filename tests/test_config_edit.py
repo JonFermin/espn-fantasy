@@ -7,20 +7,32 @@ Every test works on a temp file: the real ``~/.config/espn-fantasy`` is never to
 
 from __future__ import annotations
 
+import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import fm.config_edit as config_edit
 from fm.config import Config, ConfigError, League, Llm, Notify, Policy, TradeFinder, load_config
 from fm.config_edit import (
+    TEMP_PREFIX,
+    AddLeaguesResult,
+    LeagueUpdate,
     add_leagues,
     backup_path,
+    edit_lock_path,
+    preset_overrides,
+    remove_keys,
     render_config,
     set_notify_channel,
     set_value,
+    set_values,
     write_config,
 )
+from fm.jobs.runlock import RunLock, exclusive_lock
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SAMPLE = FIXTURES / "config.sample.toml"
@@ -125,20 +137,25 @@ class TestRender:
         assert config.notify.channel == "ntfy"
 
 
+def temps(path: Path) -> list[Path]:
+    """Temp files an atomic write left beside ``path`` (there should never be any)."""
+    return sorted(path.parent.glob(TEMP_PREFIX + "*"))
+
+
 class TestWrite:
     def test_fresh_file_has_no_backup(self, tmp_path: Path) -> None:
         path = tmp_path / "new" / "config.toml"
         config = write_config(path, render_config([NFL]))
         assert config.leagues[0].key == "nfl" and load(path) == config
         assert not backup_path(path).exists()
-        assert not path.with_name("config.toml.tmp").exists()
+        assert temps(path) == []
 
     def test_replace_keeps_the_previous_file_as_bak(self, config_path: Path) -> None:
         before = config_path.read_bytes()
         write_config(config_path, render_config([NFL]))
         assert backup_path(config_path).read_bytes() == before
         assert config_path.read_bytes() != before
-        assert not config_path.with_name("config.toml.tmp").exists()
+        assert temps(config_path) == []
 
     def test_invalid_text_leaves_the_file_byte_identical(self, config_path: Path) -> None:
         before = config_path.read_bytes()
@@ -147,7 +164,90 @@ class TestWrite:
         assert str(config_path) in str(info.value)  # located at the real file, not a temp one
         assert config_path.read_bytes() == before
         assert not backup_path(config_path).exists()
-        assert not config_path.with_name("config.toml.tmp").exists()
+        assert temps(config_path) == []
+
+
+class TestConcurrentWriters:
+    """Two processes editing config.toml (fm setup, the dashboard, fm config set-preset) never share a temp file and
+    never lose each other's edit."""
+
+    def test_each_write_uses_its_own_temp_file_beside_the_target(
+        self, config_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stray = config_path.with_name("config.toml.tmp")
+        stray.write_text("another writer's temp file", encoding="utf-8")  # the old fixed name: never touched now
+        moved: list[Path] = []
+        real_replace = os.replace
+
+        def spy(src: Any, dst: Any) -> None:
+            moved.append(Path(src))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(config_edit.os, "replace", spy)
+        set_value(config_path, "nfl", "preset", "balanced")
+        set_value(config_path, "nfl", "preset", "ask_first")
+        first, second = moved
+        assert first != second and all(path.parent == config_path.parent for path in moved)
+        assert all(path.name.startswith(TEMP_PREFIX) for path in moved)
+        assert stray.read_text(encoding="utf-8") == "another writer's temp file"
+        assert temps(config_path) == []
+
+    def test_an_edit_waits_for_another_writer_and_applies_on_top_of_its_change(self, config_path: Path) -> None:
+        other = RunLock(edit_lock_path(config_path), command="another fm process").acquire()
+        done: list[Config] = []
+        failed: list[BaseException] = []
+
+        def edit() -> None:
+            try:
+                done.append(set_value(config_path, "nfl", "policy.lineup", "auto"))
+            except BaseException as exc:  # surfaced below
+                failed.append(exc)
+
+        worker = threading.Thread(target=edit)
+        worker.start()
+        time.sleep(0.5)
+        assert done == [] and failed == []  # waiting: it has not read the file yet
+        # The other writer's edit lands while ours waits; ours must read the file only once it has the lock.
+        config_path.write_text(COMMENTED.replace("daily_budget_usd = 1.5", "daily_budget_usd = 3.0"), encoding="utf-8")
+        other.release()
+        worker.join(timeout=10)
+        assert failed == [] and len(done) == 1
+        config = load(config_path)
+        assert config.llm.daily_budget_usd == 3.0 and config.league("nfl").policy.lineup == "auto"  # both edits kept
+
+    def test_a_writer_that_never_lets_go_is_reported_not_waited_on_forever(
+        self, config_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config_edit, "EDIT_LOCK_TIMEOUT_S", 0.3)
+        before = config_path.read_bytes()
+        with exclusive_lock(edit_lock_path(config_path), command="fm ui", timeout=0):
+            with pytest.raises(ConfigError, match=r"is being edited by fm ui \(pid \d+\)"):
+                set_value(config_path, "nfl", "preset", "balanced")
+        assert config_path.read_bytes() == before
+
+    def test_a_replace_refused_once_is_retried(self, config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_replace = os.replace
+        calls: list[Path] = []
+
+        def busy_once(src: Any, dst: Any) -> None:
+            calls.append(Path(dst))
+            if len(calls) == 1:
+                raise PermissionError(13, "The process cannot access the file because it is being used")
+            real_replace(src, dst)
+
+        monkeypatch.setattr(config_edit.os, "replace", busy_once)
+        assert set_value(config_path, "nfl", "preset", "balanced").league("nfl").preset == "balanced"
+        assert calls == [config_path, config_path] and temps(config_path) == []
+
+    def test_a_replace_refused_twice_fails_cleanly(self, config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        def always_busy(src: Any, dst: Any) -> None:
+            raise PermissionError(13, "being used by another process")
+
+        before = config_path.read_bytes()
+        monkeypatch.setattr(config_edit.os, "replace", always_busy)
+        with pytest.raises(ConfigError, match="being used by another process"):
+            set_value(config_path, "nfl", "preset", "balanced")
+        assert config_path.read_bytes() == before and temps(config_path) == []
 
     def test_syntax_error_is_rejected(self, config_path: Path) -> None:
         with pytest.raises(ConfigError, match="invalid TOML"):
@@ -162,7 +262,7 @@ class TestAddLeagues:
             {"key": "work", "sport": "nfl", "espn_league_id": 55, "season": 2026, "team_id": 2, "preset": "ask_first"},
             {"key": "nba2", "sport": "nba", "espn_league_id": 66, "season": 2027, "team_id": 3},
         ]
-        assert add_leagues(config_path, entries) == ("work", "nba2")
+        assert add_leagues(config_path, entries) == AddLeaguesResult(added=("work", "nba2"), unchanged=("nfl",))
         config = load(config_path)
         assert [league.key for league in config.leagues] == ["nfl", "nba", "work", "nba2"]
         assert config.league("work").preset == "ask_first" and config.league("work").policy.lineup == "approve"
@@ -174,9 +274,37 @@ class TestAddLeagues:
 
     def test_nothing_new_writes_nothing(self, config_path: Path) -> None:
         before = config_path.read_bytes()
-        assert add_leagues(config_path, [NFL, {**NBA, "team_id": 1}]) == ()
+        result = add_leagues(config_path, [NFL, {**NBA, "team_id": 1}])
+        assert result.added == () and result.unchanged == ("nfl",)
         assert config_path.read_bytes() == before
         assert not backup_path(config_path).exists()
+
+    def test_a_present_league_whose_season_or_team_moved_is_reported_not_rewritten(self, config_path: Path) -> None:
+        """Re-running setup after ESPN renewed a league (new season) or after the team was corrected: add_leagues
+        says what differs and leaves the file alone; the caller updates it through set_values."""
+        before = config_path.read_bytes()
+        renewed = {**NFL, "key": "football", "season": 2027}
+        moved = {**NBA, "team_id": 1}
+        result = add_leagues(config_path, [renewed, moved])
+        assert result == AddLeaguesResult(
+            changed=(
+                LeagueUpdate(key="nfl", fields={"season": (2026, 2027)}),
+                LeagueUpdate(key="nba", fields={"team_id": (9, 1)}),
+            )
+        )
+        assert config_path.read_bytes() == before  # add_leagues never changes a league that is present
+        for update in result.changed:
+            set_values(config_path, update.key, update.updates)
+        config = load(config_path)
+        assert config.league("nfl").season == 2027 and config.league("nba").team_id == 1
+        assert "# My leagues. Hand-written" in config_path.read_text(encoding="utf-8")
+
+    def test_a_new_league_and_a_moved_one_in_one_call(self, config_path: Path) -> None:
+        extra = {"key": "work", "sport": "nfl", "espn_league_id": 55, "season": 2026, "team_id": 2}
+        result = add_leagues(config_path, [extra, {**NBA, "season": 2028}])
+        assert result.added == ("work",) and result.unchanged == ()
+        assert result.changed == (LeagueUpdate(key="nba", fields={"season": (2027, 2028)}),)
+        assert load(config_path).league("nba").season == 2027  # appended "work" only; nba untouched
 
     def test_bad_entry_is_rejected_and_the_file_kept(self, config_path: Path) -> None:
         before = config_path.read_bytes()
@@ -188,13 +316,55 @@ class TestAddLeagues:
 
     def test_file_without_leagues(self, tmp_path: Path) -> None:
         path = write(tmp_path / "config.toml", '[notify]\nchannel = "ntfy"\n')
-        assert add_leagues(path, [NFL]) == ("nfl",)
+        assert add_leagues(path, [NFL]).added == ("nfl",)
         config = load(path)
         assert config.leagues[0] == League(**NFL) and config.notify.channel == "ntfy"
 
     def test_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="not found"):
             add_leagues(tmp_path / "nope.toml", [NFL])
+        assert list(tmp_path.iterdir()) == []  # no lock file for a file that is not there
+
+
+class TestPresetOverrides:
+    def test_lists_written_keys_that_differ_from_the_preset(self, config_path: Path) -> None:
+        # nfl writes bench_inactive = "auto", lineup = "approve" and untouchables, and has no preset yet.
+        assert preset_overrides(config_path, "nfl") == []
+        assert preset_overrides(config_path, "nfl", preset="ask_first") == ["policy.bench_inactive"]
+        assert preset_overrides(config_path, "nfl", preset="balanced") == ["policy.lineup"]
+        set_value(config_path, "nfl", "preset", "hands_off")
+        assert preset_overrides(config_path, "nfl") == ["policy.lineup"]  # untouchables is not the preset's key
+        assert preset_overrides(config_path, "nba", preset="hands_off") == []
+
+    def test_reads_a_raw_league_table_too(self) -> None:
+        table = {
+            "key": "nfl",
+            "sport": "nfl",
+            "preset": "ask_first",
+            "policy": {"bench_inactive": "auto", "lineup": "approve", "max_transactions_per_week": 3},
+            "trade_finder": {"enabled": True, "min_accept": 0.6},
+        }
+        assert preset_overrides(table) == ["policy.bench_inactive", "trade_finder.enabled"]
+        assert preset_overrides({**table, "preset": "balanced"}) == ["policy.lineup", "trade_finder.min_accept"]
+        assert preset_overrides({"key": "x", "sport": "nba"}) == []
+
+    def test_unknown_league_or_preset(self, config_path: Path) -> None:
+        with pytest.raises(ConfigError, match="no league 'mlb'; known: nfl, nba"):
+            preset_overrides(config_path, "mlb")
+        with pytest.raises(ValueError, match="unknown preset 'yolo'"):
+            preset_overrides(config_path, "nfl", preset="yolo")
+        with pytest.raises(ValueError, match="needs the league key"):
+            preset_overrides(config_path)
+
+    def test_remove_keys_hands_them_back_to_the_preset_in_one_edit(self, config_path: Path) -> None:
+        set_value(config_path, "nfl", "preset", "balanced")
+        before = config_path.read_bytes()
+        config = remove_keys(config_path, "nfl", ["policy.lineup", "trade_finder.enabled"])  # the second is absent
+        assert config.league("nfl").policy.lineup == "auto"  # the preset decides it now
+        assert backup_path(config_path).read_bytes() == before  # one edit, one backup
+        text = config_path.read_text(encoding="utf-8")
+        assert "lineup" not in text and "# Trades are approval-only and have no setting here.\n" in text
+        assert 'bench_inactive = "auto"       # off | approve | auto\n' in text
 
 
 class TestSetValue:
@@ -308,6 +478,30 @@ class TestSetNotifyChannel:
 
     def test_invalid_channel_is_rejected(self, config_path: Path) -> None:
         before = config_path.read_bytes()
-        with pytest.raises(ConfigError, match="notify.channel: Input should be 'telegram' or 'ntfy' \\(got 'sms'\\)"):
+        message = "notify.channel: Input should be 'telegram', 'ntfy' or 'none' \\(got 'sms'\\)"
+        with pytest.raises(ConfigError, match=message):
             set_notify_channel(config_path, "sms")
         assert config_path.read_bytes() == before
+
+    def test_none_means_no_phone_and_needs_no_channel_secrets(self, config_path: Path) -> None:
+        config = set_notify_channel(config_path, "none")
+        assert config.notify.channel == "none"
+        assert config.required_secrets() == ("ANTHROPIC_API_KEY",)
+        assert 'channel = "none"              # telegram | ntfy\n' in config_path.read_text(encoding="utf-8")
+
+
+class TestNoChannel:
+    def test_render_writes_channel_none_when_asked(self, tmp_path: Path) -> None:
+        for notify in ("none", {"channel": "none"}):
+            text = render_config([NFL], notify=notify)
+            assert 'channel = "none"' in text and "telegram | ntfy | none" in text
+            config = load(write(tmp_path / "config.toml", text))
+            assert config.notify == Notify(channel="none") and config.missing_secrets() == ("ANTHROPIC_API_KEY",)
+        assert 'channel = "telegram"' in render_config([NFL])  # the default is unchanged
+
+    def test_open_channel_refuses_none_with_a_notify_error(self, tmp_path: Path) -> None:
+        from fm.notify import NotifyError, open_channel
+
+        config = load(write(tmp_path / "config.toml", render_config([NFL], notify="none")))
+        with pytest.raises(NotifyError, match=r"no phone channel configured \(notify.channel = none\)"):
+            open_channel(config)

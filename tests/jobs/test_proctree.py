@@ -129,6 +129,45 @@ def test_appends_from_two_writers_never_overwrite_each_other(tmp_path: Path) -> 
     assert path.read_bytes() == b"start\nchild 1\nparent\nchild 2\n"
 
 
+def test_kill_pid_tree_stops_a_tree_known_only_by_its_root_pid(tmp_path: Path) -> None:
+    """What fm run does to a stuck scheduled tick: the tree was started by someone else (here a plain Popen, not
+    spawn), so all there is to go on is the root's pid."""
+    log = tmp_path / "stranger.log"
+    with log.open("ab") as handle:
+        root = subprocess.Popen([*PYTHON, "-c", TREE], stdin=subprocess.DEVNULL, stdout=handle, stderr=handle)
+    try:
+        lines = wait_for_lines(log, "child", "grandchild")
+        pids = {root.pid, int(lines["child"][1]), int(lines["child"][2]), int(lines["grandchild"][1])}
+        assert still_running(pids, timeout=0) == pids
+        assert proctree.kill_pid_tree(root.pid) == []
+        assert still_running(pids) == set()
+        assert proctree.kill_pid_tree(root.pid) == []  # gone already: not an error
+    finally:
+        if root.poll() is None:
+            root.kill()
+        root.wait(10)
+
+
+def test_kill_pid_tree_refuses_this_process() -> None:
+    with pytest.raises(ValueError, match="own tree"):
+        proctree.kill_pid_tree(os.getpid())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the taskkill path is the Windows branch")
+def test_on_windows_kill_pid_tree_runs_taskkill_and_reports_a_failure() -> None:
+    alive = subprocess.Popen([*PYTHON, "-c", "import time; time.sleep(30)"])
+    try:
+        ok = ScriptedRunner(RunResult(tuple(taskkill_argv(alive.pid)), 0, stdout="SUCCESS"))
+        assert proctree.kill_pid_tree(alive.pid, runner=ok) == [] and ok.calls == [taskkill_argv(alive.pid)]
+        denied = ScriptedRunner(RunResult(tuple(taskkill_argv(alive.pid)), 1, stderr="ERROR: Access is denied."))
+        assert proctree.kill_pid_tree(alive.pid, runner=denied) == [
+            f"taskkill /PID {alive.pid} failed (ERROR: Access is denied.)"
+        ]
+    finally:
+        proctree.kill_pid_tree(alive.pid)  # the process this test started, with the interpreter under the launcher
+        alive.wait(10)
+
+
 def test_is_running_knows_this_process_and_an_exited_one() -> None:
     assert is_running(os.getpid())
     done = subprocess.Popen([*PYTHON, "-c", "pass"])

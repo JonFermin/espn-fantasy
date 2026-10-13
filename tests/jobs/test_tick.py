@@ -575,6 +575,29 @@ def test_an_expiring_session_warns_but_still_executes(world: World) -> None:
     assert [o.proposal_id for o in report.executions] == [live] and world.status(live) == "verified"
 
 
+def test_the_session_verdict_is_recorded_for_fm_health_without_any_cookie(world: World) -> None:
+    """fm.health reads this record instead of launching a second browser on the profile the tick uses."""
+    world.decision_payload = None
+    world.session = EspnSession(espn_s2="s2-cookie-value", swid="{swid-value}", expires_at=NOW + timedelta(days=3))
+    world.tick()
+    record = world.state().session
+    assert record is not None and set(record) == {"status", "expires_at", "checked_at", "detail"}
+    assert (record["status"], record["expires_at"], record["checked_at"]) == (
+        "expiring",
+        (NOW + timedelta(days=3)).isoformat(),
+        NOW.isoformat(),
+    )
+    assert "expires soon" in (record["detail"] or "")
+    raw = world.state_file.read_text(encoding="utf-8")
+    assert "s2-cookie-value" not in raw and "swid-value" not in raw
+    world.session = NotLoggedInError("no ESPN session in the profile; run `fm login`")
+    world.tick(now=NOW + timedelta(minutes=10))
+    record = world.state().session
+    assert record is not None and record["status"] == "missing" and record["expires_at"] is None
+    assert record["checked_at"] == (NOW + timedelta(minutes=10)).isoformat()
+    assert record["detail"] == "no ESPN session in the profile; run `fm login`"
+
+
 # --- sync, inputs, missed windows -------------------------------------------------------------------------------------
 
 
@@ -715,6 +738,7 @@ def test_state_round_trips_and_tolerates_a_broken_file(tmp_path: Path) -> None:
     assert TickState.load(path) == TickState()
     state = TickState(last_tick=NOW, runs={"nfl:pre_lock:x": NOW}, notified={3}, alerts={"session:missing": NOW})
     state.inputs["nfl"] = NOW
+    state.session = {"status": "ok", "expires_at": None, "checked_at": NOW.isoformat(), "detail": "fine"}
     state.save(path)
     assert TickState.load(path) == state
     state.prune(NOW + timedelta(days=30))
@@ -754,13 +778,14 @@ def test_fm_tick_prints_the_report_and_passes_its_options(
     monkeypatch.setattr(schedule_cmd, "load_config", lambda: CONFIG)
     monkeypatch.setattr(schedule_cmd, "open_channel", no_channel)
     monkeypatch.setattr(schedule_cmd, "tick", fake_tick)
-    result = runner.invoke(cli(), ["tick", "--no-execute", "--no-sync", "--league", "nfl"], catch_exceptions=False)
+    args = ["tick", "--in-process", "--no-execute", "--no-sync", "--league", "nfl"]
+    result = runner.invoke(cli(), args, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert "note: no phone channel" in result.output and "tick at 2026-10-04 15:00 UTC" in result.output
     assert "nfl (nfl): period 4" in result.output
     assert seen["options"] == TickOptions(execute=False, sync=False, leagues=("nfl",)) and seen["channel"] is None
 
-    result = runner.invoke(cli(), ["tick", "--league", "nope"], catch_exceptions=False)
+    result = runner.invoke(cli(), ["tick", "--in-process", "--league", "nope"], catch_exceptions=False)
     assert result.exit_code == 1 and "no league 'nope'" in result.output
 
 
@@ -769,7 +794,7 @@ def test_fm_tick_exits_1_when_a_decision_failed(world: World, monkeypatch: pytes
     monkeypatch.setattr(schedule_cmd, "load_config", lambda: CONFIG)
     monkeypatch.setattr(schedule_cmd, "open_channel", lambda config: world.channel)
     monkeypatch.setattr(schedule_cmd, "tick", lambda store, config, **kwargs: world.tick())
-    result = runner.invoke(cli(), ["tick"], catch_exceptions=False)
+    result = runner.invoke(cli(), ["tick", "--in-process"], catch_exceptions=False)
     assert result.exit_code == 1 and "FAILED: RuntimeError: boom" in result.output
 
 

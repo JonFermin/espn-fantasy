@@ -528,6 +528,25 @@ def test_setup_of_another_channel_than_configured_says_to_switch(server: FakeNtf
     assert 'Set channel = "ntfy" under [notify]' in run("notify", "setup", "--channel", "ntfy")
 
 
+def test_setup_with_no_phone_configured_asks_which_channel_to_add(server: FakeNtfy) -> None:
+    env_path = write_config({}, channel="none")
+    result = runner.invoke(cli(), ["notify", "setup"], catch_exceptions=False)
+    assert result.exit_code == 1, result.output
+    assert 'says channel = "none" (no phone): pass --channel telegram or --channel ntfy' in result.stderr
+    assert dotenv_values(env_path) == {} and server.published == []
+    assert 'Set channel = "ntfy" under [notify]' in run("notify", "setup", "--channel", "ntfy")
+    assert dotenv_values(env_path)["NTFY_TOPIC"]
+    result = runner.invoke(cli(), ["notify", "setup", "--channel", "none"], catch_exceptions=False)
+    assert result.exit_code == 2  # "none" is not a channel to set up
+
+
+def test_fm_bot_with_no_phone_configured_says_so(server: FakeNtfy) -> None:
+    write_config({}, channel="none")
+    result = runner.invoke(cli(), ["bot", "--once"], catch_exceptions=False)
+    assert result.exit_code == 1
+    assert "no phone channel configured (notify.channel = none)" in result.output
+
+
 def test_fm_bot_once_records_a_tapped_button(server: FakeNtfy, config: Config) -> None:
     write_config({"NTFY_TOPIC": TOPIC, "NTFY_REPLY_TOPIC": REPLY})
     with Store.open() as store:

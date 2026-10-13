@@ -313,7 +313,7 @@ BAD_CASES: dict[str, tuple[str, list[str]]] = {
     ),
     "unknown channel": (
         MINIMAL + '[notify]\nchannel = "sms"\n',
-        ["notify.channel: Input should be 'telegram' or 'ntfy' (got 'sms')"],
+        ["notify.channel: Input should be 'telegram', 'ntfy' or 'none' (got 'sms')"],
     ),
     "unknown preset": (
         MINIMAL + 'preset = "yolo"\n',
@@ -521,7 +521,7 @@ class TestCheckCommand:
         assert result.stdout == ""  # problems go to stderr
         assert "error: invalid configuration (2 problems):" in result.stderr
         assert "league[0].policy.lineup: Input should be 'off', 'approve' or 'auto' (got 'always')" in result.stderr
-        assert "notify.channel: Input should be 'telegram' or 'ntfy' (got 'sms')" in result.stderr
+        assert "notify.channel: Input should be 'telegram', 'ntfy' or 'none' (got 'sms')" in result.stderr
 
     def test_default_path_is_the_config_dir_file(self) -> None:
         result = runner.invoke(cli(), ["config", "check"])
@@ -558,7 +558,13 @@ class TestSetPresetCommand:
         before = path.read_bytes()
         result = runner.invoke(cli(), ["config", "set-preset", "nba", "hands_off", "--path", str(path)])
         assert result.exit_code == 0, result.output
-        assert f"{path}: nba uses the hands_off preset: lineups are set on their own" in result.output
+        # The sample writes lineup = "approve" for nba, so the preset's "lineups are set on their own" is not true.
+        assert f"{path}: nba uses the hands_off preset, with keys written in config.toml overriding it" in result.output
+        assert "lineups are set on their own" not in result.output
+        assert (
+            "note: these keys written in config.toml override the preset: policy.lineup; remove them or run with "
+            "--reset-overrides" in result.output
+        )
         assert "nba: nba (fba) league 7654321, season 2027, team 9, preset hands_off" in result.output
         assert "bench_inactive=auto lineup=approve add=approve add_drop=approve waiver=approve" in result.output
         assert "max 7 transactions/week" in result.output  # the file's explicit keys still win
@@ -568,6 +574,30 @@ class TestSetPresetCommand:
         assert config.league("nba").preset == "hands_off" and config.league("nfl").preset is None
         newline = b"\r\n" if b"\r\n" in before else b"\n"  # write_text uses the platform's; the edit keeps it
         assert path.read_bytes().replace(b'preset = "hands_off"' + newline, b"") == before  # one line added, no more
+
+    def test_reset_overrides_removes_the_written_keys_so_the_preset_decides(self, tmp_path: Path) -> None:
+        path = write(tmp_path, SAMPLE.read_text(encoding="utf-8"))
+        before = path.read_bytes()
+        result = runner.invoke(
+            cli(), ["config", "set-preset", "nba", "hands_off", "--reset-overrides", "--path", str(path)]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"{path}: nba uses the hands_off preset: lineups are set on their own" in result.output
+        assert "removed from config.toml so the preset decides them: policy.lineup" in result.output
+        assert "note:" not in result.output
+        assert "bench_inactive=auto lineup=auto add=approve" in result.output
+        assert backup_path(path).read_bytes() == before  # one edit: the preset and the removal together
+        nba = load_config(path, environ={}).league("nba")
+        assert nba.preset == "hands_off" and nba.policy.lineup == "auto"
+        assert nba.policy.max_transactions_per_week == 7  # a written key equal to the preset's stays
+        nfl_part = path.read_text(encoding="utf-8").split('key = "nba"')[0]
+        assert 'lineup = "approve"' in nfl_part  # the other league is untouched
+
+    def test_a_written_key_equal_to_the_preset_is_no_override(self, tmp_path: Path) -> None:
+        path = write(tmp_path, MINIMAL + '[league.policy]\nlineup = "approve"\nuntouchables = ["Sample Player"]\n')
+        result = runner.invoke(cli(), ["config", "set-preset", "nfl", "ask_first", "--path", str(path)])
+        assert result.exit_code == 0, result.output
+        assert "note:" not in result.output and "uses the ask_first preset: every move waits" in result.output
 
     def test_default_path_is_the_config_dir_file(self) -> None:
         write(paths.config_dir(), MINIMAL)

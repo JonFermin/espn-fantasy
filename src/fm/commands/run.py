@@ -3,9 +3,10 @@
 It is what ``fm autostart install`` starts at logon, and what replaces the scheduled ``fm tick`` plus a separately
 started ``fm bot``: :func:`fm.jobs.runner.run_forever` ticks every ``--every`` minutes by wall clock (so a laptop
 that slept ticks as soon as it wakes), reloads ``config.toml`` for every tick, polls the phone channel in between
-and executes a near-deadline approval at once. Each tick runs as a child process that is stopped, browser and all,
-once it has run ``--tick-timeout`` minutes, so a tick that hangs can never stall the loop. It holds the run lock
-(:mod:`fm.jobs.runlock`) for its lifetime, waiting for a scheduled tick that is mid-run; the tick task from ``fm
+and ticks at once after a near-deadline approval, so it executes right away. Each tick runs as a child process that
+is stopped, browser and all, once it has run ``--tick-timeout`` minutes, so a tick that hangs can never stall the
+loop; nothing executes in the loop's own process. It holds the run lock (:mod:`fm.jobs.runlock`) for its lifetime,
+waiting for a scheduled tick that is mid-run (and stopping one stuck past the tick timeout); the tick task from ``fm
 schedule install`` can stay installed as the wake timer, since a tick that finds the lock held exits at once.
 
 Everything it does goes to ``logs/run.log`` under the config dir (rotating, 5 x 1 MB; the tick children append their

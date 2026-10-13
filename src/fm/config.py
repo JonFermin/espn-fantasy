@@ -41,7 +41,9 @@ from fm.presets import PresetName, preset_for
 
 Sport = Literal["nfl", "nba"]
 EspnGame = Literal["ffl", "fba"]
-Channel = Literal["telegram", "ntfy"]
+Channel = Literal["telegram", "ntfy", "none"]
+"""The phone channel; ``none`` is an installation without one (proposals wait for ``fm proposals`` or the
+dashboard, alerts stay in the logs)."""
 Approval = Literal["off", "approve", "auto"]
 ApprovalNoAuto = Literal["off", "approve"]
 
@@ -207,7 +209,9 @@ class Llm(BaseModel):
 
 
 class Notify(BaseModel):
-    """Phone channel (DESIGN section 11). Credentials and topic names come from ``.env``."""
+    """Phone channel (DESIGN section 11). Credentials and topic names come from ``.env``. ``channel = "none"`` says
+    there is no phone on purpose, so nothing asks for channel secrets and ``fm.notify.open_channel`` refuses with a
+    ``NotifyError`` every caller already treats as "no channel"."""
 
     model_config = _TABLE
 
@@ -285,12 +289,16 @@ class Config(BaseModel):
         raise KeyError(f"no league {key!r} in config.toml; known: {', '.join(lg.key for lg in self.leagues)}")
 
     def required_secrets(self) -> tuple[str, ...]:
-        """Environment variables this configuration needs: the Anthropic key plus the chosen channel's credentials."""
-        channel = (
-            ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
-            if self.notify.channel == "telegram"
-            else ("NTFY_TOPIC", "NTFY_REPLY_TOPIC")
-        )
+        """Environment variables this configuration needs: the Anthropic key plus the chosen channel's credentials
+        (none for ``channel = "none"``)."""
+        channel: tuple[str, ...]
+        match self.notify.channel:
+            case "telegram":
+                channel = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+            case "ntfy":
+                channel = ("NTFY_TOPIC", "NTFY_REPLY_TOPIC")
+            case "none":
+                channel = ()
         return ("ANTHROPIC_API_KEY", *channel)
 
     def missing_secrets(self) -> tuple[str, ...]:

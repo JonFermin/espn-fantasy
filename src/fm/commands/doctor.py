@@ -3,7 +3,9 @@
 One line per check (``FAIL  session  no browser profile yet ...  → fix: fm login``), or a JSON list with ``--json``
 for scripts and the dashboard. The exit code is 1 when any check is a FAIL, so ``fm setup`` and shell scripts can
 gate on it. ``--online`` adds the ESPN read per league and the phone-channel ping; without it nothing leaves the
-machine.
+machine. Unlike the dashboard and the MCP tool, ``fm doctor`` may launch the browser to read the ESPN session
+(``launch_browser=True``), but only when the last tick's session record is stale and the run lock is free, so it never
+starts a browser beside a running tick.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ def doctor(online: OnlineOption = False, as_json: JsonOption = False) -> None:
 
     Exits 1 when any check fails; each failing line names the command that fixes it.
     """
-    checks = run_checks(online=online)
+    checks = run_checks(online=online, launch_browser=True)
     if as_json:
         typer.echo(json.dumps([check.as_dict() for check in checks], indent=2))
     else:

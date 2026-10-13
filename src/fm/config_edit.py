@@ -4,14 +4,22 @@ dashboard all edit the file through here, and ``fm.config`` only ever reads it.
 tomlkit keeps comments, key order and formatting, so a hand-edited file survives a programmatic edit, and a file
 written with CRLF line endings keeps them. Every write follows the same rules: the new text is validated with
 ``fm.config.parse_config`` first (an invalid edit raises ``ConfigError`` and leaves the file untouched, byte for byte),
-the replace is atomic (a temp file beside the target plus ``os.replace``), and the previous contents are kept as
-``config.toml.bak``. An edit that changes nothing writes nothing, so a re-run of ``fm setup`` leaves the file alone.
+the replace is atomic (a uniquely named temp file beside the target, ``.config.toml.<random>``, plus ``os.replace``,
+retried once after :data:`REPLACE_RETRY_S` when Windows refuses it because another process has the file open), and the
+previous contents are kept as ``config.toml.bak``. An edit that changes nothing writes nothing, so a re-run of
+``fm setup`` leaves the file alone.
+
+Writers in different processes (``fm setup``, the dashboard, ``fm config set-preset``) can overlap, so every
+read-modify-write holds an exclusive lock on ``config.toml.lock`` beside the file for its duration
+(:func:`fm.jobs.runlock.exclusive_lock`, the run lock's OS-level primitive) and waits up to :data:`EDIT_LOCK_TIMEOUT_S`
+for another writer: an edit is never lost to a concurrent one, and two writers never share a temp file.
 
 League entries are TOML-shaped mappings, one per ``[[league]]`` table (``key``, ``sport``, ``espn_league_id``,
 ``season``, ``team_id``, an optional ``preset`` and optional ``policy`` / ``trade_finder`` sub-mappings). A rendered
 file writes only the keys it is given: a league with a preset and no policy table lets the preset decide, which is
 what keeps ``fm config set-preset`` meaningful later, since a key written in the file always wins over the preset.
-Secrets never pass through here; ``.env`` is read only to validate.
+:func:`preset_overrides` lists the written keys that do override a preset, so ``set-preset`` can say so (and
+``--reset-overrides`` remove them). Secrets never pass through here; ``.env`` is read only to validate.
 """
 
 from __future__ import annotations
@@ -20,7 +28,12 @@ import contextlib
 import os
 import re
 import shutil
-from collections.abc import Callable, Iterable, Mapping, MutableMapping
+import tempfile
+import time
+import tomllib
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +43,21 @@ from tomlkit.exceptions import ParseError
 from tomlkit.items import AoT, Item, Table
 
 from fm.config import Config, ConfigError, Llm, Notify, config_paths, parse_config
+from fm.jobs.runlock import RunLockHeld, exclusive_lock
+from fm.presets import preset_for
 
 COMMENT_COLUMN = 30
 """Inline comments start here when the key and value leave room, matching the DESIGN.md template."""
+EDIT_LOCK_TIMEOUT_S = 10.0
+"""How long an edit waits for another process's edit of the same file before giving up with ``ConfigError``."""
+EDIT_LOCK_POLL_S = 0.1
+REPLACE_RETRY_S = 0.2
+"""Windows refuses ``os.replace`` onto a file another process holds open (an editor saving, an antivirus scan, a
+reader mid-read); one retry after this pause gets past the usual brief hold."""
+TEMP_PREFIX = ".config.toml."
+"""The temp file of an atomic write: ``tempfile.mkstemp`` adds a random suffix, so no two writers share one."""
+PRESET_TABLES = ("policy", "trade_finder")
+"""The sub-tables of a ``[[league]]`` a preset fills."""
 
 _HEADER = (
     "espn-fantasy configuration: the leagues this tool manages and how much it may do on its own.",
@@ -66,8 +91,34 @@ _COMMENTS: Mapping[str, str] = {
     "max_offers": "drafts a run; the weekly cap of 3 still holds",
     "model": "Claude model for the advisor workers",
     "daily_budget_usd": "daily spend cap across all workers",
-    "channel": "telegram | ntfy; the credentials live in .env",
+    "channel": "telegram | ntfy | none; the credentials live in .env",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class LeagueUpdate:
+    """A league :func:`add_leagues` found already in the file under ``key`` whose ``season`` or ``team_id`` differ from
+    the entry's. ``fields`` maps each differing name to ``(in the file, in the entry)``."""
+
+    key: str
+    fields: Mapping[str, tuple[object, object]]
+
+    @property
+    def updates(self) -> dict[str, object]:
+        """The entry's values, ready for :func:`set_values` (``set_values(path, update.key, update.updates)``)."""
+        return {name: new for name, (_, new) in self.fields.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class AddLeaguesResult:
+    """What :func:`add_leagues` did with each entry. ``added`` and ``unchanged`` hold league keys (``unchanged`` the
+    file's own key, which may differ from the entry's); ``changed`` lists the present leagues whose season or team
+    differ, which ``add_leagues`` leaves alone so the caller decides (``fm setup`` updates them with
+    :func:`set_values`)."""
+
+    added: tuple[str, ...] = ()
+    unchanged: tuple[str, ...] = ()
+    changed: tuple[LeagueUpdate, ...] = ()
 
 
 def backup_path(path: Path) -> Path:
@@ -75,16 +126,23 @@ def backup_path(path: Path) -> Path:
     return path.with_name(path.name + ".bak")
 
 
+def edit_lock_path(path: Path) -> Path:
+    """The lock every writer of ``path`` holds while it reads, changes and replaces it: ``config.toml.lock``."""
+    return path.with_name(path.name + ".lock")
+
+
 def render_config(
     leagues: Iterable[Mapping[str, Any]],
     *,
     llm: Mapping[str, Any] | None = None,
-    notify: Mapping[str, Any] | None = None,
+    notify: Mapping[str, Any] | str | None = None,
 ) -> str:
     """A fresh, commented ``config.toml`` for these leagues; ``[llm]`` and ``[notify]`` take the defaults when omitted.
 
-    The text is validated before it is returned, so a bad entry raises ``ConfigError`` (located as ``config.toml``)
-    rather than producing a file ``load_config`` would reject. ``write_config`` puts it on disk.
+    ``notify`` is the ``[notify]`` table, or just the channel name: ``"none"`` writes ``channel = "none"`` for an
+    installation without a phone (proposals then wait for ``fm proposals`` or the dashboard). The text is validated
+    before it is returned, so a bad entry raises ``ConfigError`` (located as ``config.toml``) rather than producing a
+    file ``load_config`` would reject. ``write_config`` puts it on disk.
     """
     doc = tomlkit.document()
     for line in _HEADER:
@@ -95,6 +153,8 @@ def render_config(
         tables.append(_league_table(entry, appended=False))
     doc.add("league", tables)
     doc.add("llm", _table(Llm().model_dump() if llm is None else llm))
+    if isinstance(notify, str):
+        notify = {"channel": notify}
     doc.add("notify", _table(Notify().model_dump() if notify is None else notify))
     text = tomlkit.dumps(doc)
     parse_config(text, Path("config.toml"), secrets={})
@@ -104,53 +164,62 @@ def render_config(
 def write_config(path: Path, text: str, *, env_path: Path | None = None) -> Config:
     """Validate ``text`` and make it the contents of ``path`` atomically, keeping the previous file as ``.bak``.
 
-    ``.env`` is read from ``env_path`` (default: beside ``path``) for the validation only. Raises ``ConfigError`` and
-    leaves the file untouched when the text is invalid or the write fails.
+    ``.env`` is read from ``env_path`` (default: beside ``path``) for the validation only. Holds the edit lock while it
+    replaces the file. Raises ``ConfigError`` and leaves the file untouched when the text is invalid, another writer
+    holds the lock past :data:`EDIT_LOCK_TIMEOUT_S`, or the write fails.
     """
     config_path, env_path = config_paths(path, env_path)
     config = parse_config(text, config_path, env_path=env_path)
-    temp = path.with_name(path.name + ".tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp.write_bytes(text.encode("utf-8"))
-        if path.exists():
-            shutil.copyfile(path, backup_path(path))
-        os.replace(temp, path)
-    except OSError as exc:
-        with contextlib.suppress(OSError):
-            temp.unlink(missing_ok=True)
-        raise ConfigError(f"{path}: {exc.strerror or exc}") from exc
+    with _edit_lock(path):
+        _replace(path, text)
     return config
 
 
-def add_leagues(path: Path, entries: Iterable[Mapping[str, Any]], *, env_path: Path | None = None) -> tuple[str, ...]:
-    """Append a ``[[league]]`` table for each entry whose ``(sport, espn_league_id)`` the file lacks; the keys added.
+def add_leagues(path: Path, entries: Iterable[Mapping[str, Any]], *, env_path: Path | None = None) -> AddLeaguesResult:
+    """Append a ``[[league]]`` table for each entry whose ``(sport, espn_league_id)`` the file lacks.
 
-    Entries are the mappings ``render_config`` takes. A league already present is never rewritten, and when nothing is
-    new the file is left alone (no write, no backup). The result is validated before the file changes, so a duplicate
-    key or a bad entry raises ``ConfigError``.
+    Entries are the mappings ``render_config`` takes. A league already present is never rewritten: it is reported as
+    ``unchanged``, or as ``changed`` (with the differing ``season`` / ``team_id``) for the caller to update through
+    :func:`set_values`. When nothing is new the file is left alone (no write, no backup). The result is validated
+    before the file changes, so a duplicate key or a bad entry raises ``ConfigError``.
     """
-    text = _read(path)
-    doc = _parse(text, path)
-    tables = doc.get("league")
-    if tables is None:
-        tables = tomlkit.aot()
-        doc["league"] = tables
-    elif not isinstance(tables, AoT):
-        raise ConfigError(f"{path}: league is not an array of [[league]] tables")
-    present = {_identity(table) for table in tables}
-    added: list[str] = []
-    for entry in entries:
-        identity = _identity(entry)
-        if identity in present:
-            continue
-        present.add(identity)
-        tables.append(_league_table(entry, appended=True))
-        added.append(str(entry.get("key")))
-    if not added:
-        return ()
-    write_config(path, _keep_newlines(tomlkit.dumps(doc), text), env_path=env_path)
-    return tuple(added)
+    _require(path)
+    with _edit_lock(path):
+        text = _read(path)
+        doc = _parse(text, path)
+        tables = doc.get("league")
+        if tables is None:
+            tables = tomlkit.aot()
+            doc["league"] = tables
+        elif not isinstance(tables, AoT):
+            raise ConfigError(f"{path}: league is not an array of [[league]] tables")
+        present: dict[tuple[str, str], Table] = {}
+        for table in tables:
+            present.setdefault(_identity(table), table)
+        added: list[str] = []
+        unchanged: list[str] = []
+        changed: list[LeagueUpdate] = []
+        for entry in entries:
+            identity = _identity(entry)
+            table = present.get(identity)
+            if table is None:
+                appended = _league_table(entry, appended=True)
+                tables.append(appended)
+                present[identity] = appended
+                added.append(str(entry.get("key")))
+                continue
+            differ = {
+                name: (_plain(table.get(name)), entry[name])
+                for name in ("season", "team_id")
+                if entry.get(name) is not None and _plain(table.get(name)) != entry[name]
+            }
+            if differ:
+                changed.append(LeagueUpdate(key=str(table.get("key")), fields=differ))
+            else:
+                unchanged.append(str(table.get("key")))
+        if added:
+            _validate_and_replace(path, _keep_newlines(tomlkit.dumps(doc), text), env_path)
+    return AddLeaguesResult(added=tuple(added), unchanged=tuple(unchanged), changed=tuple(changed))
 
 
 def set_value(path: Path, league_key: str, dotted_key: str, value: object, *, env_path: Path | None = None) -> Config:
@@ -160,35 +229,65 @@ def set_value(path: Path, league_key: str, dotted_key: str, value: object, *, en
     way (``policy``, ``trade_finder``) is created when missing. Comments and the other keys stay as they are. The edit
     is validated before the file changes, so an unknown key or a bad value raises ``ConfigError`` with its location.
     """
-    names = dotted_key.split(".")
-    if not all(names):
-        raise ValueError(f"invalid key {dotted_key!r}: use preset, policy.<key> or trade_finder.<key>")
+    return set_values(path, league_key, {dotted_key: value}, env_path=env_path)
+
+
+def set_values(
+    path: Path, league_key: str, values: Mapping[str, object], *, env_path: Path | None = None
+) -> Config:
+    """:func:`set_value` for several keys of one league in a single edit (one validation, one replace, one backup):
+    ``{"preset": "balanced", "policy.lineup": None}`` sets the preset and removes the written lineup key."""
+    changes = [(_dotted_names(key), value) for key, value in values.items()]
 
     def mutate(doc: TOMLDocument) -> None:
-        container: MutableMapping[str, Any] = _find_league(doc, league_key, path)
-        created: Table | None = None
-        for name in names[:-1]:
-            child = container.get(name)
-            if child is None:
-                if value is None:
-                    return  # nothing to remove
-                child = created = tomlkit.table()
-                container[name] = child
-            elif not isinstance(child, MutableMapping):
-                raise ConfigError(f"{path}: league {league_key!r}: {name} is not a table")
-            container = child
-        if value is None:
-            container.pop(names[-1], None)
-        else:
-            _set(container, names[-1], value)
-        if created is not None:
-            created.add(tomlkit.nl())  # a blank line after the new table, as the file's own tables have
+        league = _find_league(doc, league_key, path)
+        for names, value in changes:
+            _apply(league, names, value, league_key, path)
 
     return _edit(path, env_path, mutate)
 
 
+def remove_keys(path: Path, league_key: str, dotted_keys: Iterable[str], *, env_path: Path | None = None) -> Config:
+    """Remove these keys (``policy.lineup``, ``trade_finder.enabled``) from one league in a single edit; a key that is
+    not written is skipped. What ``fm config set-preset --reset-overrides`` uses to hand keys back to the preset."""
+    return set_values(path, league_key, dict.fromkeys(dotted_keys), env_path=env_path)
+
+
+def preset_overrides(
+    source: Path | Mapping[str, Any], league_key: str | None = None, *, preset: str | None = None
+) -> list[str]:
+    """The ``policy.*`` / ``trade_finder.*`` keys written in a league's table that override its preset: keys the preset
+    supplies, written with a different value. Keys the preset says nothing about (``untouchables``, say) are not
+    overrides, and a league without a preset has none.
+
+    ``source`` is ``config.toml`` (``league_key`` names the league) or one ``[[league]]`` table as a mapping (the raw
+    TOML: what the file says, not what the preset filled in). ``preset`` checks against another preset than the
+    table's own (what ``set-preset`` is about to write). Raises ``ConfigError`` for an unreadable file or an unknown
+    league, ``ValueError`` for an unknown preset name.
+    """
+    if isinstance(source, Path):
+        if league_key is None:
+            raise ValueError("preset_overrides needs the league key to read a league from config.toml")
+        table: Mapping[str, Any] = _raw_league(source, league_key)
+    else:
+        table = source
+    name = preset if preset is not None else table.get("preset")
+    if name is None:
+        return []
+    chosen = preset_for(str(name), str(table.get("sport")))
+    overrides: list[str] = []
+    for table_name, supplied in zip(PRESET_TABLES, (chosen.policy, chosen.trade_finder), strict=True):
+        written = table.get(table_name)
+        if not isinstance(written, Mapping):
+            continue
+        for key, value in written.items():
+            if key in supplied and _plain(value) != supplied[key]:
+                overrides.append(f"{table_name}.{key}")
+    return overrides
+
+
 def set_notify_channel(path: Path, channel: str, *, env_path: Path | None = None) -> Config:
-    """Set ``[notify] channel`` (``telegram`` or ``ntfy``), creating the table when the file has none."""
+    """Set ``[notify] channel`` (``telegram``, ``ntfy`` or ``none``), creating the table when the file has none."""
 
     def mutate(doc: TOMLDocument) -> None:
         notify = doc.get("notify")
@@ -218,15 +317,125 @@ def _comment_column(key: str, item: Item) -> int | None:
     return len(key) + len(" = ") + len(item.as_string()) + len(item.trivia.comment_ws)
 
 
+def _dotted_names(dotted_key: str) -> list[str]:
+    names = dotted_key.split(".")
+    if not all(names):
+        raise ValueError(f"invalid key {dotted_key!r}: use preset, policy.<key> or trade_finder.<key>")
+    return names
+
+
+def _apply(league: Table, names: list[str], value: object, league_key: str, path: Path) -> None:
+    """Set (or, for ``None``, remove) one dotted key under a ``[[league]]`` table, creating a table on the way."""
+    container: MutableMapping[str, Any] = league
+    created: Table | None = None
+    for name in names[:-1]:
+        child = container.get(name)
+        if child is None:
+            if value is None:
+                return  # nothing to remove
+            child = created = tomlkit.table()
+            container[name] = child
+        elif not isinstance(child, MutableMapping):
+            raise ConfigError(f"{path}: league {league_key!r}: {name} is not a table")
+        container = child
+    if value is None:
+        container.pop(names[-1], None)
+    else:
+        _set(container, names[-1], value)
+    if created is not None:
+        created.add(tomlkit.nl())  # a blank line after the new table, as the file's own tables have
+
+
 def _edit(path: Path, env_path: Path | None, mutate: Callable[[TOMLDocument], None]) -> Config:
-    """Read, change, validate and replace; an edit that changes no text validates the file and writes nothing."""
-    text = _read(path)
-    doc = _parse(text, path)
-    mutate(doc)
-    new_text = _keep_newlines(tomlkit.dumps(doc), text)
-    if new_text == text:
-        return parse_config(text, path, env_path=env_path)
-    return write_config(path, new_text, env_path=env_path)
+    """Read, change, validate and replace under the edit lock; an edit that changes no text validates the file and
+    writes nothing."""
+    _require(path)
+    with _edit_lock(path):
+        text = _read(path)
+        doc = _parse(text, path)
+        mutate(doc)
+        new_text = _keep_newlines(tomlkit.dumps(doc), text)
+        if new_text == text:
+            return parse_config(text, path, env_path=env_path)
+        return _validate_and_replace(path, new_text, env_path)
+
+
+def _validate_and_replace(path: Path, text: str, env_path: Path | None) -> Config:
+    """:func:`write_config` for a caller that already holds the edit lock."""
+    config_path, env = config_paths(path, env_path)
+    config = parse_config(text, config_path, env_path=env)
+    _replace(path, text)
+    return config
+
+
+@contextmanager
+def _edit_lock(path: Path) -> Iterator[None]:
+    """Hold ``config.toml.lock`` (another process's edit is waited for, up to :data:`EDIT_LOCK_TIMEOUT_S`)."""
+    lock = edit_lock_path(path)
+    with contextlib.ExitStack() as stack:
+        try:
+            held = exclusive_lock(
+                lock, command=f"an edit of {path.name}", timeout=EDIT_LOCK_TIMEOUT_S, poll_s=EDIT_LOCK_POLL_S
+            )
+            stack.enter_context(held)
+        except RunLockHeld as exc:
+            who = exc.holder.describe() if exc.holder is not None else "another process"
+            raise ConfigError(f"{path} is being edited by {who}; try again in a moment") from exc
+        except OSError as exc:
+            raise ConfigError(f"{lock}: {exc.strerror or exc}") from exc
+        yield
+
+
+def _replace(path: Path, text: str) -> None:
+    """Write ``text`` to a fresh temp file beside ``path``, back ``path`` up, and move the temp file over it. The temp
+    file is removed on any failure, and ``ConfigError`` says what went wrong."""
+    temp: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=TEMP_PREFIX)
+        temp = Path(name)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+        if path.exists():
+            shutil.copyfile(path, backup_path(path))
+        try:
+            os.replace(temp, path)
+        except PermissionError:  # Windows: another process has the target open for a moment
+            time.sleep(REPLACE_RETRY_S)
+            os.replace(temp, path)
+    except OSError as exc:
+        if temp is not None:
+            with contextlib.suppress(OSError):
+                temp.unlink(missing_ok=True)
+        raise ConfigError(f"{path}: {exc.strerror or exc}") from exc
+
+
+def _raw_league(path: Path, league_key: str) -> dict[str, Any]:
+    """The ``[[league]]`` table ``league_key`` exactly as the file writes it (no preset applied)."""
+    try:
+        data = tomllib.loads(_read(path))
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+    tables = data.get("league")
+    known: list[str] = []
+    for table in tables if isinstance(tables, list) else ():
+        if isinstance(table, dict) and table.get("key") == league_key:
+            return table
+        known.append(str(table.get("key")) if isinstance(table, dict) else "?")
+    raise ConfigError(f"{path}: no league {league_key!r}; known: {', '.join(known)}")
+
+
+def _plain(value: object) -> object:
+    """A tomlkit item as the plain Python value it stands for (tomlkit's ints and strings compare equal already, but a
+    table or an array does not compare equal to a dict or a list)."""
+    unwrap = getattr(value, "unwrap", None)
+    return unwrap() if callable(unwrap) else value
+
+
+def _require(path: Path) -> None:
+    """Fail on a missing file before an edit takes its lock, so editing nothing leaves no ``config.toml.lock``."""
+    if not path.exists():
+        _read(path)
 
 
 def _read(path: Path) -> str:
