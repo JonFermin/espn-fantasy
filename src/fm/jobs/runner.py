@@ -5,35 +5,51 @@
 - **Ticks.** A tick is due by wall clock (``next_tick_at``), never by counting sleeps, so the first iteration after
   the machine slept ticks at once and reports what was missed. The config is reloaded for every tick, so an edit
   from ``fm setup``, the dashboard or ``fm config set-preset`` applies without a restart; a config that will not load
-  is logged and alerted, and the loop keeps polling with the channel it has.
-- **Approvals.** Between ticks the loop polls the phone channel. A poll waits server-side (Telegram's long poll, the
-  ntfy subscription) when the next tick is at least :attr:`RunOptions.poll_wait_s` away, otherwise it asks for what is
-  waiting and sleeps a little, so a tick is never late by more than the channel's own wait. Each press goes through
-  :func:`fm.notify.handle_reply` (the trust boundary: nonce, then ``fm.proposals``) and then
-  :func:`fm.jobs.tick.execute_on_approval`, so an approval close to its deadline executes immediately through the
-  one write path instead of waiting for the next tick. ``fm bot`` never wired that hook in.
+  is logged and alerted, the tick is skipped, and the loop keeps polling with the channel it has.
+- **Each tick is a child process with a hard timeout.** On a real machine a scheduled ``fm tick`` hung for five days
+  inside a headless browser session and no tick completed after it. :func:`child_tick`, the default tick runner,
+  starts ``python -m fm.jobs.runner tick`` (:func:`tick_child_main`, the ``fm tick`` command), appends its stdout and
+  stderr to ``logs/run.log``, and waits at most :attr:`RunOptions.tick_timeout` (20 minutes). A tick that overstays
+  is stopped with its whole process tree, browser included (:mod:`fm.jobs.proctree`), alerted as "tick timed out
+  after N min and was stopped" at most once an hour, and the loop carries on. The child would otherwise skip because
+  this process holds the run lock; its environment names this pid (:data:`fm.jobs.runlock.HELD_BY_ENV`), and ``fm
+  tick`` runs under the parent's lock only when that pid is the lock's holder.
+- **Approvals stay in this process.** Between ticks the loop polls the phone channel. A poll waits server-side
+  (Telegram's long poll, the ntfy subscription) when the next tick is at least :attr:`RunOptions.poll_wait_s` away,
+  otherwise it asks for what is waiting and sleeps a little, so a tick is never late by more than the channel's own
+  wait. Each press goes through :func:`fm.notify.handle_reply` (the trust boundary: nonce, then ``fm.proposals``) and
+  then :func:`fm.jobs.tick.execute_on_approval`, so an approval close to its deadline executes immediately through
+  the one write path (:func:`fm.executor.live_opener` in production, a fake in tests) instead of waiting for the next
+  tick. ``fm bot`` never wired that hook in.
 - **No channel.** When ``config.toml`` names no usable channel the loop just sleeps to the next tick, in short slices
   so ``stop`` and Ctrl+C are answered quickly.
-- **Errors never end the loop.** A tick or a poll that raises is logged with its traceback and alerted at most once
-  per :attr:`RunOptions.alert_every` per kind (``tick``, ``config``, ``poll``, ``approval``); channel errors back off
-  like :func:`fm.notify.listen` (2 s doubling to 60 s). Only ``KeyboardInterrupt``, ``SystemExit`` and
-  ``MemoryError`` get out, and the first is a clean stop.
-- **Exit.** Ctrl+C, the ``stop`` event or ``max_ticks`` ends the loop; the run lock (:mod:`fm.jobs.runlock`) is held
-  for the whole run and released on the way out, whatever happened.
+- **Errors never end the loop.** A tick, a poll, a press or a config load that raises is logged with its traceback
+  and alerted at most once per :attr:`RunOptions.alert_every` per kind (``tick``, ``timeout``, ``config``, ``poll``,
+  ``approval``); channel errors back off like :func:`fm.notify.listen` (2 s doubling to 60 s). Only
+  ``KeyboardInterrupt``, ``SystemExit`` and ``MemoryError`` get out, and the first is a clean stop (a tick child that
+  is running then is stopped with its tree).
+- **Exit.** Ctrl+C, the ``stop`` event or ``max_ticks`` ends the loop; ``stop`` is checked between steps, so a tick
+  that is running finishes or times out first. The run lock (:mod:`fm.jobs.runlock`) is held for the whole run and
+  released on the way out, whatever happened.
 
-Every collaborator is injectable (config loader, store opener, channel opener, tick function, approval hook factory,
-reply handler, runtime opener, clock, sleep, stop event, lock), so the whole loop runs in a test with fake time and
-a fake phone. :func:`run_logging` is the log setup ``fm run`` uses: ``logs/run.log`` under the config dir, rotating
-5 x 1 MB, plus the console when one is attached (``uvw.exe`` starts the loop without one).
+Every collaborator is injectable (config loader, store opener, channel opener, tick runner, approval hook factory,
+reply handler, runtime opener, clock, sleep, stop event, lock), so the whole loop runs in a test with fake time, a
+fake phone and a fake tick; :func:`in_process_tick` runs :func:`fm.jobs.tick.tick` in this process for tests and the
+offline journey, without a timeout. :func:`run_logging` is the log setup ``fm run`` uses: ``logs/run.log`` under the
+config dir, rotating 5 x 1 MB, plus the console when one is attached (``uvw.exe`` starts the loop without one).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+import traceback
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -45,8 +61,9 @@ from fm import paths
 from fm.browser.flows import FlowRegistry
 from fm.config import Config, ConfigError, load_config
 from fm.executor import ExecutorOptions, RuntimeOpener, live_opener
-from fm.jobs.runlock import LockHolder, RunLock
-from fm.jobs.scheduler_base import DEFAULT_INTERVAL_MINUTES, LOGS_DIRNAME, RUN_LOG_FILENAME
+from fm.jobs import proctree
+from fm.jobs.runlock import HELD_BY_ENV, LockHolder, RunLock
+from fm.jobs.scheduler_base import DEFAULT_INTERVAL_MINUTES, LOGS_DIRNAME, RUN_LOG_FILENAME, Runner
 from fm.jobs.tick import ExecutionOutcome, TickOptions, TickReport, execute_on_approval, tick
 from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, Reply, handle_reply, open_channel, send_alert
 from fm.notify.bot import FIRST_BACKOFF_S, MAX_BACKOFF_S
@@ -59,6 +76,16 @@ RUN_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 RUN_LOG_MAX_BYTES = 1_000_000
 RUN_LOG_FILES = 5
 """``run.log`` plus its rotated copies: 5 files of at most 1 MB each."""
+DEFAULT_TICK_TIMEOUT = timedelta(minutes=20)
+"""How long a tick child may run before it is stopped with its process tree (a normal tick takes seconds to a few
+minutes: a sync, the due decisions, an execution or two through the browser)."""
+TICK_CHILD_MODULE = "fm.jobs.runner"
+"""What the tick child runs: ``python -m fm.jobs.runner tick [...]`` (:func:`tick_child_main`)."""
+TICK_WAIT_SLICE_S = 1.0
+"""The parent waits for a tick child in slices this long, so Ctrl+C is answered within a second on every platform."""
+TICK_CRASHED_EXIT = 70
+"""The tick child's exit code when ``fm tick`` raised (``EX_SOFTWARE``), told apart from exit 1, a tick that ran and
+reported a failure it has already alerted."""
 _CRITICAL = (KeyboardInterrupt, SystemExit, MemoryError)
 
 
@@ -68,8 +95,8 @@ class StopSignal(Protocol):
     def is_set(self) -> bool: ...
 
 
-class TickRunner(Protocol):
-    """:func:`fm.jobs.tick.tick` narrowed to how the loop calls it."""
+class TickFunction(Protocol):
+    """:func:`fm.jobs.tick.tick` narrowed to how :func:`in_process_tick` calls it."""
 
     def __call__(
         self,
@@ -82,6 +109,55 @@ class TickRunner(Protocol):
         options: TickOptions,
         clock: Callable[[], datetime],
     ) -> TickReport: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TickCall:
+    """One tick as the loop asks for it: the loop's store, the config just loaded, the channel it opened, the tick's
+    options and the timeout. :func:`child_tick` passes only the options on (the child opens its own store and
+    channel); :func:`in_process_tick` uses all of it."""
+
+    store: Store
+    config: Config
+    channel: NotifyChannel | None
+    options: TickOptions
+    timeout: timedelta
+    clock: Callable[[], datetime]
+
+
+@dataclass(frozen=True, slots=True)
+class TickResult:
+    """What one tick came back with."""
+
+    returncode: int | None
+    """``0``: the tick ran and everything verified. ``1``: it ran and reported a failure (a decision raised, an
+    execution did not verify; the tick alerted it) or refused to start. Anything else: it crashed. ``None``: it
+    overran its timeout and was stopped."""
+    elapsed: timedelta = timedelta(0)
+    lines: tuple[str, ...] = ()
+    """Report lines for the loop to log (an in-process tick); a child's output is already in ``run.log``."""
+    pid: int | None = None
+    """The tick child's pid."""
+    notes: tuple[str, ...] = ()
+    """What went wrong stopping a child that timed out (a ``taskkill`` failure, a process that would not die)."""
+
+    @property
+    def timed_out(self) -> bool:
+        return self.returncode is None
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+    @property
+    def crashed(self) -> bool:
+        return self.returncode is not None and self.returncode not in (0, 1)
+
+
+class TickRunner(Protocol):
+    """Runs one tick for the loop: :func:`child_tick` (the default), :func:`in_process_tick`, or a test's fake."""
+
+    def __call__(self, call: TickCall, /) -> TickResult: ...
 
 
 class ApprovalHookFactory(Protocol):
@@ -117,17 +193,23 @@ class RunOptions:
     sync: bool = True
     """Let the tick sync a league whose stored state is stale."""
     executor: ExecutorOptions | None = None
+    """For executions in this process (a near-deadline approval) and :func:`in_process_tick`; a tick child uses the
+    executor's defaults."""
+    tick_timeout: timedelta = DEFAULT_TICK_TIMEOUT
+    """A tick that runs longer is stopped with its process tree."""
     poll_wait_s: float = 25.0
     """A poll waits server-side only when the next tick is at least this far away (Telegram holds a long poll open
     for 25 s)."""
+    poll_gap_s: float = 1.0
+    """The pause after a waiting poll, so a channel that answers at once is not polled in a tight loop."""
     idle_poll_s: float = 5.0
     """Closer to a tick than ``poll_wait_s``, polls are non-waiting and this far apart."""
     sleep_slice_s: float = 1.0
     """The longest single sleep: how quickly ``stop`` is noticed."""
     alert_every: timedelta = timedelta(hours=1)
-    """A kind of failure (``tick``, ``config``, ``poll``, ``approval``) is alerted at most this often."""
+    """A kind of failure (``tick``, ``timeout``, ``config``, ``poll``, ``approval``) is alerted at most this often."""
     max_ticks: int | None = None
-    """Stop after this many ticks (tests and the offline journey); ``None`` runs until stopped."""
+    """Stop after this many tick attempts (tests and the offline journey); ``None`` runs until stopped."""
 
 
 @dataclass(slots=True)
@@ -135,9 +217,11 @@ class RunStats:
     """What a run did, returned when the loop ends."""
 
     ticks: int = 0
-    """Ticks that completed (a report came back)."""
+    """Ticks that ran to the end (exit 0, or exit 1 with a failure the tick reported itself)."""
     tick_failures: int = 0
-    """Ticks that raised."""
+    """Ticks that raised or crashed."""
+    tick_timeouts: int = 0
+    """Ticks stopped at the timeout."""
     config_failures: int = 0
     """Ticks skipped because ``config.toml`` would not load."""
     decisions: int = 0
@@ -150,6 +234,11 @@ class RunStats:
     alerts: list[str] = field(default_factory=list[str])
     """Alert titles pushed (or that would have been, without a channel)."""
 
+    @property
+    def attempts(self) -> int:
+        """Every tick the loop started or skipped: what ``max_ticks`` counts."""
+        return self.ticks + self.tick_failures + self.tick_timeouts + self.config_failures
+
 
 def run_forever(
     *,
@@ -161,17 +250,18 @@ def run_forever(
     config_loader: Callable[[], Config] = load_config,
     store_opener: Callable[[], Store] = Store.open,
     channel_opener: Callable[[Config], NotifyChannel] = open_channel,
-    tick_fn: TickRunner = tick,
+    tick_fn: TickRunner | None = None,
     approval_hook: ApprovalHookFactory = execute_on_approval,
     reply_handler: ReplyHandler = handle_reply,
     opener: RuntimeOpener | None = None,
     flows: FlowRegistry | None = None,
     log: logging.Logger = logger,
 ) -> RunStats:
-    """Run ticks and approvals until ``stop`` is set, Ctrl+C, or ``options.max_ticks`` ticks (the module docs give
-    the loop). Takes the run lock first, waiting for a tick that is mid-run, and releases it on any exit. Every
-    collaborator defaults to the live one: ``config.toml``, ``state.db``, the configured channel, the real tick,
-    :func:`fm.executor.live_opener` (the browser opens only when something executes)."""
+    """Run ticks and approvals until ``stop`` is set, Ctrl+C, or ``options.max_ticks`` tick attempts (the module docs
+    give the loop). Takes the run lock first, waiting for a tick that is mid-run, and releases it on any exit. Every
+    collaborator defaults to the live one: ``config.toml``, ``state.db``, the configured channel, the tick as a child
+    process (:func:`child_tick`), :func:`fm.executor.live_opener` for near-deadline approvals (the browser opens only
+    when something executes)."""
     opts = options if options is not None else RunOptions()
     stop_signal = stop if stop is not None else threading.Event()
     run_lock = lock if lock is not None else RunLock(command="fm run")
@@ -186,7 +276,7 @@ def run_forever(
                 sleep=sleep,
                 config_loader=config_loader,
                 channel_opener=channel_opener,
-                tick_fn=tick_fn,
+                tick_fn=tick_fn if tick_fn is not None else child_tick,
                 approval_hook=approval_hook,
                 reply_handler=reply_handler,
                 opener=opener if opener is not None else live_opener(),
@@ -229,8 +319,6 @@ class _Loop:
         self.channel_opener = channel_opener
         self.tick_fn = tick_fn
         self.reply_handler = reply_handler
-        self.opener = opener
-        self.flows = flows
         self.log = log
         self.stats = RunStats()
         self.channel: NotifyChannel | None = None
@@ -247,8 +335,9 @@ class _Loop:
 
     def run(self) -> RunStats:
         self.log.info(
-            "fm run: tick every %s%s",
+            "fm run: tick every %s (timeout %s)%s",
             _describe(self.options.interval),
+            _span(self.options.tick_timeout),
             "" if self.options.execute else " (no execution)",
         )
         next_tick_at = self.clock()
@@ -257,23 +346,21 @@ class _Loop:
             while not self.stop.is_set():
                 now = self.clock()
                 if now >= next_tick_at:
-                    self._tick(now)
+                    self._tick()
                     next_tick_at = self.clock() + self.options.interval
-                    done = self.stats.ticks + self.stats.tick_failures + self.stats.config_failures
-                    if self.options.max_ticks is not None and done >= self.options.max_ticks:
+                    if self.options.max_ticks is not None and self.stats.attempts >= self.options.max_ticks:
                         self.stats.stopped_by = "max_ticks"
                         break
                     continue
-                remaining = (next_tick_at - now).total_seconds()
                 if self.channel is None:
-                    self._pause(min(remaining, self.options.sleep_slice_s))
+                    self._pause(min(self._until(next_tick_at), self.options.sleep_slice_s))
                     continue
-                wait = remaining >= self.options.poll_wait_s
+                wait = self._until(next_tick_at) >= self.options.poll_wait_s
                 try:
                     replies = self.channel.poll(wait=wait)
                 except NotifyError as exc:
                     self._poll_failed(f"{self.channel.name}: {exc}", backoff)
-                    self._pause(backoff)
+                    self._pause(min(backoff, self._until(next_tick_at)))
                     backoff = min(backoff * 2, MAX_BACKOFF_S)
                     continue
                 except _CRITICAL:
@@ -281,14 +368,14 @@ class _Loop:
                 except Exception as exc:
                     self.log.exception("fm run: polling %s failed", self.channel.name)
                     self._poll_failed(f"{self.channel.name}: {type(exc).__name__}: {exc}", backoff)
-                    self._pause(backoff)
+                    self._pause(min(backoff, self._until(next_tick_at)))
                     backoff = min(backoff * 2, MAX_BACKOFF_S)
                     continue
                 backoff = FIRST_BACKOFF_S
                 for reply in replies:
                     self._handle(reply)
-                if not wait:
-                    self._pause(min(remaining, self.options.idle_poll_s))
+                gap = self.options.poll_gap_s if wait else self.options.idle_poll_s
+                self._pause(min(gap, self._until(next_tick_at)))
             else:
                 self.stats.stopped_by = "stop"
         except KeyboardInterrupt:
@@ -303,6 +390,9 @@ class _Loop:
         )
         return self.stats
 
+    def _until(self, moment: datetime) -> float:
+        return max((moment - self.clock()).total_seconds(), 0.0)
+
     def _pause(self, seconds: float) -> None:
         """Sleep ``seconds`` in slices of at most ``sleep_slice_s``, giving up as soon as ``stop`` is set."""
         left = seconds
@@ -313,28 +403,21 @@ class _Loop:
 
     # --- ticks
 
-    def _tick(self, now: datetime) -> None:
-        try:
-            config = self.config_loader()
-        except ConfigError as exc:
-            self.stats.config_failures += 1
-            self.log.error("fm run: config not loaded, tick skipped: %s", exc)
-            self._alert(
-                "config", "fm run: config.toml not loaded", f"{exc}\nFix it; the loop retries at the next tick."
-            )
+    def _tick(self) -> None:
+        config = self._load_config()
+        if config is None:
             return
         self._refresh_channel(config)
-        options = TickOptions(execute=self.options.execute, sync=self.options.sync, executor=self.options.executor)
+        call = TickCall(
+            store=self.store,
+            config=config,
+            channel=self.channel,
+            options=TickOptions(execute=self.options.execute, sync=self.options.sync, executor=self.options.executor),
+            timeout=self.options.tick_timeout,
+            clock=self.clock,
+        )
         try:
-            report = self.tick_fn(
-                self.store,
-                config,
-                channel=self.channel,
-                opener=self.opener,
-                flows=self.flows,
-                options=options,
-                clock=self.clock,
-            )
+            result = self.tick_fn(call)
         except _CRITICAL:
             raise
         except Exception as exc:
@@ -346,9 +429,49 @@ class _Loop:
                 f"{type(exc).__name__}: {exc}\nThe loop continues; see logs/{RUN_LOG_FILENAME}.",
             )
             return
-        self.stats.ticks += 1
-        for line in report.lines():
+        for line in result.lines:
             self.log.info("%s", line)
+        for note in result.notes:
+            self.log.warning("fm run: %s", note)
+        took = _span(result.elapsed)
+        if result.timed_out:
+            self.stats.tick_timeouts += 1
+            what = f"tick timed out after {_span(call.timeout)} and was stopped"
+            self.log.error("fm run: %s (pid %s and every process under it killed)", what, result.pid)
+            self._alert(
+                "timeout",
+                "fm run: tick timed out",
+                f"{what}; its processes (browser included) were killed. The loop continues and the next tick runs on "
+                f"time; see logs/{RUN_LOG_FILENAME}.",
+            )
+        elif result.crashed:
+            self.stats.tick_failures += 1
+            self.log.error("fm run: tick crashed (exit %s) after %s", result.returncode, took)
+            self._alert(
+                "tick",
+                "fm run: tick failed",
+                f"The tick exited with code {result.returncode}. The loop continues; see logs/{RUN_LOG_FILENAME}.",
+            )
+        elif result.ok:
+            self.stats.ticks += 1
+            self.log.info("fm run: tick done in %s", took)
+        else:
+            self.stats.ticks += 1  # it ran; what failed in it was reported (and alerted) by the tick
+            self.log.warning("fm run: tick finished with a failure (exit %s) in %s", result.returncode, took)
+
+    def _load_config(self) -> Config | None:
+        try:
+            return self.config_loader()
+        except _CRITICAL:
+            raise
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, ConfigError) else f"{type(exc).__name__}: {exc}"
+            self.stats.config_failures += 1
+            self.log.error("fm run: config not loaded, tick skipped: %s", detail)
+            self._alert(
+                "config", "fm run: config.toml not loaded", f"{detail}\nFix it; the loop retries at the next tick."
+            )
+            return None
 
     def _refresh_channel(self, config: Config) -> None:
         """Open the channel ``config`` names, or reopen it when the notify settings or secrets changed since."""
@@ -359,8 +482,10 @@ class _Loop:
         self.channel_key = key
         try:
             self.channel = self.channel_opener(config)
-        except NotifyError as exc:
-            problem = str(exc)
+        except _CRITICAL:
+            raise
+        except Exception as exc:
+            problem = str(exc) if isinstance(exc, NotifyError) else f"{type(exc).__name__}: {exc}"
             if problem != self.channel_problem:
                 self.log.warning(
                     "fm run: no phone channel (%s); proposals wait in the store for fm proposals or the dashboard, "
@@ -391,6 +516,16 @@ class _Loop:
         except sqlite3.Error as exc:
             self.log.error(
                 "fm run: could not record the press on proposal #%d (press again): %s", reply.proposal_id, exc
+            )
+            return
+        except _CRITICAL:
+            raise
+        except Exception as exc:
+            self.log.exception("fm run: the press on proposal #%d failed", reply.proposal_id)
+            self._alert(
+                "approval",
+                f"fm run: press on #{reply.proposal_id} not recorded",
+                f"{type(exc).__name__}: {exc}\nPress again, or decide with fm proposals.",
             )
             return
         if result is None:
@@ -462,6 +597,151 @@ def _describe(interval: timedelta) -> str:
     return f"{seconds} s"
 
 
+def _span(span: timedelta) -> str:
+    """``20 min``, ``2 min 30 s``, ``41 s``, ``0.5 s``: a timeout or a duration in a log line or an alert."""
+    total = span.total_seconds()
+    if total < 10 and total != int(total):
+        return f"{total:.1f} s"
+    seconds = round(total)
+    minutes, rest = divmod(seconds, 60)
+    if not minutes:
+        return f"{rest} s"
+    return f"{minutes} min" if not rest else f"{minutes} min {rest} s"
+
+
+# --- the tick runners -------------------------------------------------------------------------------------------------
+
+
+def tick_child_argv(options: TickOptions, *, python: str | None = None) -> list[str]:
+    """``<python> -m fm.jobs.runner tick [--no-execute] [--no-sync] [--league K ...]``: ``fm tick`` with
+    ``options``, run by this interpreter (the venv's, so the child imports the same ``fm``)."""
+    argv = [python if python is not None else sys.executable, "-m", TICK_CHILD_MODULE, "tick"]
+    if not options.execute:
+        argv.append("--no-execute")
+    if not options.sync:
+        argv.append("--no-sync")
+    for key in options.leagues or ():
+        argv += ["--league", key]
+    return argv
+
+
+def child_tick(
+    call: TickCall,
+    /,
+    *,
+    argv: Sequence[str] | None = None,
+    log_path: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    runner: Runner = proctree.quiet_runner,
+    log: logging.Logger = logger,
+) -> TickResult:
+    """The live tick runner: ``fm tick`` as a child process (``argv``, default :func:`tick_child_argv`) whose stdout
+    and stderr are appended to ``log_path`` (default ``logs/run.log``), stopped with its whole process tree when it
+    runs past ``call.timeout`` (:mod:`fm.jobs.proctree`; ``runner`` runs the kill helpers). The child's environment is
+    ``environ`` (default this process's) plus :data:`fm.jobs.runlock.HELD_BY_ENV` naming this pid, so the tick runs
+    under this process's run lock instead of skipping, and unbuffered UTF-8 output, so nothing is lost when it is
+    killed. Waits on the process only, never on a pipe a grandchild could hold open. Ctrl+C while it runs stops the
+    tree before the interrupt goes on."""
+    command = list(argv) if argv is not None else tick_child_argv(call.options)
+    env = dict(os.environ if environ is None else environ)
+    env[HELD_BY_ENV] = str(os.getpid())
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    target = log_path if log_path is not None else run_log_path()
+    log.info("fm run: tick starting (stopped after %s)", _span(call.timeout))
+    started = time.monotonic()
+    output = proctree.open_append(target)
+    try:
+        tree = proctree.spawn(command, env=env, output=output)
+    finally:
+        os.close(output)
+    deadline = started + max(call.timeout.total_seconds(), 0.0)
+    notes: list[str] = []
+    returncode: int | None = None
+    try:
+        while True:
+            # In slices: on Windows a single long wait cannot be interrupted, and Ctrl+C would wait for the timeout.
+            try:
+                returncode = tree.wait(min(TICK_WAIT_SLICE_S, max(deadline - time.monotonic(), 0.0)))
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    notes = tree.kill(runner=runner)
+                    break
+    except BaseException:
+        tree.kill(runner=runner)  # Ctrl+C (or SIGTERM) while the tick runs: never leave its tree behind
+        raise
+    return TickResult(
+        returncode=returncode,
+        elapsed=timedelta(seconds=time.monotonic() - started),
+        pid=tree.pid,
+        notes=tuple(notes),
+    )
+
+
+def in_process_tick(
+    *, tick_fn: TickFunction = tick, opener: RuntimeOpener | None = None, flows: FlowRegistry | None = None
+) -> TickRunner:
+    """A tick runner that calls ``tick_fn`` (default :func:`fm.jobs.tick.tick`) in this process with the loop's
+    store, config and channel, ``opener`` and ``flows``: what tests and the offline journey use. It has no timeout
+    (nothing can stop a call in the same process), which is why ``fm run`` never uses it."""
+
+    def run(call: TickCall, /) -> TickResult:
+        started = time.monotonic()
+        report = tick_fn(
+            call.store,
+            call.config,
+            channel=call.channel,
+            opener=opener,
+            flows=flows,
+            options=call.options,
+            clock=call.clock,
+        )
+        return TickResult(
+            returncode=0 if report.ok else 1,
+            elapsed=timedelta(seconds=time.monotonic() - started),
+            lines=tuple(report.lines()),
+        )
+
+    return run
+
+
+def tick_child_main(args: Sequence[str] | None = None) -> int:
+    """The tick child's entry point (``python -m fm.jobs.runner tick [...]``): the ``fm`` CLI with ``args`` (default
+    ``sys.argv[1:]``; :func:`child_tick` always passes ``tick`` and its options), ``fm`` log lines at INFO on stderr
+    in the ``run.log`` format, and the exit code returned. An exception the CLI lets through is printed and becomes
+    :data:`TICK_CRASHED_EXIT`, so the loop tells a crash from a tick that reported a failure (exit 1)."""
+    from fm.cli import app  # deferred: fm.cli imports fm.commands.run, which imports this module
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter(RUN_LOG_FORMAT))
+    fm_logger = logging.getLogger("fm")
+    previous = fm_logger.level
+    fm_logger.addHandler(handler)
+    if previous == logging.NOTSET or previous > logging.INFO:
+        fm_logger.setLevel(logging.INFO)
+    try:
+        app(args=list(sys.argv[1:] if args is None else args), prog_name="fm", standalone_mode=True)
+    except SystemExit as exc:
+        return _exit_code(exc.code)
+    except Exception:
+        traceback.print_exc()
+        return TICK_CRASHED_EXIT
+    finally:
+        fm_logger.removeHandler(handler)
+        fm_logger.setLevel(previous)
+    return 0
+
+
+def _exit_code(code: object) -> int:
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    print(code, file=sys.stderr)  # sys.exit("message") prints it and exits 1
+    return 1
+
+
 # --- logging ----------------------------------------------------------------------------------------------------------
 
 
@@ -503,16 +783,31 @@ def run_logging(
 
 
 __all__ = [
+    "DEFAULT_TICK_TIMEOUT",
     "RUN_LOG_FILES",
     "RUN_LOG_FORMAT",
     "RUN_LOG_MAX_BYTES",
+    "TICK_CHILD_MODULE",
+    "TICK_CRASHED_EXIT",
+    "TICK_WAIT_SLICE_S",
     "ApprovalHookFactory",
     "ReplyHandler",
     "RunOptions",
     "RunStats",
     "StopSignal",
+    "TickCall",
+    "TickFunction",
+    "TickResult",
     "TickRunner",
+    "child_tick",
+    "in_process_tick",
     "run_forever",
     "run_log_path",
     "run_logging",
+    "tick_child_argv",
+    "tick_child_main",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(tick_child_main())

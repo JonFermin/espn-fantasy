@@ -6,7 +6,9 @@ the report. ``--no-execute`` runs everything but the writes and lists what would
 on the stored state. The exit code is 1 when a decision failed or an execution did not verify, so the scheduler's log
 shows it. The tick holds the run lock (:mod:`fm.jobs.runlock`) while it works; when ``fm run`` holds it, the tick
 prints ``fm run is active (pid N); skipping`` and exits 0, which is what lets the scheduled task stay installed as
-the Windows wake timer beside ``fm autostart``.
+the Windows wake timer beside ``fm autostart``. The one exception is the tick ``fm run`` itself starts as a child
+process: its environment names the lock holder's pid (:data:`fm.jobs.runlock.HELD_BY_ENV`), and when that matches the
+lock record the tick runs under the parent's lock instead of skipping (:func:`fm.jobs.runlock.held_by_parent`).
 
 ``fm schedule`` registers that tick with the platform's scheduler (:func:`backend`): on Windows the Task Scheduler
 through :mod:`fm.jobs.scheduler_windows` (a ``.cmd`` wrapper, ``schtasks /Create`` every ``--every`` minutes, and the
@@ -24,7 +26,7 @@ from typing import Annotated, NoReturn
 import typer
 
 from fm.config import ConfigError, load_config
-from fm.jobs.runlock import RunLock, RunLockHeld
+from fm.jobs.runlock import RunLock, RunLockHeld, held_by_parent
 from fm.jobs.scheduler_base import (
     DEFAULT_INTERVAL_MINUTES,
     MAX_INTERVAL_MINUTES,
@@ -89,6 +91,9 @@ def tick_(league: LeagueOption = None, no_execute: NoExecuteOption = False, no_s
         lock.acquire()
     except RunLockHeld as exc:
         holder = exc.holder
+        if held_by_parent(holder):  # the tick child of fm run, which holds the lock for it
+            _tick_once(league, no_execute, no_sync)
+            return
         who = holder.command if holder is not None and holder.command else "fm run"
         pid = str(holder.pid) if holder is not None else "unknown"
         typer.echo(f"{who} is active (pid {pid}); skipping")

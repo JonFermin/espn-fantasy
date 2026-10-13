@@ -8,15 +8,21 @@ timer: it wakes the PC, finds the lock held, exits, and the woken loop catches u
 (:mod:`fm.jobs.runner`).
 
 The lock is an OS-level exclusive lock on the file, so a process that dies releases it with no stale pid file to
-clean up: ``msvcrt.locking`` on Windows, ``fcntl.flock`` elsewhere. This is the one platform branch outside the
-scheduler backends (CLAUDE.md), kept to :func:`_lock` and :func:`_unlock`. The holder writes ``{pid, command,
-started_at}`` as JSON at the start of the file and :meth:`RunLock.holder` reads it from any process. On Windows a
-byte-range lock also blocks other processes' reads of the locked range, so the lock is taken on one byte at
-:data:`LOCK_OFFSET`, far past the holder record, and a read of the record never touches it (``fcntl.flock`` locks the
-whole file but never blocks reads).
+clean up: ``msvcrt.locking`` on Windows, ``fcntl.flock`` elsewhere. This is one of the two platform branches outside
+the scheduler backends (CLAUDE.md; the other is :mod:`fm.jobs.proctree`), kept to :func:`_lock` and :func:`_unlock`.
+The holder writes ``{pid, command, started_at}`` as JSON at the start of the file and :meth:`RunLock.holder` reads it
+from any process. On Windows a byte-range lock also blocks other processes' reads of the locked range, so the lock is
+taken on one byte at :data:`LOCK_OFFSET`, far past the holder record, and a read of the record never touches it
+(``fcntl.flock`` locks the whole file but never blocks reads).
 
 Both lock calls are non-blocking; a blocking :meth:`RunLock.acquire` retries them on a timer with an injectable
 ``sleep``, so a test waits in fake time and ``fm run`` can say what it is waiting for (``on_wait``).
+
+``fm run`` runs each tick as a child process (``fm tick`` under a hard timeout, :func:`fm.jobs.runner.child_tick`)
+while it keeps holding the lock itself, so that child must not skip. The parent puts its pid in
+:data:`HELD_BY_ENV` in the child's environment, and :func:`held_by_parent` lets ``fm tick`` run without the lock only
+when that pid is the one the lock record names: a stale or copied variable never lets a second tick in beside a
+running ``fm run``.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +46,8 @@ LOCK_OFFSET = 1 << 20
 """The byte locked on Windows: 1 MiB in, far beyond the holder record, so reading the record never hits the lock."""
 LOCK_POLL_S = 0.5
 """How often a blocking acquire retries the non-blocking lock."""
+HELD_BY_ENV = "FM_RUN_LOCK_HELD_BY"
+"""Set by ``fm run`` in its tick child's environment: the pid holding the lock on the child's behalf."""
 _HELD_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK})
 """``msvcrt.locking`` answers a held region with ``EACCES`` (``EDEADLK`` after its own retries); ``flock`` with
 ``EWOULDBLOCK``/``EAGAIN``. Any other error is a real failure and propagates."""
@@ -226,6 +234,17 @@ class RunLock:
         os.write(fd, payload)
 
 
+def held_by_parent(holder: LockHolder | None, environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the lock is held on this process's behalf: ``environ`` (default ``os.environ``) names, in
+    :data:`HELD_BY_ENV`, the very pid ``holder`` (the current lock record) belongs to. ``fm tick`` then runs as the
+    tick child of that ``fm run`` instead of skipping."""
+    env = os.environ if environ is None else environ
+    value = env.get(HELD_BY_ENV, "").strip()
+    if holder is None or not value.isdigit():
+        return False
+    return int(value) == holder.pid
+
+
 def _open(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
@@ -233,11 +252,13 @@ def _open(path: Path) -> int:
 
 
 __all__ = [
+    "HELD_BY_ENV",
     "LOCK_FILENAME",
     "LOCK_OFFSET",
     "LOCK_POLL_S",
     "LockHolder",
     "RunLock",
     "RunLockHeld",
+    "held_by_parent",
     "lock_path",
 ]
