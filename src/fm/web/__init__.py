@@ -3,7 +3,9 @@ the loop unless ``--no-ui``.
 
 - :mod:`fm.web.app`: the Starlette app. A JSON API over :mod:`fm.views`, :mod:`fm.health`, the proposal queue, the
   kill switch, the reports and :mod:`fm.config_edit`, one static page, and the guard every request passes (the
-  ``Host`` check, the per-process token on every POST, no CORS).
+  ``Host`` check, the session cookie on every ``/api`` call, the session's CSRF token on every POST, no CORS).
+- :mod:`fm.web.login`: the one-time sign-in links the server writes to ``<config dir>/dashboard.url``, and how ``fm
+  ui`` finds a dashboard that is already served (standard library only).
 - :mod:`fm.web.server`: one socket bound on :data:`LOOPBACK` and uvicorn serving it, either in the foreground
   (``fm ui``) or in a daemon thread (``fm run``).
 

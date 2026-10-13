@@ -14,10 +14,14 @@ two layers, mirroring :mod:`fm.model.ids`:
    tell them apart, are ambiguous. A player no nba.com name fits is tried once more on his team by surname and a first
    name one spelling shortens (``Herb Jones`` -> ``Herbert Jones``, ``Nicolas Claxton`` -> ``Nic Claxton``, but never
    ``Caleb`` -> ``Cody``). Matches that rest on the name alone, disagree with ESPN on team or position, or are partial
-   stay in the crosswalk and are called out in ``warnings``. A player neither way finds is a *no-history* player (a
-   rookie nba.com does not list yet): he gets no nba.com id and a ``NO_HISTORY`` :class:`MatchNote` naming any near
-   miss on his team. A player several persons fit, or whose namesake is mapped to another player, is left unmapped
-   with a note saying why.
+   stay in the crosswalk and are called out in ``warnings``. A name match his team does not confirm is taken only to a
+   person this season's data lists (``current``: this season's splits, DARKO's sheet, the active players), so a rookie
+   never inherits a departed namesake's history. A player neither way finds is a *no-history* player (a rookie nba.com
+   does not list yet) only when nobody nba.com lists could plausibly be him: no free person with his surname on his
+   team, and none anywhere with his surname and first initial. He gets no nba.com id and a ``NO_HISTORY``
+   :class:`MatchNote`. A player with such a candidate (a veteran ESPN spells differently, ``Moe Wagner``), several
+   persons fit, a namesake mapped to another player, or only a namesake from an earlier season, is left unmapped with
+   a note saying why and naming the candidates.
 2. ``data/id_overrides_nba.csv``, the reviewed file, in the NFL file's layout (``espn_id,source,source_id,name,note``,
    ``#`` comments allowed). A row pins the player to that nba.com id, or with an empty ``source_id`` makes him a
    no-history player, whatever the match would say. Matching runs around the pins: a pinned player and a pinned
@@ -28,13 +32,14 @@ Invariants: an nba.com id maps to one ESPN player, and a player has at most one 
 enforces the same). :func:`nba_gate` is the gate DESIGN asks for, aimed at what it exists to stop, a wrong id: a
 rostered player whose identity is in doubt (several nba.com persons fit him, his namesake is mapped to another player,
 or the crosswalk has no note on why he is unmapped) fails it, and :class:`UnmappedNbaPlayersError` names each one, why,
-and the overrides line that settles him. A rostered no-history player passes: a missing id costs a projection source,
-not a correct one, and the gate's ``warnings`` list him, as they list the rostered matches that rest on the name alone.
-:func:`check_nba_rostered` raises the gate's error. Like the NFL gate it refuses a league of another sport.
-:meth:`NbaCrosswalk.save` replaces the sport's ``player_ids`` rows atomically and :meth:`NbaCrosswalk.from_store`
-reads them back, so jobs that only translate ids never touch the sources. A crosswalk read back carries no notes, so
-checked against it an unmapped rostered player is unexplained and fails the gate: only a fresh build knows who has no
-history.
+and the overrides line that settles him (with the candidate ids filled in). A rostered no-history player passes: a
+missing id costs a projection source, not a correct one, and the gate's ``warnings`` list him, as they list the
+rostered matches that rest on the name alone. :func:`check_nba_rostered` raises the gate's error. Like the NFL gate it
+refuses a league of another sport. :meth:`NbaCrosswalk.save` replaces the sport's ``player_ids`` rows atomically, the
+build's no-history verdicts with them (as :data:`NO_HISTORY_SOURCE` rows), and :meth:`NbaCrosswalk.from_store` reads
+both back, so jobs that only translate ids never touch the sources and a sync that keeps the saved crosswalk (a source
+down) still passes the rookies that build passed. Any other unmapped rostered player is unexplained against a
+crosswalk read back, and fails the gate.
 
 **No-history players downstream.** The NBA sources keyed by nba.com id join through this crosswalk and skip a player
 without one: DARKO (:func:`fm.model.value_nba.darko_rows`) and the stats baseline
@@ -57,9 +62,9 @@ import io
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -224,7 +229,9 @@ class NbaPerson:
 class MatchKind(StrEnum):
     """What a :class:`MatchNote` reports. ``NAME_ONLY``, ``DISPUTED`` and ``PARTIAL`` players are mapped.
     ``NO_HISTORY`` and ``REMOVED`` players have no nba.com id by design and pass the gate (:data:`NO_HISTORY_KINDS`);
-    ``NO_MATCH`` (his namesake is mapped to another player) and ``AMBIGUOUS`` ones have none and fail it."""
+    ``NO_MATCH`` (his namesake is mapped to another player, his only namesake is from an earlier season, or no name
+    fits but someone could be him: his surname on his team, or his surname and first initial anywhere) and
+    ``AMBIGUOUS`` ones have none and fail it, naming the candidates."""
 
     NO_MATCH = "no_match"
     AMBIGUOUS = "ambiguous"
@@ -500,13 +507,32 @@ def _who(espn_id: int, name: str | None, position: str | None = None, pro_team: 
     return f"{name} ({where})" if name else where
 
 
+NO_HISTORY_SOURCE = "nba_no_history"
+"""The ``player_ids`` source :meth:`NbaCrosswalk.save` keeps no-history verdicts under: one row per such player, its
+``source_id`` his ESPN id (the table wants one owner per source id) and its ``origin`` the note's kind (``no_history``
+or ``removed``). Readers of ``nba`` ids never see these rows."""
+_STORED_KINDS: Mapping[str, MatchKind] = MappingProxyType({kind.value: kind for kind in NO_HISTORY_KINDS})
+
+
+def _stored_note(row: PlayerIdRow) -> MatchNote:
+    """A saved no-history verdict as the note the gate reads (the saved build's reason, as far as the row tells it)."""
+    kind = _STORED_KINDS[row.origin]
+    if kind is MatchKind.REMOVED:
+        reason = f"{NBA_OVERRIDES.name} keeps him without an nba.com id (an empty source_id): no history"
+    else:
+        reason = f"no nba.com player could be him when the crosswalk was saved ({row.as_of:%Y-%m-%d})"
+    return MatchNote(row.espn_id, f"ESPN {row.espn_id}", kind, reason)
+
+
 class NbaCrosswalk:
     """An immutable ESPN <-> nba.com id map for NBA players, with O(1) lookups both ways.
 
     Built by :func:`build_nba_crosswalk` or read back with :meth:`from_store`. ``warnings`` summarise the build's
     data-quality notes (unmatched, ambiguous and no-history players, matches on the name alone or that disagree with
     ESPN, partial matches); ``notes`` carry the per-player detail behind them, which the gate decides by and quotes. A
-    crosswalk read from the store has neither.
+    crosswalk read from the store has no warnings, and of the notes only its no-history verdicts (:meth:`save` keeps
+    them beside the ids), so the gate still passes those players when a sync keeps the saved crosswalk.
+    ``as_of`` stamps the verdicts :meth:`save` writes (the build's ``as_of``).
     """
 
     def __init__(
@@ -515,6 +541,7 @@ class NbaCrosswalk:
         *,
         warnings: Iterable[str] = (),
         notes: Iterable[MatchNote] = (),
+        as_of: datetime | None = None,
     ) -> None:
         by_player: dict[int, dict[str, PlayerIdRow]] = {}
         by_source: dict[tuple[str, str], PlayerIdRow] = {}
@@ -539,6 +566,7 @@ class NbaCrosswalk:
         self.warnings = tuple(warnings)
         self.notes = tuple(sorted(notes, key=lambda note: (note.name, note.espn_id)))
         self._notes = {note.espn_id: note for note in self.notes}
+        self.as_of = as_of
 
     @property
     def rows(self) -> tuple[PlayerIdRow, ...]:
@@ -568,8 +596,8 @@ class NbaCrosswalk:
 
     def no_history(self, espn_id: int) -> bool:
         """True for a player without an nba.com id whom the build knows needs none: nba.com lists nobody who could be
-        him, or an override keeps him without one (:data:`NO_HISTORY_KINDS`). A crosswalk read from the store has no
-        notes, so it knows no such player."""
+        him, or an override keeps him without one (:data:`NO_HISTORY_KINDS`). A crosswalk read from the store knows
+        the verdicts of the build that saved it, and nobody added since."""
         note = self._notes.get(espn_id)
         return note is not None and note.kind in NO_HISTORY_KINDS and self.nba_id(espn_id) is None
 
@@ -669,17 +697,43 @@ class NbaCrosswalk:
         return f" [{note.reason}]"
 
     def save(self, store: Store) -> int:
-        """Replace the sport's ``player_ids`` rows with this crosswalk in one transaction; returns the row count.
+        """Replace the sport's ``player_ids`` rows with this crosswalk in one transaction; returns the number of id
+        mappings saved.
 
         A replace rather than an upsert (``PlayerIdRepo.replace_sport``): when a pin moves an nba.com id to another
-        player, the old row would otherwise collide with the table's one-owner-per-source-id constraint.
+        player, the old row would otherwise collide with the table's one-owner-per-source-id constraint. The
+        no-history verdicts go in the same transaction as :data:`NO_HISTORY_SOURCE` rows, so they always describe the
+        ids saved beside them; no schema change, and nothing that reads ``nba`` ids sees them.
         """
-        return store.player_ids.replace_sport(NBA_SPORT, self._rows)
+        stamp = self.as_of if self.as_of is not None else max((row.as_of for row in self._rows), default=None)
+        verdicts = [
+            PlayerIdRow(
+                sport=NBA_SPORT,
+                espn_id=note.espn_id,
+                source=NO_HISTORY_SOURCE,
+                source_id=str(note.espn_id),
+                origin=note.kind.value,
+                as_of=stamp if stamp is not None else datetime.now(UTC),
+            )
+            for note in self.notes
+            if self.no_history(note.espn_id)
+        ]
+        store.player_ids.replace_sport(NBA_SPORT, [*self._rows, *verdicts])
+        return len(self._rows)
 
     @classmethod
     def from_store(cls, store: Store) -> NbaCrosswalk:
-        """The crosswalk last saved to the store (empty before the first sync)."""
-        return cls(store.player_ids.for_sport(NBA_SPORT))
+        """The crosswalk last saved to the store (empty before the first sync), with the no-history verdicts of the
+        build that saved it as notes: a sync that keeps the saved crosswalk (a source down) gates against it, and the
+        rookies that build passed must not gate again."""
+        rows: list[PlayerIdRow] = []
+        notes: list[MatchNote] = []
+        for row in store.player_ids.for_sport(NBA_SPORT):
+            if row.source != NO_HISTORY_SOURCE:
+                rows.append(row)
+            elif row.origin in _STORED_KINDS:
+                notes.append(_stored_note(row))
+        return cls(rows, notes=notes)
 
 
 # --- the match --------------------------------------------------------------------------------------------------------
@@ -695,11 +749,15 @@ class _Matcher:
     """Matches ESPN players to persons, one person per player and vice versa: exact names for everyone first, then
     the partial match for whoever no name fits. ``taken`` starts with the ids the overrides pin."""
 
-    def __init__(self, persons: Iterable[NbaPerson], pinned_ids: Mapping[int, int]) -> None:
+    def __init__(
+        self, persons: Iterable[NbaPerson], pinned_ids: Mapping[int, int], current: Collection[int] | None = None
+    ) -> None:
         self.by_name: dict[str, list[NbaPerson]] = {}
         self.by_surname: dict[tuple[str, str], list[NbaPerson]] = {}
+        self.by_last: dict[str, list[NbaPerson]] = {}  # surname alone, any team or none: the no-history check
         self.taken: dict[int, int] = dict(pinned_ids)  # nba id -> ESPN id
         self.pinned_ids = frozenset(pinned_ids)
+        self.current = None if current is None else frozenset(current)
         self.matches: dict[int, _Match] = {}
         self.notes: dict[int, MatchNote] = {}
         seen: set[int] = set()
@@ -713,9 +771,17 @@ class _Matcher:
                     continue
                 _append_once(self.by_name.setdefault(key, []), person)
                 parts = _name_parts(key)
+                if parts is None:
+                    continue
+                _append_once(self.by_last.setdefault(parts[1], []), person)
                 team = tricode(person.team)
-                if parts is not None and team is not None:
+                if team is not None:
                     _append_once(self.by_surname.setdefault((parts[1], team), []), person)
+
+    def is_current(self, person: NbaPerson) -> bool:
+        """Whether this season's data lists ``person`` (this season's splits, DARKO's sheet, the active players): what
+        a match that rests on his name alone needs. Everyone is, when the build was not told who is."""
+        return self.current is None or person.nba_id in self.current
 
     def run(self, players: Sequence[PlayerRow]) -> None:
         shared = Counter(normalize_name(player.full_name) for player in players)
@@ -759,6 +825,8 @@ class _Matcher:
             )
             return True
         _, person, team, position = top[0]
+        if team is not True and not self.is_current(person):
+            return self.not_current(player, person, others=available)
         self.accept(player, person, ORIGIN_NAME_MATCH)
         disputed = [what for what, agreed in (("team", team), ("position", position)) if agreed is False]
         if disputed:
@@ -772,10 +840,12 @@ class _Matcher:
         return True
 
     def match_stranger(self, player: PlayerRow, strangers: Sequence[NbaPerson], *, alone: bool) -> bool:
-        """Settle a player whose free namesakes all disagree with ESPN on both team and position. A lone one is still
-        him: nba.com lags offseason moves (and lists positions its own way), so that is far likelier than a stranger
-        with his name, and the note makes the match a warning. Several are ambiguous, since nothing tells them apart.
-        ``alone`` says whether nba.com lists nobody else with the name (rather than nobody else still free)."""
+        """Settle a player whose free namesakes all disagree with ESPN on both team and position. A lone one who is in
+        this season's data is still him: nba.com lags offseason moves (and lists positions its own way), so that is far
+        likelier than a stranger with his name, and the note makes the match a warning. A lone one only an earlier
+        season lists is not taken (:meth:`not_current`): a rookie who shares a departed player's name would inherit his
+        history. Several are ambiguous, since nothing tells them apart. ``alone`` says whether nba.com lists nobody
+        else with the name (rather than nobody else still free)."""
         ranked = sorted(strangers, key=lambda person: person.nba_id)
         if len(ranked) > 1:
             self.note(
@@ -787,6 +857,8 @@ class _Matcher:
             )
             return True
         (person,) = ranked
+        if not self.is_current(person):
+            return self.not_current(player, person)
         self.accept(player, person, ORIGIN_NAME_MATCH)
         only = "the only nba.com player with this name" if alone else "the only one with this name not mapped already"
         self.note(
@@ -795,6 +867,22 @@ class _Matcher:
             f"matched {person} by name alone ({only}), but ESPN lists him {_describe(player)}; the team and position "
             "disagree",
             (person.nba_id,),
+        )
+        return True
+
+    def not_current(self, player: PlayerRow, person: NbaPerson, *, others: Sequence[NbaPerson] = ()) -> bool:
+        """Leave ``player`` unmapped, in doubt, rather than match him on the name to ``person``, whom only an earlier
+        season lists while ESPN puts him on another team (or none): most likely a rookie who shares a departed
+        player's name, though a veteran back after a year away looks the same, so an override settles it either way.
+        The candidates are ``person``, then any other free namesake (``others``)."""
+        rest = sorted({other.nba_id for other in others} - {person.nba_id})
+        self.note(
+            player,
+            MatchKind.NO_MATCH,
+            f"{person} has this name but is not in this season's data (only an earlier season lists him), and ESPN "
+            f"lists him {_describe(player)}: a namesake who left the league, or him back after a year away; pin the id "
+            "if it is him, or an empty source_id if he has no nba.com history",
+            (person.nba_id, *rest),
         )
         return True
 
@@ -831,12 +919,43 @@ class _Matcher:
                 reason = f"matched {person} by surname, team and first name; confirm it with an override"
                 self.note(player, MatchKind.PARTIAL, reason, (person.nba_id,))
             else:
-                # Nobody nba.com lists is him by name or by surname, team and first name: a rookie it has not added
-                # yet, most likely. A near miss on his team is named so an override can claim it if it is him.
-                close = [person for person in near[player.espn_id] if person.nba_id not in self.taken]
-                hint = f"; on his team: {', '.join(str(person) for person in close)}" if close else ""
-                reason = f"no nba.com player named {player.full_name!r}{hint}"
-                self.note(player, MatchKind.NO_HISTORY, reason, tuple(person.nba_id for person in close))
+                self.unmatched(player, [person for person in near[player.espn_id] if person.nba_id not in self.taken])
+
+    def unmatched(self, player: PlayerRow, on_his_team: Sequence[NbaPerson]) -> None:
+        """Settle a player nba.com lists nobody for by name, or by surname, team and a first name one spelling
+        shortens. He is a no-history player (a rookie nba.com has not added yet) only when nobody nba.com lists could
+        plausibly be him: no free person with his surname on his ESPN team, and none anywhere with his surname and his
+        first initial. Otherwise those persons are candidates and he is left in doubt (``NO_MATCH``, which the gate
+        stops on with an overrides line to complete): a veteran ESPN spells differently (``Moe Wagner`` for
+        ``Moritz``, ``Carlton Carrington`` for ``Bub``) must not lose his history quietly. A rookie whose surname
+        only players on other teams with another first initial share stays a no-history player."""
+        parts = _name_parts(normalize_name(player.full_name))
+        elsewhere: list[NbaPerson] = []
+        if parts is not None:
+            first, surname = parts
+            elsewhere = sorted(
+                (
+                    person
+                    for person in self.by_last.get(surname, [])
+                    if person.nba_id not in self.taken and person not in on_his_team and _same_initial(first, person)
+                ),
+                key=lambda person: person.nba_id,
+            )
+        if not on_his_team and not elsewhere:
+            self.note(player, MatchKind.NO_HISTORY, f"no nba.com player named {player.full_name!r}")
+            return
+        found: list[str] = []
+        if on_his_team:
+            found.append(f"on his team: {', '.join(str(person) for person in on_his_team)}")
+        if elsewhere:
+            found.append(f"with his surname and first initial: {', '.join(str(person) for person in elsewhere)}")
+        self.note(
+            player,
+            MatchKind.NO_MATCH,
+            f"no nba.com player named {player.full_name!r}, but some could be him ({'; '.join(found)}); pin the one "
+            "who is, or an empty source_id if none is (a rookie with no nba.com history)",
+            tuple(person.nba_id for person in (*on_his_team, *elsewhere)),
+        )
 
     def accept(self, player: PlayerRow, person: NbaPerson, origin: str) -> None:
         self.taken[person.nba_id] = player.espn_id
@@ -874,6 +993,15 @@ def _shortens(first: str, person: NbaPerson) -> bool:
     return False
 
 
+def _same_initial(first: str, person: NbaPerson) -> bool:
+    """True when one of the person's spellings has a first name starting with the same letter as ``first``."""
+    for spelling in person.names:
+        parts = _name_parts(normalize_name(spelling))
+        if parts is not None and first[:1] == parts[0][:1]:
+            return True
+    return False
+
+
 def _agreement(player: PlayerRow, person: NbaPerson) -> tuple[bool | None, bool | None]:
     """Whether the team and the position agree; ``None`` where either side does not say."""
     espn_team, nba_team = espn_tricode(player), tricode(person.team)
@@ -894,9 +1022,14 @@ def build_nba_crosswalk(
     overrides: Iterable[Override] = (),
     *,
     as_of: datetime,
+    current: Collection[int] | None = None,
 ) -> NbaCrosswalk:
     """ESPN players (``players`` rows of the ``nba`` sport) matched to nba.com persons by name, team and position
     around the overrides' pins, then the pins themselves. ``as_of`` stamps every row (the inputs' ``as_of``).
+
+    ``current`` are the nba.com ids this season's data lists (this season's splits, DARKO's sheet, the active players
+    in the bundled table). A name match his team does not confirm is taken only to one of them; a person only an
+    earlier season lists leaves the player in doubt instead. ``None`` (the default) counts every person as current.
 
     The crosswalk covers the players given plus every pinned player: :meth:`NbaCrosswalk.save` replaces the sport's
     rows, so pass every player that needs an id (rostered and in the pool). Notes go to ``notes`` and a summary per
@@ -909,7 +1042,7 @@ def build_nba_crosswalk(
             raise CrosswalkError(f"players must be {NBA_SPORT}, got {player.sport} for ESPN {player.espn_id}")
         roster.setdefault(player.espn_id, player)
     pinned_ids = {int(pin.source_id): pin.espn_id for pin in pins.values() if pin.source_id is not None}
-    matcher = _Matcher(persons, pinned_ids)
+    matcher = _Matcher(persons, pinned_ids, current)
     matcher.run([player for espn_id, player in sorted(roster.items()) if espn_id not in pins])
     rows = [
         PlayerIdRow(
@@ -940,7 +1073,7 @@ def build_nba_crosswalk(
             name = known.full_name if known else pin.name or f"ESPN {pin.espn_id}"
             reason = f"{NBA_OVERRIDES.name} keeps him without an nba.com id (an empty source_id): no history"
             notes.append(MatchNote(pin.espn_id, name, MatchKind.REMOVED, reason))
-    return NbaCrosswalk(rows, warnings=_summarise(len(roster), notes), notes=notes)
+    return NbaCrosswalk(rows, warnings=_summarise(len(roster), notes), notes=notes, as_of=as_of)
 
 
 _SUMMARIES: tuple[tuple[MatchKind, str], ...] = (
@@ -1049,9 +1182,11 @@ def fetch_nba_crosswalk(
             inputs.append(fetched_talent)
             warnings.extend(fetched_talent.warnings)
             talent = persons_from_darko(fetched_talent.data)
-    persons = merge_persons(by_season[0], talent, *by_season[1:], persons_from_static())
+    active = persons_from_static()
+    persons = merge_persons(by_season[0], talent, *by_season[1:], active)
+    current = {person.nba_id for group in (by_season[0], talent, active) for person in group}
     as_of = min((fetched.as_of for fetched in inputs), default=stats.clock())
-    crosswalk = build_nba_crosswalk(players, persons, load_nba_overrides(overrides), as_of=as_of)
+    crosswalk = build_nba_crosswalk(players, persons, load_nba_overrides(overrides), as_of=as_of, current=current)
     return Fetched(
         crosswalk,
         as_of,
@@ -1079,7 +1214,8 @@ def nba_gate(
     """The rostered-player gate for an NBA league (:meth:`NbaCrosswalk.gate` over everyone on any roster in it, named
     from ``players``): it fails on a rostered player without an nba.com id whose identity is in doubt, and passes
     no-history players with a warning. The reasons and suggested override lines come from ``crosswalk``'s notes, so
-    pass the fresh build; a crosswalk read from the store has none, which leaves every unmapped player in doubt.
+    pass the fresh build; a crosswalk read from the store keeps only its no-history verdicts, which leaves every other
+    unmapped player in doubt.
 
     Checks the latest roster snapshot unless ``scoring_period_id`` is given, against ``crosswalk`` or the one saved in
     the store; before the first roster snapshot nothing is checked and the gate passes.

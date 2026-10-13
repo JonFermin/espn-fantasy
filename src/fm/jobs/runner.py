@@ -21,7 +21,9 @@
   boundary: nonce, then ``fm.proposals``). Nothing executes in this process: an approval whose deadline is within
   :data:`fm.jobs.tick.NEAR_DEADLINE` brings the next tick forward to now, and that tick child executes it through the
   one write path under the tick's timeout and kill-tree, so a browser that hangs mid-execution can never stall the
-  loop (an execution in this process would have no timeout at all).
+  loop (an execution in this process would have no timeout at all). An approval recorded elsewhere (the dashboard,
+  ``fm proposals approve``) is found by a cheap store query between polls and brings the tick forward the same way,
+  once per proposal.
 - **No channel.** When ``config.toml`` names no usable channel the loop just sleeps to the next tick, in short slices
   so ``stop`` and Ctrl+C are answered quickly.
 - **Errors never end the loop.** A tick, a poll, a press or a config load that raises is logged with its traceback
@@ -76,7 +78,7 @@ from fm.jobs.tick import NEAR_DEADLINE, TickOptions, TickReport, tick
 from fm.notify import DecisionResult, NotifyChannel, NotifyError, Reply, handle_reply, open_channel, send_alert
 from fm.notify.bot import FIRST_BACKOFF_S, MAX_BACKOFF_S
 from fm.proposals import pause_state
-from fm.store import Store, utc_now
+from fm.store import ProposalRow, Store, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -401,6 +403,9 @@ class _Loop:
         self.channel_key: tuple[object, object] | None = None
         self.channel_problem: str | None = None
         self.alerted: dict[str, datetime] = {}
+        self.expedited_ids: set[int] = set()
+        """Proposals that already brought a tick forward: each does so once, whether it came from a press here or
+        from the store (the dashboard, ``fm proposals approve``)."""
         self.next_tick_at = clock()
 
     # --- the loop
@@ -423,6 +428,8 @@ class _Loop:
                     if self.options.max_ticks is not None and self.stats.attempts >= self.options.max_ticks:
                         self.stats.stopped_by = "max_ticks"
                         break
+                    continue
+                if self._expedite_stored():
                     continue
                 if self.channel is None:
                     self._pause(min(self._until(self.next_tick_at), self.options.sleep_slice_s))
@@ -616,19 +623,47 @@ class _Loop:
         if not self.options.execute or not result.ok or result.decision != "approve":
             return
         row = self.store.proposals.get(result.proposal_id)
-        if row is None or row.status != "approved" or row.execution_token is None or row.deadline is None:
-            return
         now = self.clock()
-        if row.deadline <= now or row.deadline - now > NEAR_DEADLINE or pause_state() is not None:
+        if row is None or not _due_soon(row, now) or pause_state() is not None:
             return
-        if self.next_tick_at > now:
-            self.next_tick_at = now
-            self.stats.expedited += 1
-            self.log.info(
-                "fm run: #%d is due in %s: ticking now so it executes under the tick timeout",
-                row.row_id,
-                _span(row.deadline - now),
-            )
+        self._tick_now(row, now)
+
+    def _expedite_stored(self) -> bool:
+        """Between polls: an approval recorded elsewhere (the dashboard, ``fm proposals approve``) whose deadline is
+        within :data:`fm.jobs.tick.NEAR_DEADLINE` brings the next tick forward as a press here would, once per proposal.
+        One indexed query on the open proposals; the pause file is read only when one qualifies. Returns whether the
+        tick is now due. A store error is logged and the check is tried again next time round."""
+        if not self.options.execute:
+            return False
+        now = self.clock()
+        if self.next_tick_at <= now:
+            return True
+        try:
+            approved = self.store.proposals.find(statuses=("approved",))
+        except sqlite3.Error as exc:
+            self.log.warning("fm run: could not check for near-deadline approvals: %s", exc)
+            return False
+        due = [row for row in approved if row.row_id not in self.expedited_ids and _due_soon(row, now)]
+        if not due or pause_state() is not None:
+            return False
+        for row in due:
+            self._tick_now(row, now)
+        return True
+
+    def _tick_now(self, row: ProposalRow, now: datetime) -> None:
+        """Bring the next tick to ``now`` for ``row`` (counted once per proposal)."""
+        if row.row_id is None or row.row_id in self.expedited_ids:
+            return
+        self.expedited_ids.add(row.row_id)
+        if self.next_tick_at <= now:
+            return  # a tick is due anyway
+        self.next_tick_at = now
+        self.stats.expedited += 1
+        self.log.info(
+            "fm run: #%d is due in %s: ticking now so it executes under the tick timeout",
+            row.row_id,
+            _span((row.deadline or now) - now),
+        )
 
     # --- failures
 
@@ -662,6 +697,15 @@ class _Loop:
             return
         self.alerted[kind] = now
         self.stats.alerts.append(title)
+
+
+def _due_soon(row: ProposalRow, now: datetime) -> bool:
+    """An approval a tick should execute now: approved (not yet executing), its token issued and unused, and its
+    deadline ahead but within :data:`fm.jobs.tick.NEAR_DEADLINE`, the conditions of
+    :func:`fm.jobs.tick.execute_on_approval` bar the pause, which the caller reads only when this holds."""
+    if row.status != "approved" or row.execution_token is None or row.token_consumed_at is not None:
+        return False
+    return row.deadline is not None and now < row.deadline <= now + NEAR_DEADLINE
 
 
 def _describe(interval: timedelta) -> str:

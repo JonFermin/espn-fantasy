@@ -4,10 +4,11 @@
 The steps live in :mod:`fm.setup.wizard`; this module holds the terminal prompts (:class:`TerminalPrompts`) and
 :func:`live_deps`, the real collaborators: the browser profile's session and the ``fm login`` flow, ESPN discovery
 and league confirmation, :mod:`fm.notify.setup`, :func:`fm.jobs.sync.sync`, the ``fm autostart`` and ``fm schedule``
-scheduler backends, a process listing for a running ``fm bot`` (reported, never stopped) and ``fm doctor``'s checks.
-``--yes`` answers every question with its default and skips every secret; ``--league-url`` is the fallback when
-discovery fails; ``--preset`` and ``--channel`` answer those questions for every league. Re-running changes nothing
-when nothing is new.
+scheduler backends, a process listing for a running ``fm bot`` (reported, never stopped; while it runs the logon job
+is registered without starting ``fm run``) and ``fm doctor``'s checks. ``--yes`` answers every question with its
+default and skips every secret, which never adds a newly discovered league to an existing ``config.toml`` or changes a
+league's team; ``--league-url`` names a league to add, and is the fallback when discovery fails; ``--preset`` and
+``--channel`` answer those questions for every league. Re-running changes nothing when nothing is new.
 """
 
 from __future__ import annotations
@@ -85,7 +86,12 @@ class PhoneChoice(StrEnum):
 def setup(
     yes: Annotated[
         bool,
-        typer.Option("--yes", "-y", help="Accept every default without asking; secrets you have not set are skipped."),
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Accept every default without asking; secrets you have not set are skipped. An existing config.toml "
+            "gets no newly discovered league (pass --league-url) and keeps its teams.",
+        ),
     ] = False,
     league_url: Annotated[
         list[str] | None,
@@ -157,6 +163,7 @@ def live_deps() -> SetupDeps:
             command="fm autostart install",
             installed=_autostart_installed,
             install=_install_autostart,
+            install_no_start=_register_autostart if autostart_cmd.NO_START_BACKENDS.get(sys.platform) else None,
         ),
         wake_timer=Job(
             name="the wake timer (fm tick)",
@@ -200,14 +207,21 @@ def _autostart_installed() -> bool | None:
     return job_installed(chosen.show(spec, default_runner))
 
 
-def _install_autostart() -> list[str]:
+def _install_autostart(*, start: bool = True) -> list[str]:
     try:
-        chosen = autostart_cmd.backend()
+        chosen = autostart_cmd.backend(start=start)
         spec = chosen.build_spec()
         report = chosen.install(spec, default_runner)
     except SchedulerError as exc:
         raise StepError(str(exc)) from exc
-    return [*report.lines(), f"installed: fm run at logon ({chosen.scheduler}); log at {spec.log_path}"]
+    started = "" if start else " (registered only: fm run starts at the next logon or with fm autostart install)"
+    return [*report.lines(), f"installed: fm run at logon ({chosen.scheduler}); log at {spec.log_path}{started}"]
+
+
+def _register_autostart() -> list[str]:
+    """``fm autostart install --no-start``: the logon job without starting ``fm run`` now, for while ``fm bot`` runs.
+    Only where the scheduler has such a mode (:data:`fm.commands.autostart.NO_START_BACKENDS`)."""
+    return _install_autostart(start=False)
 
 
 def _wake_timer_installed() -> bool | None:

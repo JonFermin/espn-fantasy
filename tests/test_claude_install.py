@@ -25,10 +25,12 @@ import fm.claude.install as install_module
 from fm.claude import (
     CLAUDE_COMMANDS,
     MCP_SERVER_NAME,
+    SHIPPED_ASSET_SHA256,
     ClaudeError,
     ClaudeHome,
     McpCommand,
     add_json_argv,
+    asset_digest,
     asset_files,
     assets,
     claude_status,
@@ -320,6 +322,68 @@ def test_uninstall_removes_only_our_registration_and_files(user: Path) -> None:
     assert elsewhere.read_text(encoding="utf-8") == "another skill"
 
 
+def test_every_shipped_asset_is_listed_so_installs_know_their_own_files() -> None:
+    """When an asset changes, its new digest goes into SHIPPED_ASSET_SHA256 (the old ones stay), or an upgrade would
+    take the previous version for the user's edit and an uninstall would leave it behind."""
+    texts = asset_files()
+    assert set(SHIPPED_ASSET_SHA256) == set(texts)
+    for relative, text in texts.items():
+        assert asset_digest(text) in SHIPPED_ASSET_SHA256[relative], f"add {asset_digest(text)} for {relative}"
+
+
+def test_an_install_keeps_a_users_edits_as_user_bak_before_replacing_them(
+    user: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = windows(user)
+    install_claude(home, command(), desktop=False, runner=FakeClaude(), which=on_path)
+    skill, week = home.skill_path, home.command_path("week")
+    skill.write_text("my own rules for the skill\n", encoding="utf-8")
+    report = install_claude(home, command(), desktop=False, runner=FakeClaude(), which=on_path)
+    texts = asset_files()
+    assert skill.read_text(encoding="utf-8") == texts["SKILL.md"]
+    assert skill.with_name("SKILL.md.user.bak").read_text(encoding="utf-8") == "my own rules for the skill\n"
+    assert any("has edits fm did not make; kept them as SKILL.md.user.bak" in line for line in report.lines)
+    assert not week.with_name("week.md.user.bak").exists()  # an unedited file is fm's to replace
+
+    # A second edit never overwrites the first backup; an unchanged backup is not duplicated.
+    skill.write_text("a second edit\n", encoding="utf-8")
+    install_claude(home, command(), desktop=False, runner=FakeClaude(), which=on_path)
+    assert skill.with_name("SKILL.md.user.bak").read_text(encoding="utf-8") == "my own rules for the skill\n"
+    assert skill.with_name("SKILL.md.user.2.bak").read_text(encoding="utf-8") == "a second edit\n"
+
+    # A file holding an earlier shipped version (an upgrade) is replaced without a backup.
+    week.write_text("last release's week command\n", encoding="utf-8")
+    shipped = dict(SHIPPED_ASSET_SHA256)
+    shipped["commands/week.md"] = shipped["commands/week.md"] | {asset_digest("last release's week command\n")}
+    monkeypatch.setattr(install_module, "SHIPPED_ASSET_SHA256", shipped)
+    report = install_claude(home, command(), desktop=False, runner=FakeClaude(), which=on_path)
+    assert week.read_text(encoding="utf-8") == texts["commands/week.md"]
+    assert not week.with_name("week.md.user.bak").exists() and any(f"updated {week}" in line for line in report.lines)
+
+
+def test_an_install_dry_run_says_it_would_keep_the_edits(user: Path) -> None:
+    home = windows(user)
+    install_claude(home, command(), desktop=False, runner=FakeClaude(), which=on_path)
+    home.command_path("trade").write_text("edited\n", encoding="utf-8")
+    before = snapshot(user)
+    report = install_claude(home, command(), desktop=False, dry_run=True, runner=FakeClaude(), which=on_path)
+    assert snapshot(user) == before
+    (line,) = [line for line in report.lines if "trade.md" in line]
+    assert "would update" in line and line.endswith("(keeping your edited copy as trade.md.user.bak)")
+
+
+def test_uninstall_leaves_a_file_the_user_edited_and_says_so(user: Path) -> None:
+    home = windows(user)
+    install_claude(home, command(), desktop=False, runner=FakeClaude(), which=on_path)
+    home.skill_path.write_text("my edited skill\n", encoding="utf-8")
+    report = uninstall_claude(home, desktop=False, runner=FakeClaude(), which=on_path)
+    assert home.skill_path.read_text(encoding="utf-8") == "my edited skill\n"  # not fm's to delete
+    assert any(f"left {home.skill_path} in place" in line for line in report.lines)
+    assert not home.commands_dir.exists()  # the unedited commands went, and their empty folder
+    dry = uninstall_claude(home, desktop=False, dry_run=True, runner=FakeClaude(), which=on_path)
+    assert not any("would remove" in line and "SKILL.md" in line for line in dry.lines)
+
+
 def test_uninstall_when_nothing_is_installed_is_not_an_error(user: Path) -> None:
     report = uninstall_claude(windows(user), desktop=False, runner=FakeClaude(), which=on_path)
     assert not report.failed and any("was not registered" in line for line in report.lines)
@@ -342,11 +406,32 @@ def test_install_writes_the_desktop_entry_beside_an_existing_server(user: Path) 
         "espn-fantasy": {"command": str(UV), "args": SERVER_ARGS},
     }
     assert (config.parent / "claude_desktop_config.json.bak").read_bytes() == original
+    assert (config.parent / "claude_desktop_config.json.fm-orig.bak").read_bytes() == original
     assert sorted(path.name for path in config.parent.iterdir()) == [
         "claude_desktop_config.json",
         "claude_desktop_config.json.bak",
+        "claude_desktop_config.json.fm-orig.bak",
     ]  # no temp file left behind
     assert any("reopen Claude Desktop" in line for line in report.lines)
+    assert any("claude_desktop_config.json.fm-orig.bak, the copy from before fm" in line for line in report.lines)
+
+
+def test_the_desktop_configs_pre_fm_original_survives_every_later_write(user: Path) -> None:
+    """Review fix: the rolling .bak is the file before the latest change, so after an install, an uninstall and a
+    reinstall it no longer holds what the user had. The .fm-orig.bak copy is written once and never replaced."""
+    config = write_config(appdata_dir(user), DESKTOP_CONFIG)
+    original = config.read_bytes()
+    original_copy = config.parent / "claude_desktop_config.json.fm-orig.bak"
+    install_claude(windows(user), command(), code=False)
+    uninstall_claude(windows(user), code=False)
+    moved = McpCommand.build(uv_path=UV, repo_root=Path("D:/moved"), environ={})
+    report = install_claude(windows(user), moved, code=False)
+    assert original_copy.read_bytes() == original
+    assert (config.parent / "claude_desktop_config.json.bak").read_bytes() != original  # the rolling copy moved on
+    assert not any("fm-orig" in line for line in report.lines)  # kept from the first write, not rewritten
+    with_desktop_written_fresh = msix_dir(user)  # a file fm created itself has no pre-fm original
+    install_claude(windows(user), command(), code=False)
+    assert sorted(path.name for path in with_desktop_written_fresh.iterdir()) == ["claude_desktop_config.json"]
 
 
 def test_the_desktop_entry_carries_the_pinned_dirs(user: Path, tmp_path: Path) -> None:

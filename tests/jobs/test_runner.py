@@ -58,7 +58,7 @@ from fm.jobs.runner import (
 )
 from fm.jobs.tick import SessionCheck, SessionVerdict, TickOptions, TickReport
 from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, ProposalNotice, Reply, nonces
-from fm.proposals import LineupMove, LineupPayload, ProposalKind, get_proposal, propose
+from fm.proposals import LineupMove, LineupPayload, ProposalKind, approve, get_proposal, propose
 from fm.store import LeagueRow, LeagueSettingsRow, Store, utc_now
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "espn"
@@ -499,6 +499,62 @@ def test_a_near_deadline_approval_while_paused_waits_for_the_regular_tick(world:
     stats = world.run(max_ticks=2)
     assert stats.decisions == 1 and stats.expedited == 0
     assert world.ticks.times == [T0, T0 + TEN_MINUTES]
+
+
+def approve_in_the_store_at(world: World, proposal_id: int, at: datetime) -> list[datetime]:
+    """Approve ``proposal_id`` straight in the store (as the dashboard or ``fm proposals approve`` does, from another
+    thread or process) the first time the loop sleeps at or after ``at``; returns the list its time lands in."""
+    approved: list[datetime] = []
+
+    def maybe_approve() -> None:
+        if not approved and world.time.now >= at:
+            with Store.open(world.store_path) as store:
+                approve(store, proposal_id, decided_by="dashboard", now=world.time.now)
+            approved.append(world.time.now)
+
+    world.time.on_sleep = maybe_approve
+    return approved
+
+
+@pytest.mark.parametrize("channel", [True, False], ids=["polling", "no-channel"])
+def test_a_near_deadline_approval_from_the_dashboard_brings_the_next_tick_forward_once(
+    world: World, channel: bool
+) -> None:
+    """Follow-up to phase 11: an approval recorded outside the loop (the dashboard, fm proposals approve) used to wait
+    for the next tick even when its deadline was minutes away. The loop now checks the store between polls."""
+    deadline = T0 + timedelta(minutes=20)
+    proposal_id = world.propose(deadline=deadline)
+    approved = approve_in_the_store_at(world, proposal_id, T0 + timedelta(minutes=2))
+    stats = world.run(max_ticks=3, channel=channel)
+    (at,) = approved
+    assert stats.expedited == 1 and stats.decisions == 0  # no press reached the loop
+    first, second, third = world.ticks.times
+    assert first == T0 and second == at  # the next loop round, not T0 + 10 min
+    assert third == second + TEN_MINUTES  # still approved (the fake tick executes nothing): pulled forward once only
+    assert world.status(proposal_id) == "approved" and world.opener.calls == []  # nothing executes in the loop
+
+
+def test_a_stored_approval_far_from_its_deadline_or_while_paused_or_without_execution_waits(world: World) -> None:
+    from fm.proposals import pause, resume
+
+    far = world.propose(deadline=T0 + timedelta(hours=3))
+    approve_in_the_store_at(world, far, T0 + timedelta(minutes=1))
+    assert world.run(max_ticks=2).expedited == 0 and world.ticks.times == [T0, T0 + TEN_MINUTES]
+
+    near = World(world.store_path.with_name("near.db"))
+    proposal_id = near.propose(deadline=T0 + timedelta(minutes=20))
+    approve_in_the_store_at(near, proposal_id, T0 + timedelta(minutes=1))
+    assert near.run(max_ticks=2, execute=False).expedited == 0  # --no-execute: nothing to hurry
+    assert near.ticks.times == [T0, T0 + TEN_MINUTES]
+
+    paused = World(world.store_path.with_name("paused.db"))
+    proposal_id = paused.propose(deadline=T0 + timedelta(minutes=20))
+    approve_in_the_store_at(paused, proposal_id, T0 + timedelta(minutes=1))
+    pause("checking the roster", now=T0)
+    try:
+        assert paused.run(max_ticks=2).expedited == 0 and paused.ticks.times == [T0, T0 + TEN_MINUTES]
+    finally:
+        resume()
 
 
 def test_an_unknown_button_is_ignored(world: World) -> None:

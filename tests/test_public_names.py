@@ -118,6 +118,7 @@ MODULES = (
     "fm.setup.wizard",
     "fm.web",
     "fm.web.app",
+    "fm.web.login",
     "fm.web.server",
 )
 PER_MODULE = frozenset({"PLUGIN"})

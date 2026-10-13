@@ -9,18 +9,23 @@ entry when the installing shell set them; otherwise the server would read anothe
   Code's business. A name that is already registered is removed and added again, so a re-install picks up a moved repo
   or a new uv. Without ``claude`` on PATH the install says so and prints the command. The skill and the slash commands
   are packaged files (``fm/claude/assets``, :func:`asset_files`) copied to ``~/.claude/skills/espn-fantasy/SKILL.md``
-  and ``~/.claude/commands/espn-fantasy/<name>.md`` (``/espn-fantasy:week`` and so on).
+  and ``~/.claude/commands/espn-fantasy/<name>.md`` (``/espn-fantasy:week`` and so on). An installed file whose text
+  is not a version fm shipped (:data:`SHIPPED_ASSET_SHA256`) holds the user's edits: it is copied to
+  ``<name>.user.bak`` before an install replaces it.
 - **Claude Desktop.** It has no CLI, so ``mcpServers.espn-fantasy`` is merged into ``claude_desktop_config.json``: the
   file is parsed, only that one key changes, every other server and top-level key is kept as it was, the previous file
-  is kept as ``claude_desktop_config.json.bak`` and the new one replaces it atomically. A file that is not a JSON object
-  is reported and left alone. Where the file lives is per platform (:meth:`ClaudeHome.desktop_dirs`): on Windows both
+  is kept as ``claude_desktop_config.json.bak`` (and, the first time fm changes the file, as
+  ``claude_desktop_config.json.fm-orig.bak``, which is never replaced) and the new one replaces it atomically. A file
+  that is not a JSON object is reported and left alone. Where the file lives is per platform
+  (:meth:`ClaudeHome.desktop_dirs`): on Windows both
   ``%APPDATA%\\Claude`` and the MSIX package's ``%LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming\\Claude``
   (a packaged app reads its virtualized copy first, so every folder that exists is updated); on macOS
   ``~/Library/Application Support/Claude``. No folder means Claude Desktop is not installed (or never started), and
   that part is skipped with a note.
 
 Uninstall undoes exactly that: ``claude mcp remove --scope user espn-fantasy``, the skill and command files this
-installs (by name; the folders go only when nothing else is left in them) and the one ``mcpServers`` key.
+installs (by name, and only while they hold a version fm shipped: an edited one is left and reported; the folders go
+only when nothing else is left in them) and the one ``mcpServers`` key.
 
 Every effect goes through a parameter: the user's folders (:class:`ClaudeHome`), the command runner (the scheduler
 backends' :data:`~fm.jobs.scheduler_base.Runner`), the ``claude`` lookup and the uv path, so tests run against a temp
@@ -31,6 +36,7 @@ store: the server it registers is the read-only one in :mod:`fm.mcp_server`.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -44,6 +50,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from fm import paths
@@ -58,7 +65,26 @@ SKILL_DIRNAME = "espn-fantasy"
 SKILL_FILENAME = "SKILL.md"
 CLAUDE_COMMANDS = ("week", "lineup", "waivers", "trade")
 """The slash commands, one ``<name>.md`` each: ``/espn-fantasy:week`` and so on."""
+SHIPPED_ASSET_SHA256: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        SKILL_FILENAME: frozenset({"8e4d477e599dd15e5871974a8680c67e9a7b0642ee8f68c6fa346f9def904691"}),
+        "commands/week.md": frozenset({"d8cc3d2afd61f0a94c463b45323d4099cb4970ea1f62fb2ce28b89065ebd0418"}),
+        "commands/lineup.md": frozenset({"cba4051a8251546a5aa69027e0ea437880b806eb091c57c1e4a1ca5c90b64d5d"}),
+        "commands/waivers.md": frozenset({"b78e9707a86f1507470aa020dc439bc657123ec638e6e5bfa8763e33089cfc58"}),
+        "commands/trade.md": frozenset({"7d83a68bf589a232a33cf4d4fd53652bfcea549a8439fba4811dc5d05664711c"}),
+    }
+)
+"""The SHA-256 of every version of each packaged asset fm has ever shipped (its text as ``read_text`` gives it, so line
+endings do not matter), by its path under ``assets``. An installed file whose text is one of these is fm's own: an
+install may overwrite it and an uninstall may delete it. Anything else is the user's edit, which an install backs up
+first (``<file>.user.bak``) and an uninstall leaves in place. When an asset changes, add the new digest and keep the
+old ones (``tests/test_claude_install.py`` fails until the current text is listed)."""
+USER_BACKUP_SUFFIX = ".user.bak"
+"""Where an install keeps a skill or command file the user edited before replacing it: ``SKILL.md.user.bak``."""
 DESKTOP_CONFIG_NAME = "claude_desktop_config.json"
+DESKTOP_ORIGINAL_SUFFIX = ".fm-orig.bak"
+"""``claude_desktop_config.json.fm-orig.bak``: the Desktop config as it was before fm first changed it, written once
+and never replaced (``.bak`` beside it is the rolling copy of the file before the latest change)."""
 MSIX_PACKAGE_GLOB = "Claude_*"
 """The Claude Desktop MSIX package folder under ``%LOCALAPPDATA%\\Packages`` (the suffix is the publisher hash)."""
 DESKTOP_PLATFORMS = ("win32", "darwin")
@@ -333,16 +359,25 @@ def _install_code(
         text = texts[relative]
         if _file_state(target, text) == _INSTALLED:
             report.add(f"claude code: {target} is up to date")
-        elif dry_run:
-            report.add(f"claude code: would {'update' if target.exists() else 'create'} {target}")
-        else:
-            existed = target.exists()
-            try:
-                _replace(target, text)
-            except OSError as exc:
-                report.fail(f"claude code: {target}: {exc.strerror or exc}")
-                continue
-            report.add(f"claude code: {'updated' if existed else 'created'} {target}")
+            continue
+        existed = target.exists()
+        edited = existed and not _shipped(relative, target)
+        if dry_run:
+            kept = f" (keeping your edited copy as {_user_backup(target).name})" if edited else ""
+            report.add(f"claude code: would {'update' if existed else 'create'} {target}{kept}")
+            continue
+        try:
+            if edited:
+                backup = _user_backup(target)
+                shutil.copyfile(target, backup)
+                report.add(
+                    f"claude code: {target} has edits fm did not make; kept them as {backup.name} before updating it"
+                )
+            _replace(target, text)
+        except OSError as exc:
+            report.fail(f"claude code: {target}: {exc.strerror or exc}")
+            continue
+        report.add(f"claude code: {'updated' if existed else 'created'} {target}")
 
 
 def _register(report: ClaudeReport, runner: Runner, argv: list[str], claude: str) -> None:
@@ -398,8 +433,7 @@ def _merge_desktop(path: Path, entry: dict[str, Any], *, dry_run: bool) -> tuple
     if dry_run:
         return f"claude desktop: would {'update' if present else 'add'} {where}", False
     data["mcpServers"] = {**servers, MCP_SERVER_NAME: entry}
-    backup = _write_json(path, data)
-    kept = f" (previous file kept as {backup.name})" if backup is not None else ""
+    kept = _kept(*_write_json(path, data))
     return f"claude desktop: {'updated' if present else 'added'} {where}{kept}", True
 
 
@@ -457,8 +491,14 @@ def _uninstall_code(
             report.add(f"claude code: MCP server {MCP_SERVER_NAME} was not registered")
         else:
             report.fail(f"claude code: claude mcp remove failed (exit {result.returncode}): {result.output}")
-    for _, target in home.code_files():
+    for relative, target in home.code_files():
         if not target.exists():
+            continue
+        if not _shipped(relative, target):
+            report.add(
+                f"claude code: left {target} in place: it is not a version fm shipped (your edits?); delete it "
+                "yourself if you no longer want it"
+            )
             continue
         if dry_run:
             report.add(f"claude code: would remove {target}")
@@ -485,8 +525,7 @@ def _unmerge_desktop(path: Path, *, dry_run: bool) -> str:
     if dry_run:
         return f"claude desktop: would remove {MCP_SERVER_NAME} from {path}"
     data["mcpServers"] = {name: value for name, value in servers.items() if name != MCP_SERVER_NAME}
-    backup = _write_json(path, data)
-    kept = f" (previous file kept as {backup.name})" if backup is not None else ""
+    kept = _kept(*_write_json(path, data))
     return f"claude desktop: removed {MCP_SERVER_NAME} from {path}{kept}"
 
 
@@ -602,6 +641,39 @@ def _file_state(path: Path, text: str) -> str:
     return _INSTALLED if same else "installed, differs from this version (run fm claude install)"
 
 
+def asset_digest(text: str) -> str:
+    """The SHA-256 :data:`SHIPPED_ASSET_SHA256` lists for an asset's text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _shipped(relative: str, path: Path) -> bool:
+    """Whether the file at ``path`` holds a version of the asset ``relative`` that fm shipped (so it is fm's to
+    replace or remove). A file that cannot be read as text is treated as the user's."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return asset_digest(text) in SHIPPED_ASSET_SHA256.get(relative, frozenset())
+
+
+def _user_backup(path: Path) -> Path:
+    """Where to keep the user's edited ``path``: ``<name>.user.bak``, or, when that already holds something else (an
+    earlier edit), the first free ``<name>.user.<n>.bak``, so no earlier backup is overwritten."""
+    candidate = path.with_name(path.name + USER_BACKUP_SUFFIX)
+    number = 2
+    while candidate.exists() and not _same_bytes(candidate, path):
+        candidate = path.with_name(f"{path.name}.user.{number}.bak")
+        number += 1
+    return candidate
+
+
+def _same_bytes(first: Path, second: Path) -> bool:
+    try:
+        return first.read_bytes() == second.read_bytes()
+    except OSError:
+        return False
+
+
 def _our_entry(data: dict[str, Any], path: Path) -> dict[str, Any] | None:
     entry = _servers(data, path).get(MCP_SERVER_NAME)
     return entry if isinstance(entry, dict) else None
@@ -648,26 +720,45 @@ def _servers(data: Mapping[str, Any], path: Path) -> dict[str, Any]:
     return dict(servers)
 
 
-def _write_json(path: Path, data: Mapping[str, Any]) -> Path | None:
-    """Replace ``path`` with ``data`` atomically, keeping the previous file as ``<name>.bak``. Returns the backup's path
-    (``None`` when there was no previous file)."""
-    backup = path.with_name(path.name + ".bak") if path.exists() else None
+def _write_json(path: Path, data: Mapping[str, Any]) -> tuple[Path | None, Path | None]:
+    """Replace ``path`` with ``data`` atomically, keeping the previous file as ``<name>.bak`` and, the first time fm
+    changes it, as ``<name>.fm-orig.bak`` too (never replaced afterwards, so the file as it was before fm is always
+    there to go back to, however many installs ran since). Returns the backup's path and the original's when it was
+    written now (``None`` when there was no previous file, or the original was kept already)."""
+    if not path.exists():
+        backup = original = None
+    else:
+        backup = path.with_name(path.name + ".bak")
+        original = path.with_name(path.name + DESKTOP_ORIGINAL_SUFFIX)
+        if original.exists():
+            original = None
     try:
-        _replace(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n", backup=backup)
+        _replace(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n", backup=backup, original=original)
     except OSError as exc:
         raise ClaudeError(f"{path}: {exc.strerror or exc}") from exc
-    return backup
+    return backup, original
 
 
-def _replace(path: Path, text: str, *, backup: Path | None = None) -> None:
-    """Write ``text`` to a temp file beside ``path``, copy the current file to ``backup`` (when given), then move the
-    temp file over ``path``. The temp file is removed on any failure."""
+def _kept(backup: Path | None, original: Path | None) -> str:
+    """What a Desktop report line says about the copies :func:`_write_json` kept."""
+    if backup is None:
+        return ""
+    if original is None:
+        return f" (previous file kept as {backup.name})"
+    return f" (previous file kept as {backup.name}, and as {original.name}, the copy from before fm changed it)"
+
+
+def _replace(path: Path, text: str, *, backup: Path | None = None, original: Path | None = None) -> None:
+    """Write ``text`` to a temp file beside ``path``, copy the current file to ``backup`` and ``original`` (each when
+    given), then move the temp file over ``path``. The temp file is removed on any failure."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     temp = Path(name)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(text.encode("utf-8"))
+        if original is not None:
+            shutil.copyfile(path, original)
         if backup is not None:
             shutil.copyfile(path, backup)
         try:

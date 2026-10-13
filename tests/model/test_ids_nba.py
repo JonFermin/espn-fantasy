@@ -375,16 +375,19 @@ def test_partial_match_never_pairs_different_first_names() -> None:
     walk = build(players, found)
     assert walk.mapped() == set() and len(walk) == 0
     notes = {note.espn_id: note for note in walk.notes}
-    assert all(note.kind is MatchKind.NO_HISTORY for note in notes.values())  # the near misses stay named
+    # Veterans under a spelling nba.com lacks are not rookies: with a namesake on their team they stay in doubt, so
+    # the gate stops on them with the candidates to pick from rather than quietly dropping their history.
+    assert all(note.kind is MatchKind.NO_MATCH for note in notes.values())
     assert notes[MOE].reason == (
-        "no nba.com player named 'Moe Wagner'; on his team: nba 1629021 Moritz Wagner (C ORL), nba 1630532 Franz "
-        "Wagner (F ORL)"
+        "no nba.com player named 'Moe Wagner', but some could be him (on his team: nba 1629021 Moritz Wagner (C ORL), "
+        "nba 1630532 Franz Wagner (F ORL)); pin the one who is, or an empty source_id if none is (a rookie with no "
+        "nba.com history)"
     )
     assert notes[MOE].candidates == (MORITZ_WAGNER, FRANZ_WAGNER)
     assert notes[1].candidates == (1628998,) and notes[3].candidates == (BUB_CARRINGTON,)
+    assert not any(walk.no_history(espn_id) for espn_id in notes)
     assert walk.warnings == (
-        "no_history: 3 of 3 ESPN players have no nba.com player by name, or on their team by surname and first name "
-        "(Caleb Martin, Carlton Carrington, Moe Wagner); they get no nba.com id",
+        "name_match: 3 of 3 ESPN players have no nba.com match (Caleb Martin, Carlton Carrington, Moe Wagner)",
     )
 
 
@@ -392,10 +395,77 @@ def test_partial_match_needs_his_team_and_a_compatible_position() -> None:
     found = [NbaPerson(HERBERT_JONES, "Herbert Jones", team="NOP", position="F")]
     free_agent = build([player(HERB, "Herb Jones", "SF")], found)
     assert free_agent.nba_id(HERB) is None
-    no_team = MatchNote(HERB, "Herb Jones", MatchKind.NO_HISTORY, "no nba.com player named 'Herb Jones'")
-    assert free_agent.note(HERB) == no_team
+    # No team to match on, but his surname and first initial point at someone: in doubt, never no-history.
+    assert free_agent.note(HERB) == MatchNote(
+        HERB,
+        "Herb Jones",
+        MatchKind.NO_MATCH,
+        "no nba.com player named 'Herb Jones', but some could be him (with his surname and first initial: nba 1630529 "
+        "Herbert Jones (F NOP)); pin the one who is, or an empty source_id if none is (a rookie with no nba.com "
+        "history)",
+        (HERBERT_JONES,),
+    )
     center = build([player(HERB, "Herb Jones", "C", "NOP")], found)
-    assert center.nba_id(HERB) is None and center.note(HERB) is not None
+    note = center.note(HERB)
+    assert center.nba_id(HERB) is None and note is not None and note.kind is MatchKind.NO_MATCH
+    assert note.candidates == (HERBERT_JONES,) and "on his team: nba 1630529 Herbert Jones (F NOP)" in note.reason
+
+
+def test_a_rookie_is_no_history_only_when_nobody_nba_com_lists_could_be_him() -> None:
+    """Review fix: NO_HISTORY needs no plausible candidate, i.e. no free person with his surname on his ESPN team and
+    none anywhere with his surname and first initial. Synthetic rookies; the namesakes are nba.com's."""
+    found = [
+        NbaPerson(MORITZ_WAGNER, "Moritz Wagner", team="ORL", position="C"),
+        NbaPerson(FRANZ_WAGNER, "Franz Wagner", team="ORL", position="F"),
+    ]
+    rookies = [
+        player(ROOKIE, "Zed Wagner", "PG", "BOS"),  # the surname only, on other teams, with other initials
+        player(9005, "Mo Wagner", "SG", "BOS"),  # M. Wagner exists elsewhere: could be Moritz
+        player(9006, "Zed Wagner", "SG", "ORL"),  # a Wagner on his own team: could be either
+    ]
+    walk = build(rookies[:1], found)
+    assert walk.no_history(ROOKIE) and walk.note(ROOKIE) == MatchNote(
+        ROOKIE, "Zed Wagner", MatchKind.NO_HISTORY, "no nba.com player named 'Zed Wagner'"
+    )
+    walk = build(rookies[1:], found)
+    initial, team = walk.note(9005), walk.note(9006)
+    assert initial is not None and initial.kind is MatchKind.NO_MATCH and initial.candidates == (MORITZ_WAGNER,)
+    assert team is not None and team.kind is MatchKind.NO_MATCH and team.candidates == (MORITZ_WAGNER, FRANZ_WAGNER)
+    assert not walk.no_history(9005) and not walk.no_history(9006)
+    # A candidate mapped to another ESPN player is not one: his id belongs to that player.
+    taken = build([rookies[1], player(2, "Moritz Wagner", "C", "ORL")], found)
+    assert taken.nba_id(2) == MORITZ_WAGNER and taken.no_history(9005)
+
+
+def test_a_lone_namesake_only_an_earlier_season_lists_is_not_taken() -> None:
+    """Review fix: a rookie must not inherit a departed namesake's history. A name match his team does not confirm is
+    taken only to a person this season's data lists; otherwise he is in doubt, the namesake named as the candidate."""
+    departed = NbaPerson(1641001, "Veteran Two", team="SAC", position="G")
+    rookie = player(VETERAN, "Veteran Two", "SF", "DEN")
+    walk = build_nba_crosswalk([rookie], [departed], as_of=AS_OF, current=set())
+    assert walk.nba_id(VETERAN) is None and not walk.no_history(VETERAN)
+    assert walk.note(VETERAN) == MatchNote(
+        VETERAN,
+        "Veteran Two",
+        MatchKind.NO_MATCH,
+        "nba 1641001 Veteran Two (G SAC) has this name but is not in this season's data (only an earlier season lists "
+        "him), and ESPN lists him as SF DEN: a namesake who left the league, or him back after a year away; pin the id "
+        "if it is him, or an empty source_id if he has no nba.com history",
+        (1641001,),
+    )
+    # The same at a position the namesake shares (a team dispute only), or with no team on ESPN's side.
+    guard = build_nba_crosswalk([player(VETERAN, "Veteran Two", "SG", "DEN")], [departed], as_of=AS_OF, current=())
+    unsigned = build_nba_crosswalk([player(VETERAN, "Veteran Two", "SG")], [departed], as_of=AS_OF, current=())
+    for built in (guard, unsigned):
+        note = built.note(VETERAN)
+        assert built.nba_id(VETERAN) is None and note is not None and note.kind is MatchKind.NO_MATCH
+    # His own team confirms a person this season has not listed yet (no games, no DARKO row): still him.
+    stayed = build_nba_crosswalk([player(VETERAN, "Veteran Two", "PG", "SAC")], [departed], as_of=AS_OF, current=())
+    assert stayed.nba_id(VETERAN) == 1641001 and stayed.notes == ()
+    # A traded veteran this season's data lists still maps on the name alone, with the warning.
+    traded = build_nba_crosswalk([rookie], [departed], as_of=AS_OF, current={1641001})
+    note = traded.note(VETERAN)
+    assert traded.nba_id(VETERAN) == 1641001 and note is not None and note.kind is MatchKind.NAME_ONLY
 
 
 def test_a_person_two_players_partially_fit_goes_to_neither() -> None:
@@ -717,27 +787,65 @@ def test_gate_fails_on_an_ambiguous_rostered_player_naming_him_and_the_line_to_a
 
 def test_a_rookie_nba_com_does_not_list_passes_the_gate_as_no_history(store: Store) -> None:
     rookie = player(ROOKIE, "Rookie One", "PG", "BOS")
-    moe = player(MOE, "Moe Wagner", "C", "ORL")  # a veteran under a spelling nba.com lacks: no history either
-    found = persons(NbaPerson(MORITZ_WAGNER, "Moritz Wagner", team="ORL", position="C"))
-    walk = build([*pool_players(), rookie, moe], found)
-    league = seed_roster(store, JOKIC, ROOKIE, MOE)
-    store.players.upsert_many([rookie, moe, *pool_players()])
-    assert check_nba_rostered(store, league.row_id, crosswalk=walk) == {JOKIC, ROOKIE, MOE}  # nobody in doubt
+    found = persons()
+    walk = build([*pool_players(), rookie], found)
+    league = seed_roster(store, JOKIC, ROOKIE)
+    store.players.upsert_many([rookie, *pool_players()])
+    assert check_nba_rostered(store, league.row_id, crosswalk=walk) == {JOKIC, ROOKIE}  # nobody in doubt
     verdict = nba_gate(store, league.row_id, crosswalk=walk)
     assert verdict.passed and verdict.error is None and verdict.blocked == () and verdict.name_only == ()
-    assert verdict.no_history == (
-        UnmappedPlayer(MOE, (NBA_SOURCE,), "Moe Wagner", "C", "ORL"),
-        UnmappedPlayer(ROOKIE, (NBA_SOURCE,), "Rookie One", "PG", "BOS"),
-    )
+    assert verdict.no_history == (UnmappedPlayer(ROOKIE, (NBA_SOURCE,), "Rookie One", "PG", "BOS"),)
     assert verdict.warnings == (
-        f"rostered players in league {league.row_id} (scoring period 12): 2 with no nba.com history, valued on "
-        "ESPN's projection alone (DARKO and the stats baseline key players by nba.com id): Moe Wagner (C ORL, ESPN "
-        f"{MOE}) [no nba.com player named 'Moe Wagner'; on his team: nba 1629021 Moritz Wagner (C ORL)], Rookie One "
-        f"(PG BOS, ESPN {ROOKIE}); if one has an nba.com id, add his line to data/id_overrides_nba.csv",
+        f"rostered players in league {league.row_id} (scoring period 12): 1 with no nba.com history, valued on "
+        "ESPN's projection alone (DARKO and the stats baseline key players by nba.com id): Rookie One (PG BOS, ESPN "
+        f"{ROOKIE}); if one has an nba.com id, add his line to data/id_overrides_nba.csv",
     )
-    # Claiming the near miss is one override line; the rookie stays without history.
-    fixed = build([*pool_players(), rookie, moe], found, (Override(MOE, NBA_SOURCE, str(MORITZ_WAGNER)),))
-    assert nba_gate(store, league.row_id, crosswalk=fixed).no_history == (verdict.no_history[1],)
+
+
+@pytest.mark.parametrize(
+    ("espn_name", "position", "team", "nba_person", "line"),
+    [
+        (
+            "Moe Wagner",
+            "C",
+            "ORL",
+            NbaPerson(MORITZ_WAGNER, "Moritz Wagner", team="ORL", position="C"),
+            f"{MOE},nba,{MORITZ_WAGNER},Moe Wagner,<why>",
+        ),
+        (
+            "Carlton Carrington",
+            "PG",
+            "WAS",
+            NbaPerson(BUB_CARRINGTON, "Bub Carrington", team="WAS", position="G"),
+            f"{MOE},nba,{BUB_CARRINGTON},Carlton Carrington,<why>",
+        ),
+    ],
+    ids=["moe-wagner", "carlton-carrington"],
+)
+def test_a_veteran_under_a_spelling_nba_com_lacks_blocks_the_gate_with_the_line_to_fill(
+    store: Store, espn_name: str, position: str, team: str, nba_person: NbaPerson, line: str
+) -> None:
+    """Review fix: these veterans used to pass as no-history players and silently lose DARKO and the stats baseline.
+    Now the gate stops on them, naming the nba.com namesake on their team and printing a ready-to-fill overrides
+    line; the rookie beside them still passes as no-history."""
+    rookie = player(ROOKIE, "Rookie One", "PG", "BOS")
+    veteran = player(MOE, espn_name, position, team)
+    found = persons(nba_person)
+    walk = build([*pool_players(), rookie, veteran], found)
+    league = seed_roster(store, JOKIC, ROOKIE, MOE)
+    store.players.upsert_many([rookie, veteran, *pool_players()])
+    with pytest.raises(UnmappedNbaPlayersError) as info:
+        check_nba_rostered(store, league.row_id, crosswalk=walk)
+    error = info.value
+    assert [entry.espn_id for entry in error.unmapped] == [MOE] and error.candidates == {MOE: (nba_person.nba_id,)}
+    assert f"on his team: {nba_person}" in error.reasons[MOE]
+    assert str(error).endswith(f"\n  {line}")
+    verdict = nba_gate(store, league.row_id, crosswalk=walk)
+    assert not verdict.passed and [entry.espn_id for entry in verdict.no_history] == [ROOKIE]
+    # The printed line, with a note, is the fix; the rookie stays without history.
+    fixed = build([*pool_players(), rookie, veteran], found, parse_nba_overrides(f"{HEADER}\n{line}\n"))
+    assert fixed.nba_id(MOE) == nba_person.nba_id
+    assert nba_gate(store, league.row_id, crosswalk=fixed).no_history == verdict.no_history
 
 
 def test_gate_warns_about_rostered_matches_on_the_name_alone(store: Store) -> None:
@@ -909,6 +1017,25 @@ def test_fetch_builds_from_stats_darko_and_the_bundled_table(tmp_path: Path, ove
     assert again.cached and again.data.rows == walk.rows and len(calls) == 2  # served from the adapters' caches
     forced = fetch_nba_crosswalk(pool_players(), stats, "2026-27", darko=darko, overrides=overrides_file, force=True)
     assert not forced.cached and calls == ["2026-27", "2025-26", "2026-27"]  # fetch options reach the adapters
+
+
+def test_fetch_takes_a_name_match_on_another_team_only_to_someone_this_season_lists(
+    tmp_path: Path, overrides_file: Path
+) -> None:
+    """Review fix: last season's splits name a departed namesake of a rookie; this season's data (splits, DARKO, the
+    active players) does not. The rookie is left in doubt, not handed the namesake's history. Synthetic names."""
+    rookie = player(ROOKIE, "Rookie Namesake", "PG", "BOS")
+    traded = player(VETERAN, "Veteran Traded", "PG", "BOS")
+    current = _splits_payload([(1641002, "Veteran Traded", "SAC")])  # played for Sacramento this season
+    previous = _splits_payload([(1641001, "Rookie Namesake", "SAC"), (1641002, "Veteran Traded", "SAC")])
+    stats = make_stats({"2026-27": current, "2025-26": previous}, FakeClock(), tmp_path)
+    walk = fetch_nba_crosswalk([rookie, traded], stats, ("2026-27", "2025-26"), overrides=overrides_file).data
+    note = walk.note(ROOKIE)
+    assert walk.nba_id(ROOKIE) is None and note is not None and note.kind is MatchKind.NO_MATCH
+    assert note.candidates == (1641001,) and "is not in this season's data" in note.reason
+    assert walk.nba_id(VETERAN) == 1641002  # the traded veteran is current: mapped, his team disputed
+    disputed = walk.note(VETERAN)
+    assert disputed is not None and disputed.kind is MatchKind.DISPUTED
 
 
 def test_fetch_reads_the_overrides_file(tmp_path: Path) -> None:
