@@ -143,11 +143,10 @@ def test_every_get_answers_200_with_json(client: TestClient, home: Path, path: s
 def test_the_page_and_its_static_files_are_served(client: TestClient, token: str) -> None:
     page = client.get("/")
     assert page.status_code == 200 and page.headers["content-type"].startswith("text/html")
-    assert f'<meta name="fm-token" content="{token}">' in page.text
-    assert web_app.TOKEN_PLACEHOLDER not in page.text
+    assert '<section id="overview"' in page.text and token not in page.text  # the CSRF token never goes into HTML
     script = client.get("/static/app.js")
     assert script.status_code == 200 and script.headers["content-type"].startswith("text/javascript")
-    assert "X-FM-Token" in script.text
+    assert "X-FM-Token" in script.text and "/api/session" in script.text
     style = client.get("/static/app.css")
     assert style.status_code == 200 and style.headers["content-type"].startswith("text/css")
     assert "prefers-color-scheme: dark" in style.text

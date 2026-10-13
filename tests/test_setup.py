@@ -8,6 +8,7 @@ does), the sync, the two scheduler jobs, the ``fm bot`` probe and the doctor. Th
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -84,6 +85,8 @@ class Fakes:
     wake_installed: bool | None = False
     job_error: str | None = None
     bots: tuple[int, ...] = ()
+    no_start: bool = True
+    """Whether the autostart job can be registered without starting fm run (Task Scheduler can, launchd cannot)."""
     sync_errors: dict[str, str] = field(default_factory=dict)
     channel_error: str | None = None
     calls: list[tuple[Any, ...]] = field(default_factory=list)
@@ -97,7 +100,11 @@ class Fakes:
             setup_channel=self.setup_channel,
             sync=self.sync,
             autostart=Job(
-                "fm run at logon", "fm autostart install", self._installed("autostart"), self._install("autostart")
+                "fm run at logon",
+                "fm autostart install",
+                self._installed("autostart"),
+                self._install("autostart"),
+                self._install("autostart", start=False) if self.no_start else None,
             ),
             wake_timer=Job("the wake timer", "fm schedule install", self._installed("wake"), self._install("wake")),
             bot_pids=lambda: self.bots,
@@ -162,9 +169,9 @@ class Fakes:
 
         return installed
 
-    def _install(self, name: str) -> Any:
+    def _install(self, name: str, *, start: bool = True) -> Any:
         def install() -> list[str]:
-            self.calls.append(("install", name))
+            self.calls.append(("install", name) if start else ("install", name, "no-start"))
             if self.job_error is not None:
                 raise StepError(self.job_error)
             if name == "autostart":
@@ -204,6 +211,19 @@ class Scripted:
 
     def secret(self, question: str) -> str:
         return str(self._next(question))
+
+
+class Recording(AcceptDefaults):
+    """:class:`AcceptDefaults` that records each yes/no question's default and answers the ones in ``answers``
+    itself, so a test can check what the terminal would have offered."""
+
+    def __init__(self, answers: dict[str, bool] | None = None) -> None:
+        self.answers = dict(answers or {})
+        self.defaults: dict[str, bool] = {}
+
+    def confirm(self, question: str, *, default: bool) -> bool:
+        self.defaults[question] = default
+        return self.answers.get(question, default)
 
 
 def config_path() -> Path:
@@ -415,7 +435,8 @@ def write_existing(text: str = HAND_WRITTEN, *, ntfy: bool = True) -> None:
 def test_an_existing_league_is_never_rewritten_and_a_new_one_is_appended() -> None:
     write_existing()
     fakes = Fakes()
-    result, output = wizard(fakes)
+    prompts = Scripted(True, "balanced", "", "", "ntfy")  # manage the new NBA league, its preset, no keys, ntfy
+    result, output = wizard(fakes, prompts=prompts)
     text = config_path().read_text(encoding="utf-8")
     original_league = HAND_WRITTEN[: HAND_WRITTEN.index("[notify]")]
     assert original_league in text  # byte for byte, comments included
@@ -452,11 +473,70 @@ def test_a_changed_season_is_reported_and_left_alone_unless_confirmed() -> None:
     assert (paths.config_dir() / "config.toml.bak").read_bytes() == before
 
 
-def test_a_changed_team_is_updated_through_set_values() -> None:
+def test_a_changed_team_is_kept_under_yes_and_updated_through_set_values_once_confirmed() -> None:
+    """Review fix: the team decides whose roster the automation acts on, so --yes keeps config.toml's team and says
+    what differs; "Update?" defaults to no and only an explicit yes changes it."""
     write_existing(HAND_WRITTEN.replace("team_id = 3", "team_id = 8"))
+    before = config_path().read_bytes()
     result, output = wizard(Fakes(discovered=(NFL,)))
-    assert "team_id 8 -> 3" in output and result.updated == ("football",)
-    assert raw_leagues()["football"]["team_id"] == 3
+    assert "team_id 8 -> 3" in output and result.updated == () and result.declined == ("football",)
+    assert "ESPN says this account's team in football is team 3; config.toml has team 8." in output
+    assert config_path().read_bytes() == before and result.synced == ()
+
+    prompts = Recording(answers={"Update football (team_id 8 -> 3)?": True})
+    result, output = wizard(Fakes(discovered=(NFL,)), prompts=prompts)
+    assert prompts.defaults["Update football (team_id 8 -> 3)?"] is False  # asked, defaulting to no
+    assert result.updated == ("football",) and raw_leagues()["football"]["team_id"] == 3
+
+
+def test_yes_over_a_config_missing_a_discovered_league_adds_and_updates_nothing() -> None:
+    """Review fix (the guard): --yes on an installation must not opt a league into automation. The account's NBA
+    league is not in config.toml and ESPN names another team for the NFL one; --yes changes neither, and says so."""
+    write_existing(HAND_WRITTEN.replace("team_id = 3", "team_id = 8"))
+    before = config_path().read_bytes()
+    fakes = Fakes()  # discovery finds NFL (team 3) and NBA
+    result, output = wizard(fakes)
+    assert (result.added, result.updated, result.declined) == ((), (), ("football",))
+    assert config_path().read_bytes() == before and not (paths.config_dir() / "config.toml.bak").exists()
+    assert f"Skipped {describe_league(NBA)}. (not in config.toml; fm setup without --yes asks" in output
+    assert "--league-url <url> adds it" in output
+    assert [call for call in fakes.calls if call[0] == "sync"] == []
+
+
+def test_a_new_league_defaults_to_managed_on_a_fresh_install_or_by_url_only() -> None:
+    prompts = Recording()
+    wizard(Fakes(), prompts=prompts)  # no config.toml yet: setting the leagues up is the point
+    assert prompts.defaults[f"Manage {describe_league(NFL)}?"] is True
+    assert prompts.defaults[f"Manage {describe_league(NBA)}?"] is True
+
+    config_path().write_text(HAND_WRITTEN, encoding="utf-8")  # NBA left out of an existing installation
+    prompts = Recording()
+    result, _ = wizard(Fakes(), prompts=prompts)
+    assert prompts.defaults == {f"Manage {describe_league(NBA)}?": False} and result.added == ()
+
+    nba_url = "https://fantasy.espn.com/basketball/team?leagueId=7654321&teamId=5"
+    fakes = Fakes(confirmed={("nba", 7654321): NBA})
+    result, output = wizard(fakes, SetupOptions(league_urls=(nba_url,)))  # --yes --league-url adds it
+    assert result.added == ("nba",) and raw_leagues()["nba"]["team_id"] == 5
+    assert [call for call in fakes.calls if call[0] == "sync"] == [("sync", "nba")]
+
+
+def test_yes_moves_a_league_to_the_current_season_but_never_to_a_future_one() -> None:
+    write_existing(HAND_WRITTEN.replace("season = 2026", "season = 2025"))
+    result, _ = wizard(Fakes(discovered=(NFL,)))  # 2026 is the current NFL season on NOW (Oct 13, 2026)
+    assert result.updated == ("football",) and raw_leagues()["football"]["season"] == 2026
+
+    renewed = DiscoveredLeague(
+        sport="nfl", espn_league_id=1234567, season=2027, team_id=3, league_name="Sample Football League"
+    )
+    before = config_path().read_bytes()
+    result, output = wizard(Fakes(discovered=(renewed,)))
+    assert result.updated == () and result.declined == ("football",) and config_path().read_bytes() == before
+    assert "Season 2027 is not the current NFL season (2026); it changes only when you confirm it" in output
+    prompts = Recording(answers={"Update football (season 2026 -> 2027)?": True})
+    result, _ = wizard(Fakes(discovered=(renewed,)), prompts=prompts)
+    assert prompts.defaults["Update football (season 2026 -> 2027)?"] is False
+    assert result.updated == ("football",) and raw_leagues()["football"]["season"] == 2027
 
 
 def test_an_existing_config_that_does_not_load_stops_setup_untouched() -> None:
@@ -526,7 +606,30 @@ def test_api_keys_are_saved_hidden_and_never_printed() -> None:
 
     prompts = Scripted("none")  # a re-run asks for neither key again
     _, output = wizard(Fakes(), prompts=prompts)
-    assert "ANTHROPIC_API_KEY is already set." in output and not prompts.answers
+    assert "ANTHROPIC_API_KEY is already set in .env." in output and not prompts.answers
+
+
+def test_a_key_only_in_this_shells_environment_is_saved_to_env_and_never_printed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix: a key exported only in the shell running setup was reported as already set and never saved, so
+    fm run at logon (which reads .env, not that shell) ran without it. --yes saves it; no value is ever printed."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    _, output = wizard(Fakes(), SetupOptions(channel="none"))
+    assert dotenv_values(env_path()).get("ANTHROPIC_API_KEY") == ANTHROPIC_KEY
+    assert "ANTHROPIC_API_KEY is set in this shell's environment only" in output
+    assert "Saved ANTHROPIC_API_KEY to" in output and ANTHROPIC_KEY not in output
+    _, output = wizard(Fakes(), SetupOptions(channel="none"))
+    assert "ANTHROPIC_API_KEY is already set in .env." in output  # saved once, then found in the file
+
+
+def test_a_shell_only_key_the_user_declines_to_save_stays_out_of_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODDS_API_KEY", ODDS_KEY)
+    prompts = Recording(answers={"Save ODDS_API_KEY from this shell's environment to .env?": False})
+    _, output = wizard(Fakes(), SetupOptions(channel="none"), prompts=prompts)
+    assert prompts.defaults["Save ODDS_API_KEY from this shell's environment to .env?"] is True
+    assert not env_path().exists() or "ODDS_API_KEY" not in dotenv_values(env_path())
+    assert "Left ODDS_API_KEY out of .env" in output and ODDS_KEY not in output
 
 
 def test_a_bad_env_value_is_named_but_never_shown() -> None:
@@ -577,6 +680,39 @@ def test_a_running_fm_bot_is_reported_and_left_running() -> None:
     _, output = wizard(fakes)
     assert "note: fm bot is running (pid 4321, 4322). fm run replaces it" in output
     assert "both poll the ntfy channel" in output and "setup leaves it running" in output
+
+
+def test_with_fm_bot_running_fm_run_is_registered_but_not_started() -> None:
+    """Review fix: setup used to start fm run beside a running fm bot, and both then polled the phone channel. Now the
+    logon job is registered without starting, and setup says to stop fm bot, then run fm autostart install."""
+    fakes = Fakes(bots=(4321,))
+    _, output = wizard(fakes)
+    installs = [call for call in fakes.calls if call[0] == "install"]
+    assert installs == [("install", "autostart", "no-start"), ("install", "wake")]  # the wake timer as usual
+    assert "fm run is registered but not started, so it does not poll beside fm bot." in output
+    assert "Stop fm bot (Ctrl+C in its\nwindow), then run fm autostart install to start fm run now" in output
+    assert "(or log out and back in)" in output
+
+
+def test_with_fm_bot_running_a_scheduler_that_cannot_register_only_installs_nothing() -> None:
+    fakes = Fakes(bots=(4321,), no_start=False)  # launchd starts a loaded agent at once
+    _, output = wizard(fakes)
+    assert [call for call in fakes.calls if call[0] == "install"] == [("install", "wake")]
+    assert "warning: fm run at logon is not installed: this scheduler starts fm run as soon as" in output
+    assert "Stop fm bot first (Ctrl+C in its window), then run fm autostart install." in output
+
+
+def test_the_live_autostart_job_registers_without_starting_where_the_scheduler_can() -> None:
+    from fm.commands.autostart import NO_START_BACKENDS
+
+    job = setup_cmd.live_deps().autostart  # builds the Job only; nothing is installed or queried here
+    assert (job.install_no_start is not None) == (sys.platform in NO_START_BACKENDS)
+
+
+def test_without_fm_bot_fm_run_is_installed_and_started() -> None:
+    fakes = Fakes()
+    wizard(fakes)
+    assert ("install", "autostart") in fakes.calls and ("install", "autostart", "no-start") not in fakes.calls
 
 
 def test_the_summary_is_the_doctor_then_the_next_steps() -> None:

@@ -8,24 +8,30 @@
 2. **Leagues.** :func:`fm.espn.discover.discover_leagues` lists the account's current NFL and NBA leagues, each shown
    as ``NFL  <league name>  -  team 7 "<team name>"``; a league whose team the fan profile did not name is confirmed
    with :func:`fm.espn.discover.confirm_league` (which refuses a team the account does not own). When discovery fails
-   or finds nothing, the ``--league-url`` values are confirmed instead, or the wizard asks for URLs. Every new league
-   is selected by default.
+   or finds nothing, the ``--league-url`` values are confirmed instead, or the wizard asks for URLs. On a fresh
+   install every league is selected by default, as is any league asked for by URL. A discovered league an existing
+   ``config.toml`` lacks defaults to no, so ``--yes`` never opts an installation into a new league's automation.
 3. **Presets.** Each new league gets a short key (``nfl``, ``nba``, then ``nfl2``...) and a preset (default
    ``balanced``; ``--preset`` sets it for all), shown with its one-line description.
 4. **API keys.** ``ANTHROPIC_API_KEY`` (hidden, skippable: the advisor falls back to template rationales) and the
-   optional ``ODDS_API_KEY`` go to ``.env`` through :func:`dotenv.set_key`. A key already set is left alone, and no
-   value is ever printed.
+   optional ``ODDS_API_KEY`` go to ``.env`` through :func:`dotenv.set_key`. A key ``.env`` has is left alone. A key
+   only this shell exports is offered for saving (default yes, so ``--yes`` saves it): ``fm run`` at logon reads
+   ``.env``, not this shell. No value is ever printed.
 5. **Phone.** ntfy (the default: no account), Telegram (asks for the @BotFather token, then captures the chat) or
    none, through :mod:`fm.notify.setup`, the code ``fm notify setup`` runs. A channel whose secrets are already in
    ``.env`` is not set up again (``fm notify setup --replace`` does that).
 6. **Config.** A missing ``config.toml`` is written fresh by :func:`fm.config_edit.render_config`. An existing one is
    never rewritten: :func:`fm.config_edit.add_leagues` appends only the new leagues, a known league whose season or
-   team differ from ESPN's is shown and updated through :func:`fm.config_edit.set_values` only once confirmed (``--yes``
-   confirms), and :func:`fm.config_edit.set_notify_channel` runs only when the channel changed.
+   team differ from ESPN's is shown and updated through :func:`fm.config_edit.set_values` only once confirmed. The
+   confirmation defaults to yes (so ``--yes`` takes it) only for a move to the sport's current season with the same
+   team; another team, or a season that is not the current one, defaults to no and says what differs.
+   :func:`fm.config_edit.set_notify_channel` runs only when the channel changed.
 7. **First sync** of each new or updated league, one at a time so each shows its progress (``--no-sync`` skips).
 8. **Autostart.** ``fm run`` at logon (``fm autostart install``) and the wake timer (``fm schedule install``), each
    installed only when the scheduler does not already have it (``--no-autostart`` skips). A running ``fm bot`` is
-   reported, not stopped: ``fm run`` replaces it, and the two together would both poll the phone channel.
+   reported, not stopped: ``fm run`` replaces it, and the two together would both poll the phone channel, so while it
+   runs the logon job is registered without starting ``fm run`` (:attr:`Job.install_no_start`), and setup says to
+   stop ``fm bot`` and then run ``fm autostart install``.
 9. **Summary.** The ``fm doctor`` lines, then where to go next.
 
 **Re-running is idempotent.** With nothing new, no file is written: the leagues are all present, the keys are set, the
@@ -42,7 +48,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,9 +59,9 @@ from pydantic import ValidationError
 
 from fm.browser.session import BrowserError
 from fm.config import SECRET_ENV_VARS, Channel, Config, ConfigError, Secrets, Sport, config_paths, load_config
-from fm.config_edit import add_leagues, render_config, set_notify_channel, set_values, write_config
+from fm.config_edit import LeagueUpdate, add_leagues, render_config, set_notify_channel, set_values, write_config
 from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus, describe
-from fm.espn.discover import DiscoveredLeague, DiscoveryError, LeagueRef, parse_league_url
+from fm.espn.discover import DiscoveredLeague, DiscoveryError, LeagueRef, current_season, parse_league_url
 from fm.notify import NotifyError
 from fm.notify.setup import DEFAULT_WAIT_S, Echo, saved_token, saved_topics, setup_ntfy, setup_telegram
 from fm.presets import PRESET_DESCRIPTIONS, PRESET_NAMES, PresetName
@@ -151,12 +157,15 @@ class SetupOptions:
 class Job:
     """A scheduler job setup installs: ``installed`` asks the scheduler (``None`` when it cannot tell), ``install``
     registers it and returns report lines, raising :class:`StepError` when that fails. ``command`` is the CLI that
-    does the same by hand."""
+    does the same by hand. ``install_no_start`` registers it without starting it now (``fm autostart install
+    --no-start``), for when ``fm bot`` is running; ``None`` when the scheduler cannot (launchd starts a loaded agent at
+    once), and then the job is left for the user to install once ``fm bot`` is stopped."""
 
     name: str
     command: str
     installed: Callable[[], bool | None]
     install: Callable[[], Sequence[str]]
+    install_no_start: Callable[[], Sequence[str]] | None = None
 
 
 class ChannelSetup(Protocol):
@@ -238,31 +247,35 @@ def run_setup(
     config_path: Path | None = None,
     env_path: Path | None = None,
     now: datetime | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> SetupResult:
     """Run every step (see the module docstring) and return what changed. ``config_path`` and ``env_path`` default to
-    the config dir's files. Raises :class:`SetupError` when setup cannot go on; nothing is written before the leagues
-    are settled, so a failure up to then leaves the installation as it was."""
+    the config dir's files, ``environ`` to this process's environment (where a key set only in the shell is found).
+    Raises :class:`SetupError` when setup cannot go on; nothing is written before the leagues are settled, so a failure
+    up to then leaves the installation as it was."""
     config_path, env_path = config_paths(config_path, env_path)
     at = now if now is not None else datetime.now(UTC)
+    env = os.environ if environ is None else environ
     existing = _existing(config_path, env_path)
 
     _heading(echo, "ESPN session")
     session = _session(deps, prompts, echo, at)
 
     _heading(echo, "Leagues")
-    plan = _plan(_find_leagues(options, deps, session, prompts, echo), existing, options, prompts, echo)
+    found, requested = _find_leagues(options, deps, session, prompts, echo)
+    plan = _plan(found, requested, existing, options, prompts, echo)
     if existing is None and not plan:
         raise SetupError("no league selected, so there is no config.toml to write; run fm setup again")
 
     _heading(echo, "API keys")
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    _api_keys(env_path, prompts, echo)
+    _api_keys(env_path, prompts, echo, env)
 
     _heading(echo, "Phone")
-    channel = _phone(options, existing, env_path, deps, prompts, echo)
+    channel = _phone(options, existing, env_path, deps, prompts, echo, env)
 
     _heading(echo, "Config")
-    written = _write_config(config_path, env_path, plan, channel, existing, prompts, echo)
+    written = _write_config(config_path, env_path, plan, channel, existing, prompts, echo, at)
 
     _heading(echo, "First sync")
     synced = _first_sync(options, config_path, env_path, (*written.added, *written.updated), deps, session, echo)
@@ -414,8 +427,10 @@ def _login(deps: SetupDeps) -> EspnSession:
 
 def _find_leagues(
     options: SetupOptions, deps: SetupDeps, session: EspnSession, prompts: Prompts, echo: Echo
-) -> list[DiscoveredLeague]:
-    """The account's leagues, from discovery and the pasted URLs, each with its team settled."""
+) -> tuple[list[DiscoveredLeague], set[tuple[str, int]]]:
+    """The account's leagues, from discovery and the pasted URLs, each with its team settled, and the ``(sport, league
+    id)`` of those asked for by URL (``--league-url``, or typed when discovery failed): the user named those, so they
+    are added by default even to an existing config, where a merely discovered league is not."""
     found: list[DiscoveredLeague] = []
     try:
         discovered = list(deps.discover(session))
@@ -436,6 +451,7 @@ def _find_leagues(
         echo("an empty line ends the list. Next time: fm setup --league-url <url>.")
         while url := prompts.text("League URL", default="").strip():
             urls.append(url)
+    requested: set[tuple[str, int]] = set()
     for url in urls:
         try:
             ref = parse_league_url(url)
@@ -445,6 +461,7 @@ def _find_leagues(
         confirmed = _confirm(deps, ref, session, echo)
         if confirmed is not None:
             found.append(confirmed)
+            requested.add((confirmed.sport, confirmed.espn_league_id))
     unique: dict[tuple[str, int], DiscoveredLeague] = {}
     for league in found:
         if league.team_id is not None:
@@ -454,7 +471,7 @@ def _find_leagues(
             "no league to set up: pass the URL of your team page with --league-url (repeatable), e.g. "
             "fm setup --league-url 'https://fantasy.espn.com/football/team?leagueId=...&teamId=...'"
         )
-    return list(unique.values())
+    return list(unique.values()), requested
 
 
 def _confirm(deps: SetupDeps, ref: LeagueRef, session: EspnSession, echo: Echo) -> DiscoveredLeague | None:
@@ -467,12 +484,18 @@ def _confirm(deps: SetupDeps, ref: LeagueRef, session: EspnSession, echo: Echo) 
 
 def _plan(
     found: Sequence[DiscoveredLeague],
+    requested: Collection[tuple[str, int]],
     existing: Config | None,
     options: SetupOptions,
     prompts: Prompts,
     echo: Echo,
 ) -> list[PlannedLeague]:
-    """Keep the leagues already configured and ask about each new one: manage it? with which preset?"""
+    """Keep the leagues already configured and ask about each new one: manage it? with which preset?
+
+    "Manage it?" defaults to yes on a fresh install (no ``config.toml``: that is what setup is for) and for a league
+    asked for by URL. A league discovery found that an existing ``config.toml`` lacks defaults to no: the user left it
+    out, or it is a league they are only in, and managing it means automation acting on it. So ``--yes`` never opts an
+    existing installation into a new league; ``--league-url`` (or answering yes) does."""
     present = {(league.sport, league.espn_league_id): league.key for league in existing.leagues} if existing else {}
     taken = set(present.values())
     plan: list[PlannedLeague] = []
@@ -497,8 +520,10 @@ def _plan(
             echo(f"  {name}: {PRESET_DESCRIPTIONS[name]}")
     for league, team_id in new:
         line = describe_league(league)
-        if not prompts.confirm(f"Manage {line}?", default=True):
-            echo(f"Skipped {line}.")
+        default = existing is None or (league.sport, league.espn_league_id) in requested
+        if not prompts.confirm(f"Manage {line}?", default=default):
+            hint = "" if default else " (not in config.toml; fm setup without --yes asks, --league-url <url> adds it)"
+            echo(f"Skipped {line}.{hint}")
             continue
         key = league_key(league.sport, taken)
         taken.add(key)
@@ -517,11 +542,28 @@ def _preset(name: str) -> PresetName:
     raise SetupError(f"unknown preset {name!r}; choose one of {', '.join(PRESET_NAMES)}")
 
 
-def _api_keys(env_path: Path, prompts: Prompts, echo: Echo) -> None:
-    found = read_secrets(env_path)
+def _api_keys(env_path: Path, prompts: Prompts, echo: Echo, environ: Mapping[str, str]) -> None:
+    """Each key in :data:`SECRET_PROMPTS`: left alone when ``.env`` has it; offered for saving when only this shell's
+    environment has it (``fm run`` at logon and the scheduled tick read ``.env``, not the shell that ran setup, so a
+    key only exported here would be missing there; ``--yes`` saves it); otherwise asked for, hidden. No value is ever
+    printed."""
+    read_secrets(env_path, environ)  # a value that does not validate stops setup here, named but never shown
+    in_file = dotenv_values(env_path) if env_path.is_file() else {}
     for prompt in SECRET_PROMPTS:
-        if found.is_set(prompt.name):
-            echo(f"{prompt.name} is already set.")
+        if (in_file.get(prompt.name) or "").strip():
+            echo(f"{prompt.name} is already set in {env_path.name}.")
+            continue
+        exported = (environ.get(prompt.name) or "").strip()
+        if exported:
+            echo(
+                f"{prompt.name} is set in this shell's environment only; fm run at logon and the scheduled tick read "
+                f"{env_path.name}, so they would run without it."
+            )
+            if prompts.confirm(f"Save {prompt.name} from this shell's environment to {env_path.name}?", default=True):
+                set_key(env_path, prompt.name, exported, quote_mode="never")
+                echo(f"Saved {prompt.name} to {env_path}.")
+            else:
+                echo(f"Left {prompt.name} out of {env_path.name}: only commands run where it is exported will have it.")
             continue
         value = prompts.secret(prompt.question).strip()
         if not value:
@@ -532,7 +574,13 @@ def _api_keys(env_path: Path, prompts: Prompts, echo: Echo) -> None:
 
 
 def _phone(
-    options: SetupOptions, existing: Config | None, env_path: Path, deps: SetupDeps, prompts: Prompts, echo: Echo
+    options: SetupOptions,
+    existing: Config | None,
+    env_path: Path,
+    deps: SetupDeps,
+    prompts: Prompts,
+    echo: Echo,
+    environ: Mapping[str, str],
 ) -> Channel:
     """The channel to configure, set up unless ``.env`` already holds its secrets. A setup that does not finish is a
     warning: the channel is still configured, and ``fm doctor`` points at ``fm notify setup``."""
@@ -546,7 +594,7 @@ def _phone(
     if channel == "none":
         echo("No phone: proposals wait for fm proposals or the dashboard; fm notify setup --channel ntfy adds one.")
         return channel
-    found = read_secrets(env_path)
+    found = read_secrets(env_path, environ)
     if _channel_ready(channel, found):
         echo(f"{channel} is already set up (fm notify setup --replace sets it up afresh).")
         return channel
@@ -589,11 +637,12 @@ def _write_config(
     existing: Config | None,
     prompts: Prompts,
     echo: Echo,
+    now: datetime,
 ) -> _Written:
     try:
         if existing is None:
             return _fresh_config(config_path, env_path, plan, channel, echo)
-        return _edit_config(config_path, env_path, plan, channel, existing, prompts, echo)
+        return _edit_config(config_path, env_path, plan, channel, existing, prompts, echo, now)
     except ConfigError as exc:
         raise SetupError(str(exc)) from None
 
@@ -615,16 +664,24 @@ def _edit_config(
     existing: Config,
     prompts: Prompts,
     echo: Echo,
+    now: datetime,
 ) -> _Written:
+    """Append the new leagues, and offer each present league's differences from ESPN (season, team) as one update.
+
+    The update defaults to yes only when it is safe to take unattended (``--yes`` takes the default): the season moves
+    to the sport's current season (:func:`fm.espn.discover.current_season`) and the team stays. A different team, or a
+    season that is not the current one (a renewed league's next, undrafted season), defaults to no, and what differs is
+    printed so it can be confirmed by hand: the team decides whose roster the automation acts on."""
     result = add_leagues(config_path, [league.entry() for league in plan], env_path=env_path)
     if result.added:
         echo(f"Added to {config_path}: {', '.join(result.added)}.")
+    present = {league.key: league.league for league in plan if league.present}
     updated: list[str] = []
     declined: list[str] = []
     for update in result.changed:
         diff = ", ".join(f"{name} {old} -> {new}" for name, (old, new) in update.fields.items())
         echo(f"{update.key} in config.toml differs from ESPN: {diff}.")
-        if prompts.confirm(f"Update {update.key} ({diff})?", default=True):
+        if prompts.confirm(f"Update {update.key} ({diff})?", default=_safe_update(update, present, now, echo)):
             set_values(config_path, update.key, update.updates, env_path=env_path)
             echo(f"Updated {update.key}.")
             updated.append(update.key)
@@ -637,6 +694,28 @@ def _edit_config(
     if not result.added and not updated and existing.notify.channel == channel:
         echo(f"{config_path} already has everything; left unchanged.")
     return _Written(added=result.added, present=result.unchanged, updated=tuple(updated), declined=tuple(declined))
+
+
+def _safe_update(update: LeagueUpdate, present: Mapping[str, DiscoveredLeague], now: datetime, echo: Echo) -> bool:
+    """Whether an update of a present league may default to yes; says why not when it may not."""
+    safe = True
+    if "team_id" in update.fields:
+        old, new = update.fields["team_id"]
+        echo(
+            f"  ESPN says this account's team in {update.key} is team {new}; config.toml has team {old}. The team "
+            "changes only when you confirm it (fm setup without --yes asks)."
+        )
+        safe = False
+    league = present.get(update.key)
+    if "season" in update.fields and league is not None:
+        current = current_season(league.sport, now)
+        if league.season != current:
+            echo(
+                f"  Season {league.season} is not the current {league.sport.upper()} season ({current}); it changes "
+                "only when you confirm it (fm setup without --yes asks)."
+            )
+            safe = False
+    return safe
 
 
 def _first_sync(
@@ -682,19 +761,30 @@ def _autostart(options: SetupOptions, deps: SetupDeps, channel: Channel, echo: E
         pids = ", ".join(str(pid) for pid in running)
         listens = f"the {channel} channel" if channel != "none" else "the phone channel"
         echo(f"note: fm bot is running (pid {pids}). fm run replaces it: it ticks and records approvals itself, and")
-        echo(f"the two together would both poll {listens}. Stop fm bot and take it out of what starts at logon;")
-        echo("setup leaves it running.")
+        echo(f"the two together would both poll {listens}, so setup does not start fm run now. Stop fm bot and take it")
+        echo("out of what starts at logon; setup leaves it running.")
     for job in (deps.autostart, deps.wake_timer):
         if job.installed():
             echo(f"{job.name}: already installed ({job.command} reinstalls it).")
             continue
+        hold = bool(running) and job is deps.autostart
         try:
-            lines = job.install()
+            if not hold:
+                lines = job.install()
+            elif job.install_no_start is not None:
+                lines = job.install_no_start()
+            else:
+                raise StepError("this scheduler starts fm run as soon as the job is installed, and fm bot is running")
         except StepError as exc:
             echo(f"warning: {job.name} is not installed: {exc}; run {job.command}")
+            if hold:
+                echo(f"Stop fm bot first (Ctrl+C in its window), then run {job.command}.")
             continue
         for line in lines:
             echo(line)
+        if hold:
+            echo("fm run is registered but not started, so it does not poll beside fm bot. Stop fm bot (Ctrl+C in its")
+            echo(f"window), then run {job.command} to start fm run now (or log out and back in).")
 
 
 __all__ = [

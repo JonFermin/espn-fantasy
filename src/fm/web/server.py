@@ -6,7 +6,9 @@
   ``fm run`` logs it and runs its loop without the dashboard. uvicorn would instead log the error and call
   ``sys.exit`` from inside its event loop.
 - The app's ``Host`` check needs the port actually bound (``port=0`` picks a free one).
-- The browser can be opened at once: connections queue on the bound socket until uvicorn accepts them.
+- The browser can be opened at once: connections queue on the bound socket until uvicorn accepts them. So the app's
+  one-time sign-in link is written to ``<config dir>/dashboard.url`` right away (:mod:`fm.web.login`), and removed
+  when the dashboard stops.
 
 On Windows the socket takes the port exclusively (``SO_EXCLUSIVEADDRUSE``, so no other process can bind it with
 ``SO_REUSEADDR`` and receive the dashboard's requests); elsewhere it sets ``SO_REUSEADDR``, which there only lets a
@@ -26,6 +28,7 @@ import logging
 import socket
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Final
 
 import uvicorn
@@ -33,6 +36,7 @@ from starlette.applications import Starlette
 
 from fm.web import DEFAULT_PORT, LOOPBACK
 from fm.web.app import create_app
+from fm.web.login import LoginLinks, url_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +58,29 @@ class Dashboard:
 
     @property
     def url(self) -> str:
-        """``http://127.0.0.1:<port>/``: what to open in the browser."""
+        """``http://127.0.0.1:<port>/``: the dashboard's address (a browser that is not signed in gets told to run
+        ``fm ui`` there)."""
         return f"http://{LOOPBACK}:{self.port}/"
+
+    def login_url(self) -> str:
+        """The current one-time sign-in link (:class:`fm.web.login.LoginLinks`): what ``fm ui`` opens. Secret: never
+        logged."""
+        links: LoginLinks = self.app.state.login
+        return links.url()
 
     def serve(self) -> None:
         """Serve in this thread until stopped. In the main thread uvicorn handles Ctrl+C itself: it shuts down, then
-        re-raises the signal, so the caller sees ``KeyboardInterrupt`` once the server is down."""
-        self.server.run(sockets=[self.sock])
+        re-raises the signal, so the caller sees ``KeyboardInterrupt`` once the server is down. The URL file goes
+        with the server."""
+        try:
+            self.server.run(sockets=[self.sock])
+        finally:
+            self.release()
+
+    def release(self) -> None:
+        """Remove ``dashboard.url`` if it still holds this dashboard's link (idempotent)."""
+        links: LoginLinks = self.app.state.login
+        links.close()
 
     def start(self) -> None:
         """Serve in a daemon thread (``fm-dashboard``); an error there is logged, never raised into the caller."""
@@ -78,6 +98,7 @@ class Dashboard:
                 logger.warning("dashboard: the server thread did not stop within %.0f s", timeout)
         elif not self.server.started:
             self.sock.close()
+        self.release()
 
     def _serve_logged(self) -> None:
         try:
@@ -86,11 +107,13 @@ class Dashboard:
             logger.exception("dashboard: the server at %s stopped with an error", self.url)
 
 
-def bind_dashboard(port: int = DEFAULT_PORT, *, token: str | None = None) -> Dashboard:
-    """Bind ``127.0.0.1:<port>`` and build the app and the uvicorn server for it; nothing is served yet.
+def bind_dashboard(port: int = DEFAULT_PORT, *, url_file: Path | None = None) -> Dashboard:
+    """Bind ``127.0.0.1:<port>`` and build the app and the uvicorn server for it; nothing is served yet, but the
+    one-time sign-in link is already in ``url_file`` (default ``<config dir>/dashboard.url``,
+    :func:`fm.web.login.url_file_path`), since connections queue on the bound socket.
 
     Raises ``OSError`` when the port is taken or cannot be bound. ``port=0`` binds a free port (``Dashboard.port`` says
-    which). ``token`` overrides the per-process token :func:`fm.web.app.create_app` would draw.
+    which).
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -105,7 +128,11 @@ def bind_dashboard(port: int = DEFAULT_PORT, *, token: str | None = None) -> Das
         sock.close()
         raise
     bound = int(sock.getsockname()[1])
-    app = create_app(port=bound, token=token)
+    try:
+        app = create_app(port=bound, url_file=url_file if url_file is not None else url_file_path())
+    except BaseException:
+        sock.close()
+        raise
     config = uvicorn.Config(
         app,
         host=LOOPBACK,

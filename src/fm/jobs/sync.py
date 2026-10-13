@@ -39,8 +39,9 @@ Then the sources and the unmapped-rostered-player gate, dispatched on each store
 
 The NBA crosswalk's sources degrade rather than fail: one that is down with no cached copy is a warning and makes
 the build ``degraded``. A degraded build does not replace the crosswalk an earlier sync saved, and the gate then
-checks the saved one; with none saved yet, it is saved, as the best there is. (The nflverse ID map has no such mode:
-with nothing cached a failed download raises.)
+checks the saved one, whose no-history verdicts were saved with it (so the rookies that build passed pass again rather
+than gating for as long as the source is down); with none saved yet, it is saved, as the best there is. (The nflverse
+ID map has no such mode: with nothing cached a failed download raises.)
 
 Every source result is reported as a :class:`SourceSync` carrying the adapter's ``as_of``, ``cached``, ``stale`` and
 ``degraded`` flags and its ``warnings`` (for the crosswalk: the adapter's, then the build's). This is deliberate:
@@ -89,7 +90,7 @@ ESPN_SOURCE = "espn"
 DEFAULT_POOL_SIZE = 100
 """Free agents (and players on waivers) kept per league, most-owned first; paged ``DEFAULT_POOL_LIMIT`` at a time."""
 NFL_SPORT: Sport = "nfl"
-KEPT_CROSSWALK = "degraded, so the crosswalk an earlier sync saved was kept"
+KEPT_CROSSWALK = "degraded, so the crosswalk an earlier sync saved was kept, with its no-history verdicts"
 
 
 class SyncError(RuntimeError):
@@ -629,7 +630,7 @@ def _sync_nba_sources(
         finally:
             if darko is None:
                 talent.close()
-        kept = _keeps_saved_crosswalk(store, NBA_SPORT, crosswalk)
+        kept = _keeps_saved_crosswalk(store, crosswalk)
         stored = 0 if kept else crosswalk.data.save(store)
         detail = KEPT_CROSSWALK if kept else f"{stored} id mappings saved"
         sources.append(SourceSync.from_fetched(crosswalk, stored=stored, detail=detail))
@@ -639,15 +640,17 @@ def _sync_nba_sources(
 
 
 def _gate_nba(store: Store, item: LeagueSync, crosswalk: NbaCrosswalk | None) -> LeagueSync:
-    """:func:`fm.model.ids_nba.nba_gate` for an NBA league (against ``crosswalk``, else the saved one): its failure is
-    recorded on the result rather than raised, its no-history players on the result too, and its warnings (who has no
-    nba.com history, which matches rest on the name alone) join the league's, pass or fail."""
+    """:func:`fm.model.ids_nba.nba_gate` for an NBA league (against ``crosswalk``, else the saved one with the
+    no-history verdicts saved beside it): its failure is recorded on the result rather than raised, its no-history
+    players on the result too, and its warnings (who has no nba.com history, which matches rest on the name alone) join
+    the league's, pass or fail."""
     verdict = nba_gate(store, item.league_id, crosswalk=crosswalk, scoring_period_id=item.scoring_period_id)
     checked = len(verdict.checked) if verdict.passed else item.rostered
     gate = GateResult(checked=checked, error=verdict.error, no_history=verdict.no_history)
     return replace(item, gate=gate, warnings=(*item.warnings, *verdict.warnings))
 
 
-def _keeps_saved_crosswalk(store: Store, sport: Sport, crosswalk: Fetched[Any]) -> bool:
-    """A degraded build (a source down with no cached copy) leaves the crosswalk an earlier sync saved in place."""
-    return crosswalk.degraded and bool(store.player_ids.for_sport(sport))
+def _keeps_saved_crosswalk(store: Store, crosswalk: Fetched[NbaCrosswalk]) -> bool:
+    """A degraded build (a source down with no cached copy) leaves the crosswalk an earlier sync saved in place, and
+    the no-history verdicts saved with it; saved verdicts without a single id are no crosswalk to keep."""
+    return crosswalk.degraded and len(NbaCrosswalk.from_store(store)) > 0

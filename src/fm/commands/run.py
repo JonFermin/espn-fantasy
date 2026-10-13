@@ -16,7 +16,8 @@ acted on. Ctrl+C stops it cleanly, and so does ``SIGTERM`` (what ``launchctl boo
 the same clean stop so a running tick child is stopped with its tree instead of being orphaned.
 
 It also serves the dashboard (``fm ui``, :mod:`fm.web`) on ``127.0.0.1:--port`` (8711) in a daemon thread for as long
-as the loop runs; ``--no-ui`` leaves it out. The dashboard only records decisions and edits settings, which the next
+as the loop runs; ``--no-ui`` leaves it out. ``fm ui`` then finds it through ``<config dir>/dashboard.url`` and opens
+it signed in, rather than serving a second one. The dashboard only records decisions and edits settings, which the next
 tick picks up (the config is reloaded per tick). uvicorn installs signal handlers only in the main thread, so Ctrl+C and
 ``SIGTERM`` still reach the loop. A port that is taken, or a dashboard that will not start, is logged and printed and
 the loop runs without it: the dashboard is a convenience, the ticks are the job.
@@ -134,7 +135,7 @@ def _dashboard(enabled: bool, port: int) -> Iterator[str | None]:
         logger.exception("fm run: dashboard not started; the loop runs without it")
         yield None
         return
-    logger.info("fm run: dashboard at %s", dashboard.url)
+    logger.info("fm run: dashboard at %s (fm ui opens it signed in)", dashboard.url)
     try:
         yield dashboard.url
     finally:

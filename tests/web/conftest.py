@@ -3,6 +3,10 @@
 ``FM_CONFIG_DIR`` and ``FM_CACHE_DIR`` point into the copy, as in ``tests/test_views.py``, so every request reads and
 writes only there. The client talks to the app in process (no socket) and sends ``Host: 127.0.0.1:<PORT>``, the
 ``Host`` a browser sends to the dashboard served on that port.
+
+``client`` is signed in the way ``fm ui`` signs a browser in: it follows the app's one-time login link
+(``app.state.login.url()``) and keeps the session cookie. ``anonymous`` is a browser that never did. ``token`` is the
+signed-in session's CSRF token, from ``GET /api/session`` as the page reads it.
 """
 
 from __future__ import annotations
@@ -39,9 +43,25 @@ def app(home: Path) -> Starlette:
     return create_app(port=PORT)
 
 
+def sign_in(client: TestClient, app: Starlette) -> None:
+    """Follow the app's current one-time login link, as the browser ``fm ui`` opens does: a 303 to ``/`` with the
+    session cookie, which the client keeps."""
+    response = client.get(app.state.login.url(), follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"] == "/", response.text
+
+
+@pytest.fixture
+def anonymous(app: Starlette) -> Iterator[TestClient]:
+    """A browser that never signed in."""
+    with TestClient(app, base_url=BASE_URL) as test_client:
+        yield test_client
+
+
 @pytest.fixture
 def client(app: Starlette) -> Iterator[TestClient]:
+    """A signed-in browser."""
     with TestClient(app, base_url=BASE_URL) as test_client:
+        sign_in(test_client, app)
         yield test_client
 
 
@@ -52,6 +72,9 @@ def port() -> int:
 
 
 @pytest.fixture
-def token(app: Starlette) -> str:
-    """The app's per-process token, which the page carries in ``<meta name="fm-token">``."""
-    return str(app.state.token)
+def token(client: TestClient) -> str:
+    """The signed-in session's CSRF token, which the page reads from ``GET /api/session`` and sends as
+    ``X-FM-Token``."""
+    response = client.get("/api/session")
+    assert response.status_code == 200, response.text
+    return str(response.json()["csrf"])

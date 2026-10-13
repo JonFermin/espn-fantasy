@@ -2,13 +2,15 @@
  * The espn-fantasy dashboard (fm ui). Vanilla JS, no build step, no CDN: it talks to this origin's JSON API only.
  *
  * Every value from the API reaches the page through textContent or an attribute setter; nothing is ever parsed as
- * HTML. POSTs carry the per-process token from <meta name="fm-token"> as X-FM-Token. Approving records a decision;
- * fm run or the scheduled tick executes it.
+ * HTML. The browser is signed in by an HttpOnly session cookie (fm ui opens a one-time sign-in link); POSTs carry the
+ * session's CSRF token, fetched from GET /api/session, as X-FM-Token. A 401 means the session is gone (the dashboard
+ * restarted): the page says to run fm ui again. Approving records a decision; fm run or the scheduled tick executes it.
  */
 "use strict";
 
 (() => {
-  const TOKEN = document.querySelector('meta[name="fm-token"]')?.getAttribute("content") ?? "";
+  const SIGNED_OUT = "Signed out: run fm ui in a terminal to open the dashboard again.";
+  let csrf = "";
   const SECTIONS = ["overview", "proposals", "lineup", "waivers", "reports", "settings", "health"];
   const AUTO_REFRESH = new Set(["overview", "proposals", "health"]);
   const REFRESH_MS = 60_000;
@@ -147,7 +149,8 @@
   async function api(path, { method = "GET", body } = {}) {
     const init = { method, headers: { Accept: "application/json" }, cache: "no-store", credentials: "same-origin" };
     if (method !== "GET") {
-      init.headers["X-FM-Token"] = TOKEN;
+      if (!csrf) await fetchSession();
+      init.headers["X-FM-Token"] = csrf;
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body ?? {});
     }
@@ -157,6 +160,11 @@
     } catch {
       throw new Error("The dashboard is not answering. Is fm ui or fm run still running?");
     }
+    if (response.status === 401) {
+      csrf = "";
+      setTopStatus(SIGNED_OUT, true);
+      throw new Error(SIGNED_OUT);
+    }
     let data = null;
     try {
       data = await response.json();
@@ -165,6 +173,14 @@
     }
     if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
     return data;
+  }
+
+  // The CSRF token every POST sends as X-FM-Token: only a signed-in browser can read it (GET /api/session needs the
+  // HttpOnly session cookie), and no other origin can read the answer.
+  async function fetchSession() {
+    const data = await api("/api/session");
+    csrf = data.csrf;
+    return csrf;
   }
 
   let toastTimer = 0;
@@ -804,7 +820,9 @@
       else fetchOverview().catch((error) => setTopStatus(error.message, true));
     }, REFRESH_MS);
     const first = currentSection();
-    const ready = first === "overview" ? Promise.resolve() : fetchOverview().catch((error) => setTopStatus(error.message, true));
+    const ready = fetchSession()
+      .then(() => (first === "overview" ? undefined : fetchOverview()))
+      .catch((error) => setTopStatus(error.message, true));
     ready.then(() => show(first));
   });
 })();

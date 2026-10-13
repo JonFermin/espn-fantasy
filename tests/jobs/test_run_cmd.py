@@ -15,6 +15,7 @@ import signal
 import sqlite3
 import sys
 import time
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import NoReturn
@@ -60,6 +61,24 @@ def invoke(*args: str) -> str:
     result = runner.invoke(cli(), list(args), catch_exceptions=False)
     assert result.exit_code == 0, result.output
     return result.output
+
+
+@pytest.fixture(autouse=True)
+def _no_dashboard(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
+    """No test here binds a socket: ``fm run`` serves the dashboard unless ``--no-ui``, so every ``run`` here passes
+    it, and a bind that slips through is recorded (``fm run`` only logs a dashboard that fails to start) and fails the
+    test at teardown. The dashboard's own wiring is tested with a fake server in ``tests/web/test_commands.py``."""
+    import fm.web.server as web_server
+
+    binds: list[int] = []
+
+    def refuse(port: int = 0, **_: object) -> NoReturn:
+        binds.append(port)
+        raise OSError("a unit test must not bind the dashboard's socket; pass --no-ui")
+
+    monkeypatch.setattr(web_server, "bind_dashboard", refuse)
+    yield binds
+    assert binds == [], "fm run tried to serve the dashboard in a unit test; pass --no-ui"
 
 
 TickCall = tuple[list[str] | None, bool, bool, LockHolder | None]
@@ -299,7 +318,7 @@ def test_fm_run_passes_its_options_logs_to_run_log_and_reports_how_it_stopped(mo
 
     monkeypatch.setattr(run_cmd, "run_forever", fake_run_forever)
     before = signal.getsignal(signal.SIGTERM)
-    output = invoke("run", "--every", "5", "--no-execute", "--tick-timeout", "7")
+    output = invoke("run", "--no-ui", "--every", "5", "--no-execute", "--tick-timeout", "7")
     assert "fm run: tick every 5 minutes (no execution), each stopped after 7 min" in output
     assert output.rstrip().endswith("stopped (interrupt) after 2 ticks and 1 decision")
     assert seen["options"] == RunOptions(
@@ -317,7 +336,7 @@ def test_fm_run_defaults_to_a_tick_every_10_minutes_stopped_after_20(monkeypatch
         return RunStats(ticks=1, stopped_by="stop")
 
     monkeypatch.setattr(run_cmd, "run_forever", fake_run_forever)
-    output = invoke("run")
+    output = invoke("run", "--no-ui")
     assert seen == [RunOptions()] and seen[0].tick_timeout == DEFAULT_TICK_TIMEOUT == timedelta(minutes=20)
     assert "each stopped after 20 min" in output and "stopped (stop) after 1 tick and 0 decisions" in output
 
@@ -329,13 +348,13 @@ def test_fm_run_interrupted_while_waiting_for_the_lock_or_failing_on_the_databas
         raise KeyboardInterrupt
 
     monkeypatch.setattr(run_cmd, "run_forever", interrupted)
-    assert "stopped while waiting for the run lock" in invoke("run")
+    assert "stopped while waiting for the run lock" in invoke("run", "--no-ui")
 
     def broken(*, options: RunOptions) -> RunStats:
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(run_cmd, "run_forever", broken)
-    result = runner.invoke(cli(), ["run"], catch_exceptions=False)
+    result = runner.invoke(cli(), ["run", "--no-ui"], catch_exceptions=False)
     assert result.exit_code == 1 and "error: state database: database is locked" in result.output
 
 

@@ -6,7 +6,9 @@ and the MCP server use, per request, so the page shows what ``fm sync`` and the 
 =====================================================  ===============================================================
 endpoint                                               serves
 =====================================================  ===============================================================
-``GET /``, ``GET /static/{app.js,app.css}``            the page (the token is the only thing put into it)
+``GET /``, ``GET /static/{app.js,app.css}``            the page once signed in (else a page saying to run ``fm ui``)
+``GET /auth?t=<secret>``, ``GET /auth/ping``           sign in with a one-time link; ``fm ui``'s probe (below)
+``GET /api/session``                                   this session's CSRF token, for the page's POSTs
 ``GET /api/overview[?as_of=]``                         per league the team, record, standing, sync age, the next
                                                        deadline of each kind and the open proposals; the session
                                                        check, the health counts and the kill switch
@@ -30,14 +32,22 @@ logged with its traceback under ``fm.web.app`` (``logs/run.log`` under ``fm run`
 
 Security
 --------
-The dashboard binds ``127.0.0.1`` only (:mod:`fm.web.server`), and every request passes :class:`_Guard` first:
+The dashboard binds ``127.0.0.1`` only (:mod:`fm.web.server`), which every account and process on the machine can
+reach, so it also needs a sign-in that only this user can complete. Every request passes :class:`_Guard` first:
 
 - ``Host`` must be ``127.0.0.1:<port>`` or ``localhost:<port>``, else 400. A page on another site that rebinds its
   own name to 127.0.0.1 (DNS rebinding) still sends its own name as the ``Host``, so it can read nothing.
-- Every request other than GET and HEAD needs ``X-FM-Token`` equal to the token :func:`create_app` drew
-  (``secrets.token_urlsafe``, new for each process) and, when the browser sends an ``Origin``, an ``Origin`` equal to
-  ``http://<the Host>``; anything else is a 403. The token reaches the page only as ``<meta name="fm-token">`` in
-  ``index.html``, which another origin cannot read: no response carries a CORS header.
+- **Sign-in.** The server keeps one unused login secret (:class:`fm.web.login.LoginLinks`) and writes its link to
+  ``<config dir>/dashboard.url``, which only this user can read. ``GET /auth?t=<secret>`` spends it (once, within
+  10 minutes; the file gets a new link at once) and answers with a session cookie, ``fm_session_<port>``: HttpOnly
+  (no script reads it), ``SameSite=Strict`` (no other site's page sends it) and ``Path=/``, then redirects to ``/``.
+  ``fm ui`` opens that link (:mod:`fm.commands.ui`). Every ``/api/*`` request, and every request other than GET and
+  HEAD, needs a live session: 401 otherwise. ``/`` without one serves a static page that says to run ``fm ui``.
+- **CSRF.** Every request other than GET and HEAD also needs ``X-FM-Token`` equal to its session's CSRF token and,
+  when the browser sends an ``Origin``, an ``Origin`` equal to ``http://<the Host>``; anything else is a 403. The page
+  gets the token from ``GET /api/session``, which itself needs the cookie, and no other origin can read that answer:
+  no response carries a CORS header. A double-submit cookie would also work; a token delivered by an authenticated GET
+  keeps every cookie HttpOnly and ties the token to the session server-side, with nothing put into the HTML.
 - Responses carry ``nosniff``, ``no-store``, ``frame-ancestors 'none'`` and a Content-Security-Policy that allows
   this origin's script and style only. The page is static: no data is ever put into HTML on the server, and the
   script builds the DOM with ``textContent``.
@@ -60,6 +70,9 @@ import logging
 import re
 import secrets
 import sqlite3
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from datetime import UTC, datetime, timedelta
 from importlib import resources
@@ -72,8 +85,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.requests import Request, cookie_parser
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 import fm.views as views
@@ -89,15 +102,17 @@ from fm.proposals import TRANSITIONS, PauseState, PolicyError, ProposalError, ap
 from fm.proposals.pause import pause_state
 from fm.proposals.policy import stored_settings
 from fm.store import LeagueRow, Store
+from fm.web.login import APP_ID, LOGIN_PARAM, LOGIN_PATH, LOGIN_TTL, PING_PATH, LoginLinks
 
 logger = logging.getLogger(__name__)
 
 TOKEN_HEADER: Final = "X-FM-Token"
-"""The request header every POST carries the per-process token in."""
-TOKEN_META: Final = "fm-token"
-"""``<meta name="fm-token" content="...">``: where the page finds the token."""
-TOKEN_PLACEHOLDER: Final = "__FM_TOKEN__"
-"""What ``static/index.html`` says where the token goes."""
+"""The request header every POST carries its session's CSRF token in (from ``GET /api/session``)."""
+SESSION_COOKIE_PREFIX: Final = "fm_session_"
+"""The session cookie is ``fm_session_<port>``: cookies are per host, not per port, so a dashboard on another port
+keeps its own."""
+MAX_SESSIONS: Final = 32
+"""Signed-in browsers a dashboard remembers; the oldest session is forgotten beyond this."""
 DECIDED_BY: Final = "dashboard"
 """``decided_by`` on a proposal approved or rejected here."""
 SAFE_METHODS: Final = frozenset({"GET", "HEAD"})
@@ -127,7 +142,7 @@ STATIC_FILES: Final[Mapping[str, str]] = {
     "app.css": "text/css; charset=utf-8",
 }
 """The files under ``static/`` served at ``/static/<name>``, with their media types. ``index.html`` is served at
-``/``."""
+``/`` to a signed-in browser and ``signin.html`` to anyone else."""
 TRADE_DEADLINE: Final = "trade_deadline"
 """The overview's deadline kind for the league's trade deadline, beside :class:`fm.jobs.deadlines.DeadlineKind`."""
 _REPORT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$")
@@ -149,23 +164,31 @@ class _ApiError(Exception):
         self.message = message
 
 
-def create_app(*, port: int, token: str | None = None) -> Starlette:
+def create_app(
+    *,
+    port: int,
+    url_file: Path | None = None,
+    login_ttl: timedelta = LOGIN_TTL,
+    clock: Callable[[], float] = time.monotonic,
+) -> Starlette:
     """The dashboard for ``http://127.0.0.1:<port>/``: the requests it accepts name that port in their ``Host``.
 
-    ``token`` is the secret every POST must carry; by default a fresh one is drawn, so each process has its own. It is
-    kept on ``app.state.token`` and put into the page, nowhere else. The static files are read once, here, from the
-    installed package (``importlib.resources``), so a missing file fails at start rather than on the first request.
+    ``app.state.login`` holds the one-time login links (:class:`fm.web.login.LoginLinks`, each good for ``login_ttl``
+    by ``clock``), written to ``url_file`` when one is given (:func:`fm.web.server.bind_dashboard` gives
+    ``<config dir>/dashboard.url``; tests read ``app.state.login.url()``). ``app.state.sessions`` are the signed-in
+    browsers. The static files are read once, here, from the installed package (``importlib.resources``), so a
+    missing file fails at start rather than on the first request.
     """
-    secret = token if token is not None else secrets.token_urlsafe(32)
     static = resources.files("fm.web") / "static"
-    template = (static / "index.html").read_text(encoding="utf-8")
-    if template.count(TOKEN_PLACEHOLDER) != 1:
-        raise RuntimeError(f"fm/web/static/index.html must name {TOKEN_PLACEHOLDER} exactly once")
     hosts = frozenset({f"127.0.0.1:{port}", f"localhost:{port}"})
+    sessions = Sessions(port)
     app = Starlette(
         routes=[
             routing.Route("/", _index, methods=["GET"]),
+            routing.Route(LOGIN_PATH, _auth, methods=["GET"]),
+            routing.Route(PING_PATH, _ping, methods=["GET"]),
             routing.Route("/static/{name}", _static, methods=["GET"]),
+            routing.Route("/api/session", _get_session, methods=["GET"]),
             routing.Route("/api/overview", _get_overview, methods=["GET"]),
             routing.Route("/api/proposals", _get_proposals, methods=["GET"]),
             routing.Route("/api/proposals/{proposal_id:int}/approve", _post_approve, methods=["POST"]),
@@ -180,13 +203,46 @@ def create_app(*, port: int, token: str | None = None) -> Starlette:
             routing.Route("/api/settings", _get_settings, methods=["GET"]),
             routing.Route("/api/settings", _post_settings, methods=["POST"]),
         ],
-        middleware=[Middleware(_Guard, hosts=hosts, token=secret)],
+        middleware=[Middleware(_Guard, hosts=hosts, sessions=sessions)],
         exception_handlers={HTTPException: _http_error},
     )
-    app.state.token = secret
-    app.state.index_html = template.replace(TOKEN_PLACEHOLDER, secret)
+    app.state.sessions = sessions
+    app.state.index_html = (static / "index.html").read_text(encoding="utf-8")
+    app.state.signin_html = (static / "signin.html").read_text(encoding="utf-8")
     app.state.static = {name: (static / name).read_bytes() for name in STATIC_FILES}
+    app.state.login = LoginLinks(port, url_file=url_file, ttl=login_ttl, clock=clock)
     return app
+
+
+# --- sessions ---------------------------------------------------------------------------------------------------------
+
+
+class Sessions:
+    """The browsers signed in to one dashboard: session id (the cookie's value) -> CSRF token, newest last, at most
+    :data:`MAX_SESSIONS`. Kept in memory only, so a restarted dashboard asks every browser to sign in again (``fm
+    ui``). Thread-safe: the dashboard serves from its own thread."""
+
+    def __init__(self, port: int) -> None:
+        self.cookie = f"{SESSION_COOKIE_PREFIX}{port}"
+        self._by_id: OrderedDict[str, str] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def open(self) -> str:
+        """A new session; returns its id, for the cookie."""
+        session_id, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        with self._lock:
+            self._by_id[session_id] = csrf
+            while len(self._by_id) > MAX_SESSIONS:
+                self._by_id.popitem(last=False)
+        return session_id
+
+    def csrf(self, headers: Headers) -> str | None:
+        """The CSRF token of the session the request's cookie names; ``None`` when it names none (not signed in)."""
+        session_id = cookie_parser(headers.get("cookie", "")).get(self.cookie)
+        if not session_id:
+            return None
+        with self._lock:
+            return self._by_id.get(session_id)
 
 
 # --- the guard --------------------------------------------------------------------------------------------------------
@@ -195,10 +251,10 @@ def create_app(*, port: int, token: str | None = None) -> Starlette:
 class _Guard:
     """The checks every request passes before it reaches a route (the module docstring's Security section)."""
 
-    def __init__(self, app: ASGIApp, *, hosts: frozenset[str], token: str) -> None:
+    def __init__(self, app: ASGIApp, *, hosts: frozenset[str], sessions: Sessions) -> None:
         self.app = app
         self.hosts = hosts
-        self.token = token.encode("ascii")
+        self.sessions = sessions
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -215,24 +271,29 @@ class _Guard:
                     headers[name] = value
             await send(message)
 
-        refusal = self._refusal(Headers(scope=scope), str(scope["method"]))
+        refusal = self._refusal(Headers(scope=scope), str(scope["method"]), str(scope["path"]))
         if refusal is not None:
             await refusal(scope, receive, send_secured)
             return
         await self.app(scope, receive, send_secured)
 
-    def _refusal(self, headers: Headers, method: str) -> Response | None:
+    def _refusal(self, headers: Headers, method: str, path: str) -> Response | None:
         host = headers.get("host", "").strip().lower()
         if host not in self.hosts:
             expected = " or ".join(sorted(self.hosts))
             return _error(400, f"this dashboard answers requests for {expected} only")
+        if method in SAFE_METHODS and not path.startswith("/api/"):
+            return None  # the page, the static files, the sign-in: each route decides
+        csrf = self.sessions.csrf(headers)
+        if csrf is None:
+            return _error(401, "not signed in: run fm ui to open the dashboard")
         if method in SAFE_METHODS:
             return None
         origin = headers.get("origin")
         if origin is not None and origin.strip().lower() != f"http://{host}":
             return _error(403, "cross-origin requests are refused")
         supplied = headers.get(TOKEN_HEADER, "").encode("utf-8", errors="replace")
-        if not secrets.compare_digest(supplied, self.token):
+        if not secrets.compare_digest(supplied, csrf.encode("ascii")):
             return _error(403, f"missing or wrong {TOKEN_HEADER}; reload the dashboard page")
         return None
 
@@ -317,7 +378,37 @@ def _time(value: datetime | None) -> str | None:
 
 
 async def _index(request: Request) -> Response:
+    """The dashboard to a signed-in browser; to anyone else the static page that says to run ``fm ui`` (401)."""
+    if _sessions(request).csrf(request.headers) is None:
+        return HTMLResponse(request.app.state.signin_html, status_code=401)
     return HTMLResponse(request.app.state.index_html)
+
+
+async def _auth(request: Request) -> Response:
+    """Spend a one-time login secret: a session cookie and a redirect to ``/``. A used, expired or wrong one gets the
+    sign-in page (403), unless this browser is signed in already (a reloaded link), which just goes to ``/``."""
+    sessions = _sessions(request)
+    links: LoginLinks = request.app.state.login
+    offered = request.query_params.get(LOGIN_PARAM, "")
+    if offered and links.consume(offered):
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(sessions.cookie, sessions.open(), path="/", httponly=True, samesite="strict")
+        return response
+    if sessions.csrf(request.headers) is not None:
+        return RedirectResponse("/", status_code=303)
+    return HTMLResponse(request.app.state.signin_html, status_code=403)
+
+
+async def _ping(request: Request) -> Response:
+    """``fm ui``'s probe: says this is a dashboard and makes sure the link in the URL file has a while to go. It
+    answers nothing secret; the link travels only through the owner-only file."""
+    links: LoginLinks = request.app.state.login
+    links.refresh()
+    return JSONResponse({"app": APP_ID})
+
+
+def _sessions(request: Request) -> Sessions:
+    return request.app.state.sessions
 
 
 async def _static(request: Request) -> Response:
@@ -325,6 +416,19 @@ async def _static(request: Request) -> Response:
     if name not in STATIC_FILES:
         return _error(404, f"no static file {name!r}")
     return Response(request.app.state.static[name], media_type=STATIC_FILES[name])
+
+
+# --- the session ------------------------------------------------------------------------------------------------------
+
+
+@_api
+async def _get_session(request: Request) -> _Json:
+    """This session's CSRF token, which every POST sends as ``X-FM-Token``. The guard let the request in, so the cookie
+    names a session."""
+    csrf = _sessions(request).csrf(request.headers)
+    if csrf is None:  # forgotten between the guard and here (MAX_SESSIONS newer sign-ins)
+        raise _ApiError(401, "not signed in: run fm ui to open the dashboard")
+    return {"csrf": csrf}
 
 
 # --- overview ---------------------------------------------------------------------------------------------------------

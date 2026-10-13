@@ -49,6 +49,7 @@ from fm.jobs.sync import ESPN_SOURCE, KEPT_CROSSWALK, SourceSync, SyncError, Syn
 from fm.model.ids import GSIS, SLEEPER, Crosswalk, CrosswalkError, UnmappedPlayer, check_rostered
 from fm.model.ids_nba import (
     NBA_SOURCE,
+    NO_HISTORY_SOURCE,
     OVERRIDE_HOWTO,
     NbaCrosswalk,
     NbaGate,
@@ -944,6 +945,40 @@ def test_a_degraded_nba_crosswalk_keeps_the_one_an_earlier_sync_saved(
     assert any("unavailable, matching without it" in warning for warning in crosswalk.warnings)
     assert NbaCrosswalk.from_store(store).rows == saved  # not replaced by the degraded build
     assert report.ok and report.leagues[0].gate is not None and report.leagues[0].gate.passed
+
+
+def test_a_rookie_passed_as_no_history_still_passes_while_a_source_is_down(
+    job: Runner, store: Store, splits: SplitsTransport, routes: Routes, clock: FakeClock
+) -> None:
+    """Review fix: a degraded build keeps the saved crosswalk, which used to carry no notes, so a rookie that passed as
+    no-history the day before blocked the gate for as long as stats.nba.com was down. The verdicts are saved with the
+    ids now and the kept crosswalk passes him again."""
+    routes.nba_roster(jokic_entry(), nba_entry(ROOKIE, "Rookie One", "PG", "BOS"))
+    first = job.run(leagues=["nba"])
+    assert first.ok and first.leagues[0].gate is not None and first.leagues[0].gate.no_history != ()
+    rows = store.player_ids.for_player("nba", ROOKIE)
+    assert [(row.source, row.source_id, row.origin) for row in rows] == [(NO_HISTORY_SOURCE, str(ROOKIE), "no_history")]
+    assert NbaCrosswalk.from_store(store).rows == tuple(store.player_ids.for_player("nba", JOKIC))  # ids only
+
+    clock.advance(hours=25)
+    for source in ("nba_stats", "darko"):  # no cached copy left to serve stale
+        shutil.rmtree(paths.cache_dir() / "sources" / source)
+    splits.fail_with = SourceError("Akamai read timeout")
+    routes.darko.mock(return_value=httpx.Response(500))
+    report = job.run(leagues=["nba"])
+    (crosswalk,) = report.sources
+    assert crosswalk.degraded and crosswalk.detail == KEPT_CROSSWALK
+    assert report.ok and report.gate_errors == ()
+    (league,) = report.leagues
+    assert league.gate is not None and league.gate.passed and league.gate.checked == 2
+    assert league.gate.no_history == (UnmappedPlayer(ROOKIE, (NBA_SOURCE,), "Rookie One", "PG", "BOS"),)
+    assert any("1 with no nba.com history" in warning and "Rookie One" in warning for warning in league.warnings)
+    # A rostered player the saved build never judged is still in doubt against it.
+    newcomer = nba_entry(SOMEONE, "Zed Newcomer", "C", "BOS")
+    routes.nba_roster(jokic_entry(), nba_entry(ROOKIE, "Rookie One", "PG", "BOS"), newcomer)
+    later = job.run(leagues=["nba"])
+    (error,) = later.gate_errors
+    assert [player.espn_id for player in error.unmapped] == [SOMEONE]
 
 
 def test_a_degraded_nba_crosswalk_is_saved_when_none_was(
