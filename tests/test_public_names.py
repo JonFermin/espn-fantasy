@@ -105,6 +105,8 @@ MODULES = (
     "fm.mcp_server",
     "fm.espn.discover",
     "fm.health",
+    "fm.presets",
+    "fm.config_edit",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
