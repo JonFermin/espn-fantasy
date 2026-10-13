@@ -14,10 +14,17 @@ output to it too) and to the console when the process has one; under ``uvw.exe``
 runs the loop without the writes: ticks report what they would have executed and an approval is recorded but not
 acted on. Ctrl+C stops it cleanly, and so does ``SIGTERM`` (what ``launchctl bootout`` sends), which is turned into
 the same clean stop so a running tick child is stopped with its tree instead of being orphaned.
+
+It also serves the dashboard (``fm ui``, :mod:`fm.web`) on ``127.0.0.1:--port`` (8711) in a daemon thread for as long
+as the loop runs; ``--no-ui`` leaves it out. The dashboard only records decisions and edits settings, which the next
+tick picks up (the config is reloaded per tick). uvicorn installs signal handlers only in the main thread, so Ctrl+C and
+``SIGTERM`` still reach the loop. A port that is taken, or a dashboard that will not start, is logged and printed and
+the loop runs without it: the dashboard is a convenience, the ticks are the job.
 """
 
 from __future__ import annotations
 
+import logging
 import signal
 import sqlite3
 import sys
@@ -32,6 +39,9 @@ import typer
 
 from fm.jobs.runner import DEFAULT_TICK_TIMEOUT, RunOptions, run_forever, run_log_path, run_logging
 from fm.jobs.scheduler_base import DEFAULT_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES
+from fm.web import DEFAULT_PORT, LOOPBACK
+
+logger = logging.getLogger(__name__)
 
 EveryOption = Annotated[
     int,
@@ -56,15 +66,26 @@ TickTimeoutOption = Annotated[
         help="Minutes a tick may run before it is stopped with every process it started (the browser included).",
     ),
 ]
+UiOption = Annotated[
+    bool,
+    typer.Option("--ui/--no-ui", help="Serve the dashboard (fm ui) on 127.0.0.1 while the loop runs."),
+]
+PortOption = Annotated[
+    int,
+    typer.Option("--port", min=1, max=65535, help="Port on 127.0.0.1 for the dashboard."),
+]
 
 
 def run_(
     every: EveryOption = DEFAULT_INTERVAL_MINUTES,
     no_execute: NoExecuteOption = False,
     tick_timeout: TickTimeoutOption = DEFAULT_TICK_TIMEOUT_MINUTES,
+    ui: UiOption = True,
+    port: PortOption = DEFAULT_PORT,
 ) -> None:
-    """Tick every N minutes and listen for phone approvals in between, until Ctrl+C. Started at logon by
-    `fm autostart install`; the `fm schedule` tick task stays as the wake timer."""
+    """Tick every N minutes and listen for phone approvals in between, until Ctrl+C; serves the dashboard beside the
+    loop unless --no-ui. Started at logon by `fm autostart install`; the `fm schedule` tick task stays as the wake
+    timer."""
     log_path = run_log_path()
     typer.echo(
         f"fm run: tick every {every} minute{'' if every == 1 else 's'}{' (no execution)' if no_execute else ''}, "
@@ -73,7 +94,7 @@ def run_(
     options = RunOptions(
         interval=timedelta(minutes=every), execute=not no_execute, tick_timeout=timedelta(minutes=tick_timeout)
     )
-    with run_logging(log_path, console=sys.stderr), _sigterm_stops():
+    with run_logging(log_path, console=sys.stderr), _sigterm_stops(), _dashboard(ui, port):
         try:
             stats = run_forever(options=options)
         except sqlite3.Error as exc:
@@ -85,6 +106,37 @@ def run_(
         f"stopped ({stats.stopped_by}) after {stats.ticks} tick{'' if stats.ticks == 1 else 's'} and "
         f"{stats.decisions} decision{'' if stats.decisions == 1 else 's'}"
     )
+
+
+@contextmanager
+def _dashboard(enabled: bool, port: int) -> Iterator[str | None]:
+    """Serve the dashboard in a daemon thread for the duration and yield its URL; ``None`` when ``enabled`` is off or
+    it could not start (a taken port, anything else), which is logged and printed but never stops the loop."""
+    if not enabled:
+        yield None
+        return
+    try:
+        from fm.web.server import bind_dashboard  # Starlette, uvicorn and the views load only when serving
+
+        dashboard = bind_dashboard(port)
+        dashboard.start()
+    except OSError as exc:
+        reason = f"{LOOPBACK}:{port} is unavailable ({exc.strerror or exc}); fm run --port N picks another"
+        logger.warning("fm run: dashboard not started: %s", reason)
+        typer.echo(f"dashboard not started: {reason}", err=True)
+        yield None
+        return
+    except Exception:
+        logger.exception("fm run: dashboard not started")
+        typer.echo(f"dashboard not started; see {run_log_path()}", err=True)
+        yield None
+        return
+    logger.info("fm run: dashboard at %s", dashboard.url)
+    typer.echo(f"dashboard at {dashboard.url}")
+    try:
+        yield dashboard.url
+    finally:
+        dashboard.stop()
 
 
 @contextmanager
