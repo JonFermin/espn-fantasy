@@ -26,6 +26,13 @@ Offline checks, in order:
 - ``tick``: the last tick in ``tick-state.json``: WARN after :data:`TICK_WARN_AFTER`, FAIL after
   :data:`TICK_FAIL_AFTER` or when no tick ever ran. The fix is ``fm run`` when nothing holds the run lock, and a
   pointer at ``logs/run.log`` when ``fm run`` holds it but its ticks are late.
+- ``autostart``: ``fm run`` is registered to start at logon (``fm autostart install``) and holds the run lock now.
+  Whether it is registered comes from the platform backend's ``show`` (:data:`AUTOSTART_BACKENDS`), which runs the
+  scheduler's query command (PowerShell's ``Get-ScheduledTask``, ``launchctl print``) through an injectable
+  :class:`fm.jobs.scheduler_base.Runner`. That command is a process launch, so like the session's browser it runs only
+  for a caller that passes a runner or ``launch_browser=True`` (``fm doctor``); the dashboard and the MCP tool judge
+  from the run lock alone. Not registered is a WARN with the fix ``fm autostart install``, and so is registered but
+  not running; registered with ``fm run`` holding the run lock is OK. Other platforms SKIP.
 - ``sync:<league>``: the store's ``as_of`` per configured league: WARN after :data:`SYNC_WARN_AFTER` (the tick syncs
   a league hourly, so an older sync means the ticks are not syncing), FAIL after :data:`SYNC_FAIL_AFTER` or before
   the first sync.
@@ -67,7 +74,16 @@ from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus
 from fm.espn.client import EspnAuthError, EspnClient, EspnClientError
 from fm.espn.models import LeagueStatus
 from fm.jobs.runlock import RunLock, RunLockHeld
-from fm.jobs.scheduler_base import LOGS_DIRNAME, RUN_LOG_FILENAME
+from fm.jobs.scheduler_base import (
+    LOGS_DIRNAME,
+    RUN_LOG_FILENAME,
+    AutostartBackend,
+    Runner,
+    SchedulerError,
+    default_runner,
+)
+from fm.jobs.scheduler_macos import MACOS_AUTOSTART
+from fm.jobs.scheduler_windows import WINDOWS_AUTOSTART
 from fm.notify import NotifyError, NtfyChannel, TelegramChannel, open_channel
 from fm.notify.ntfy import DEFAULT_SERVER, REQUEST_TIMEOUT
 from fm.proposals import PauseState, pause_state
@@ -91,6 +107,12 @@ SYNC_FAIL_AFTER = timedelta(hours=24)
 DEADLINE_SOON = timedelta(hours=2)
 """An open proposal due within this is listed by the ``deadlines`` check."""
 ADVISOR_KEY = "ANTHROPIC_API_KEY"
+AUTOSTART_FIX = "fm autostart install"
+"""The autostart check's fix: registers ``fm run`` at logon and starts it now (the tick task stays the wake timer)."""
+AUTOSTART_BACKENDS: Mapping[str, AutostartBackend] = {"win32": WINDOWS_AUTOSTART, "darwin": MACOS_AUTOSTART}
+"""The logon-job backend per ``sys.platform``, as ``fm autostart`` picks it (``fm.commands`` is not imported here)."""
+RUN_COMMAND = "fm run"
+"""The command the long-running loop writes into the run lock's holder record (:mod:`fm.jobs.runner`)."""
 NTFY_HEALTH_PATH = "/v1/health"
 """ntfy's health endpoint (``{"healthy": true}``), the channel ping for an ntfy setup."""
 
@@ -196,6 +218,8 @@ def run_checks(
     pause_reader: Callable[[], PauseState | None] = pause_state,
     client_factory: EspnClientFactory = _default_client,
     http_client: httpx.Client | None = None,
+    autostart_backend: AutostartBackend | None = None,
+    scheduler_runner: Runner | None = None,
 ) -> list[Check]:
     """Every check, in the order the module docstring lists them. Pure data; nothing is written anywhere unless
     ``launch_browser`` lets the session check take the run lock.
@@ -206,7 +230,10 @@ def run_checks(
     as ``fm doctor``) can be taken without waiting, and the record is stale or ``online`` needs the cookies. The store
     checks open ``state.db`` through ``store_opener`` only when ``state_db`` (default ``fm.paths.state_db()``) exists.
     ``online`` adds the ESPN reads (through ``client_factory``) and the channel ping (through ``http_client`` when
-    given, else the channel's own client).
+    given, else the channel's own client). The autostart check asks ``autostart_backend`` (default: this platform's,
+    :data:`AUTOSTART_BACKENDS`) whether the logon job is registered, running its query through ``scheduler_runner``;
+    without a runner it uses the real :func:`fm.jobs.scheduler_base.default_runner` only when ``launch_browser`` is
+    set, and otherwise judges from the run lock alone.
     """
     at = datetime.now(UTC) if now is None else now.astimezone(UTC)
     profile = profile_dir if profile_dir is not None else paths.browser_profile_dir()
@@ -219,7 +246,16 @@ def run_checks(
     session_check, session = _session(
         profile, session_loader, at, record=record.session, launch=launch_browser, need_cookies=online, lock=lock
     )
-    checks = [config_check, session_check, _browser(browsers()), _notify(config), _tick(record, state_file, at, lock)]
+    backend = autostart_backend if autostart_backend is not None else AUTOSTART_BACKENDS.get(sys.platform)
+    runner = scheduler_runner if scheduler_runner is not None else default_runner if launch_browser else None
+    checks = [
+        config_check,
+        session_check,
+        _browser(browsers()),
+        _notify(config),
+        _tick(record, state_file, at, lock),
+        _autostart(backend, runner, lock),
+    ]
     if database.exists():
         checks.extend(_store_checks(store_opener, config, pause_reader(), at))
     else:
@@ -443,6 +479,76 @@ def _tick_fix(lock: RunLock) -> str:
     return TICK_LATE_FIX if held else "fm run"
 
 
+def _autostart(backend: AutostartBackend | None, runner: Runner | None, lock: RunLock) -> Check:
+    """Is ``fm run`` registered to start at logon (asked of the scheduler only when there is a ``runner``), and does
+    it hold the run lock now?"""
+    name = "autostart"
+    running, who = _run_holder(lock)
+    if backend is None:
+        return Check(name, CheckStatus.SKIP, f"fm autostart supports Windows and macOS, not {sys.platform}; {who}")
+    job = f"fm run at logon ({backend.scheduler})"
+    if runner is None:
+        detail = f"{who}; whether {job} is installed is checked by fm doctor"
+        if running:
+            return Check(name, CheckStatus.OK, detail)
+        return Check(name, CheckStatus.WARN, detail, fix=AUTOSTART_FIX)
+    try:
+        # show needs only the job's name and files: a placeholder uv skips the PATH search (seconds on a long PATH).
+        spec = backend.build_spec(require_uv=False, uv_path=Path("uv"))
+        installed = job_installed(backend.show(spec, runner))
+    except SchedulerError as exc:
+        return Check(name, CheckStatus.WARN, f"could not describe {job}: {exc}; {who}", fix="fm autostart show")
+    if installed is None:
+        detail = f"could not ask {backend.scheduler} whether {job} is installed; {who}"
+        return Check(name, CheckStatus.WARN, detail, fix="fm autostart show")
+    if not installed:
+        detail = f"{job} is not installed, so after a restart nothing ticks or listens for approvals; {who}"
+        return Check(name, CheckStatus.WARN, detail, fix=AUTOSTART_FIX)
+    if running:
+        return Check(name, CheckStatus.OK, f"{job} is installed; {who}")
+    detail = (
+        f"{job} is installed but {who}: it may still be starting, or it stopped "
+        f"(see {LOGS_DIRNAME}/{RUN_LOG_FILENAME}); reinstalling starts it now"
+    )
+    return Check(name, CheckStatus.WARN, detail, fix=AUTOSTART_FIX)
+
+
+def job_installed(shown: str) -> bool | None:
+    """Read a scheduler backend's ``show`` text (``fm autostart show``, ``fm schedule show``): ``False`` when it says
+    the job is not installed, ``None`` when the scheduler could not be asked, answered with an error or said nothing,
+    else ``True``.
+
+    ``show`` never raises; it reports those cases on its first line as ``<job>: not installed (...)``,
+    ``<job>: cannot query ...`` and ``<job>: error (<code>): ...``.
+    """
+    lines = shown.strip().splitlines()
+    if not lines:
+        return None
+    first = lines[0]
+    if ": not installed" in first:
+        return False
+    if ": cannot query" in first or ": error (" in first:
+        return None
+    return True
+
+
+def _run_holder(lock: RunLock) -> tuple[bool, str]:
+    """Whether ``fm run`` holds the run lock now, and a phrase saying who holds it. A lock file that does not exist is
+    not probed (probing would create it); a holder record that cannot be read counts as ``fm run``."""
+    try:
+        held = lock.path.exists() and lock.is_locked()
+    except OSError as exc:
+        return False, f"the run lock could not be probed ({exc})"
+    if not held:
+        return False, "fm run is not running (the run lock is free)"
+    holder = lock.holder()
+    if holder is None:
+        return True, "the run lock is held (holder unknown)"
+    if holder.command == RUN_COMMAND:
+        return True, f"{holder.describe()} holds the run lock"
+    return False, f"fm run is not running ({holder.describe()} holds the run lock)"
+
+
 def _no_state(config: Config | None, paused: PauseState | None) -> list[Check]:
     """The store checks on an installation that has no ``state.db`` yet: WARN, not FAIL (nothing is broken, nothing
     has run), and not opened, since opening would create and migrate it."""
@@ -623,11 +729,14 @@ def _age(delta: timedelta) -> str:
 
 __all__ = [
     "ADVISOR_KEY",
+    "AUTOSTART_BACKENDS",
+    "AUTOSTART_FIX",
     "BROWSER_NAMES",
     "BROWSER_PATHS",
     "DEADLINE_SOON",
     "NO_STATE",
     "NTFY_HEALTH_PATH",
+    "RUN_COMMAND",
     "SESSION_RECORD_FRESH",
     "SYNC_FAIL_AFTER",
     "SYNC_WARN_AFTER",
@@ -640,5 +749,6 @@ __all__ = [
     "EspnClientFactory",
     "find_browsers",
     "has_failure",
+    "job_installed",
     "run_checks",
 ]

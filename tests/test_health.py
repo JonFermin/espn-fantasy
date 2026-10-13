@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ from fm.config import League
 from fm.espn.auth import EspnSession, NotLoggedInError
 from fm.espn.client import EspnClient
 from fm.health import (
+    AUTOSTART_FIX,
     DEADLINE_SOON,
     NO_STATE,
     SYNC_FAIL_AFTER,
@@ -44,9 +45,12 @@ from fm.health import (
     CheckStatus,
     find_browsers,
     has_failure,
+    job_installed,
     run_checks,
 )
 from fm.jobs.runlock import RunLock
+from fm.jobs.scheduler_base import Runner, RunResult, SchedulerError
+from fm.jobs.scheduler_windows import WINDOWS_AUTOSTART
 from fm.proposals import pause
 from fm.store import LlmUsageRow, ProposalRow, Store
 
@@ -78,6 +82,7 @@ OFFLINE_NAMES = [
     "browser",
     "notify",
     "tick",
+    "autostart",
     "sync:nfl",
     "pause",
     "proposals",
@@ -85,7 +90,26 @@ OFFLINE_NAMES = [
     "llm",
 ]
 
+TASK_INFO = "TaskName: espn-fantasy-run\nState: Running\nExecute: C:\\uv\\uvw.exe\nLastTaskResult: 267009"
+"""What ``Get-ScheduledTask`` prints for the registered logon task (scheduler_windows.render_get_task)."""
+NO_TASK = (
+    "Get-ScheduledTask : No MSFT_ScheduledTask objects found with property 'TaskName' equal to 'espn-fantasy-run'."
+)
+
 runner = CliRunner()
+
+
+def scheduler(*, installed: bool = True, calls: list[Sequence[str]] | None = None) -> Runner:
+    """A fake scheduler runner for the Windows logon-job backend: the task is registered, or it is not."""
+
+    def run(argv: Sequence[str]) -> RunResult:
+        if calls is not None:
+            calls.append(argv)
+        if installed:
+            return RunResult(tuple(argv), 0, stdout=TASK_INFO)
+        return RunResult(tuple(argv), 1, stderr=NO_TASK)
+
+    return run
 
 
 @pytest.fixture
@@ -109,6 +133,9 @@ def checks(**overrides: Any) -> dict[str, Check]:
         # Online collaborators default to fakes, so no test reaches the network by leaving one out.
         "client_factory": espn_factory(_status_ok),
         "http_client": telegram_client(),
+        # The logon job is asked of a fake scheduler: no test runs PowerShell or launchctl.
+        "autostart_backend": WINDOWS_AUTOSTART,
+        "scheduler_runner": scheduler(),
     }
     kwargs.update(overrides)
     result = run_checks(**kwargs)
@@ -206,6 +233,8 @@ def test_a_fresh_fixture_home_says_what_is_missing_and_how_to_fix_it(home: Path)
     assert found["notify"].status is CheckStatus.FAIL and found["notify"].fix == "fm notify setup"
     assert "TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID" in found["notify"].detail
     assert found["tick"].status is CheckStatus.FAIL and found["tick"].fix == "fm run"
+    assert found["autostart"].status is CheckStatus.WARN and found["autostart"].fix == AUTOSTART_FIX
+    assert "installed but fm run is not running" in found["autostart"].detail
     assert found["sync:nfl"].status is CheckStatus.OK and "20 min ago" in found["sync:nfl"].detail
     assert found["pause"] == Check("pause", CheckStatus.OK, "not paused")
     assert found["proposals"] == Check("proposals", CheckStatus.OK, "no open proposals")
@@ -216,7 +245,10 @@ def test_a_fresh_fixture_home_says_what_is_missing_and_how_to_fix_it(home: Path)
 
 def test_a_ready_installation_passes_every_offline_check(home: Path) -> None:
     make_ready(home)
-    found = checks()
+    # fm run is up, as autostart keeps it, so the session verdict comes from its last tick's record.
+    write_tick(home, NOW - timedelta(minutes=5), session=session_record("ok", expires_at=SESSION.expires_at))
+    with RunLock(command="fm run"):
+        found = checks(session_loader=refuse_launch)
     assert {name: check.status for name, check in found.items()} == dict.fromkeys(OFFLINE_NAMES, CheckStatus.OK)
     assert all(check.fix is None for check in found.values())
     assert not has_failure(found.values())
@@ -748,6 +780,89 @@ def _status_ok(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"status": {"currentMatchupPeriod": 4, "latestScoringPeriod": 4}})
 
 
+# --- autostart --------------------------------------------------------------------------------------------------------
+
+
+def test_autostart_not_installed_warns_with_the_install_fix(home: Path) -> None:
+    calls: list[Sequence[str]] = []
+    check = checks(scheduler_runner=scheduler(installed=False, calls=calls))["autostart"]
+    assert check.status is CheckStatus.WARN and check.fix == AUTOSTART_FIX == "fm autostart install"
+    assert "fm run at logon (Windows Task Scheduler) is not installed" in check.detail
+    assert "the run lock is free" in check.detail
+    (argv,) = calls
+    assert argv[0] == "powershell" and "Get-ScheduledTask -TaskName 'espn-fantasy-run'" in argv[-1]
+    assert not (home / "run.lock").exists()  # the lock probe never creates the file
+
+
+def test_autostart_installed_is_ok_only_while_fm_run_holds_the_run_lock(home: Path) -> None:
+    check = checks()["autostart"]
+    assert check.status is CheckStatus.WARN and check.fix == AUTOSTART_FIX
+    assert "is installed but fm run is not running (the run lock is free)" in check.detail
+    assert "logs/run.log" in check.detail
+    with RunLock(command="fm run"):
+        check = checks()["autostart"]
+        assert check.status is CheckStatus.OK and check.fix is None
+        assert check.detail.startswith("fm run at logon (Windows Task Scheduler) is installed; fm run (pid ")
+        assert "holds the run lock" in check.detail
+    with RunLock(command="fm tick"):  # a scheduled tick holds the lock, but nothing listens between ticks
+        check = checks()["autostart"]
+        assert check.status is CheckStatus.WARN and "fm run is not running (fm tick (pid " in check.detail
+
+
+def test_autostart_without_a_runner_judges_from_the_run_lock_alone(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(argv: Sequence[str]) -> RunResult:
+        raise AssertionError(f"only fm doctor may run the scheduler's query: {argv}")
+
+    monkeypatch.setattr(health_module, "default_runner", refuse)
+    check = checks(launch_browser=False, scheduler_runner=None)["autostart"]
+    assert check.status is CheckStatus.WARN and check.fix == AUTOSTART_FIX
+    assert check.detail == (
+        "fm run is not running (the run lock is free); whether fm run at logon (Windows Task Scheduler) is installed "
+        "is checked by fm doctor"
+    )
+    with RunLock(command="fm run"):
+        check = checks(launch_browser=False, scheduler_runner=None)["autostart"]
+        assert check.status is CheckStatus.OK and check.fix is None
+
+
+def test_autostart_reports_a_scheduler_it_cannot_ask(home: Path) -> None:
+    def broken(argv: Sequence[str]) -> RunResult:
+        raise SchedulerError("powershell not found on PATH")
+
+    check = checks(scheduler_runner=broken)["autostart"]
+    assert check.status is CheckStatus.WARN and check.fix == "fm autostart show"
+    assert "could not ask Windows Task Scheduler" in check.detail
+
+    def failing(argv: Sequence[str]) -> RunResult:
+        return RunResult(tuple(argv), 5, stderr="Access is denied.")
+
+    assert checks(scheduler_runner=failing)["autostart"].fix == "fm autostart show"
+
+
+def test_autostart_skips_on_a_platform_without_a_backend(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(health_module, "AUTOSTART_BACKENDS", {})
+    check = checks(autostart_backend=None)["autostart"]
+    assert check.status is CheckStatus.SKIP and "supports Windows and macOS" in check.detail
+
+
+@pytest.mark.parametrize(
+    ("shown", "installed"),
+    [
+        (TASK_INFO, True),
+        ("gui/501/local.espn-fantasy-run = {\n\tstate = running\n}", True),
+        ("espn-fantasy-run: not installed (fm autostart install)\nEnv file: x", False),
+        ("local.espn-fantasy-run: not installed (fm autostart install)\nPlist: x", False),
+        ("espn-fantasy-tick: not installed (fm schedule install)\nWrapper: x", False),
+        ("espn-fantasy-run: cannot query the scheduler (powershell not found)\nEnv file: x", None),
+        ("local.espn-fantasy-run: cannot query launchd (no uid)\nPlist: x", None),
+        ("espn-fantasy-run: error (5): Access is denied.", None),
+        ("", None),
+    ],
+)
+def test_job_installed_reads_every_backends_show_text(shown: str, installed: bool | None) -> None:
+    assert job_installed(shown) is installed
+
+
 # --- import weight ----------------------------------------------------------------------------------------------------
 
 FORBIDDEN_MODULES = ("fm.executor", "fm.browser.flows", "fm.browser.transactions", "fm.jobs.tick", "fm.advisor")
@@ -793,7 +908,12 @@ def listing(home: Path) -> list[str]:
     return sorted(path.relative_to(home).as_posix() for path in home.rglob("*"))
 
 
-def test_fm_doctor_json_on_the_fixture_home_is_complete_and_writes_nothing(home: Path) -> None:
+def test_fm_doctor_json_on_the_fixture_home_is_complete_and_writes_nothing(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Sequence[str]] = []
+    monkeypatch.setattr(health_module, "AUTOSTART_BACKENDS", {sys.platform: WINDOWS_AUTOSTART})
+    monkeypatch.setattr(health_module, "default_runner", scheduler(installed=False, calls=calls))
     before = listing(home)
     result = runner.invoke(cli(), ["doctor", "--json"], catch_exceptions=False)
     assert result.exit_code == 1, result.output  # no profile, no tick: FAIL checks
@@ -808,7 +928,9 @@ def test_fm_doctor_json_on_the_fixture_home_is_complete_and_writes_nothing(home:
         "fix": "fm login",
     }
     assert by_name["tick"]["status"] == "fail" and by_name["tick"]["fix"] == "fm run"
-    assert listing(home) == before  # no profile, state, capture or cache created
+    assert by_name["autostart"]["status"] == "warn" and by_name["autostart"]["fix"] == "fm autostart install"
+    assert len(calls) == 1  # fm doctor asks the scheduler whether the logon job is registered
+    assert listing(home) == before  # no profile, state, capture, cache or run lock created
     assert not (home / "browser-profile").exists()
 
 
