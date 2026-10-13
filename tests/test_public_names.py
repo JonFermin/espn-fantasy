@@ -107,6 +107,7 @@ MODULES = (
     "fm.health",
     "fm.presets",
     "fm.config_edit",
+    "fm.views",
 )
 PER_MODULE = frozenset({"PLUGIN"})
 """Names each module binds for itself by convention (``fm.sports.<sport>.PLUGIN``)."""
