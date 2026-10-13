@@ -31,9 +31,11 @@ Then the sources and the unmapped-rostered-player gate, dispatched on each store
   :func:`fm.model.projections.sleeper_rows`), the inputs :func:`fm.model.projections.blend_period` blends with ESPN's.
 - NBA: the NBA crosswalk (:func:`fm.model.ids_nba.fetch_nba_crosswalk` over stats.nba.com's player splits for this
   season and last, DARKO's talent sheet and ``nba_api``'s bundled table, plus ``data/id_overrides_nba.csv``) matches
-  every NBA player this sync wrote, is saved to ``player_ids``, and :func:`fm.model.ids_nba.check_nba_rostered` runs
-  for every NBA league, its failure recorded the same way. Each gate refuses a league of the other sport, which is why
-  the dispatch exists.
+  every NBA player this sync wrote, is saved to ``player_ids``, and :func:`fm.model.ids_nba.nba_gate` runs for every
+  NBA league, its failure recorded the same way. It fails only on a rostered player whose identity is in doubt: one
+  with no nba.com person at all (a rookie) passes as a no-history player, listed on :attr:`GateResult.no_history` and
+  in a league warning, as are the rostered matches that rest on the name alone. Each gate refuses a league of the
+  other sport, which is why the dispatch exists.
 
 The NBA crosswalk's sources degrade rather than fail: one that is down with no cached copy is a warning and makes
 the build ``degraded``. A degraded build does not replace the crosswalk an earlier sync saved, and the gate then
@@ -62,7 +64,7 @@ from fm.espn.ids import IdMaps, ids_for
 from fm.espn.models import Player, PlayersView, RostersView, Team, TeamsView
 from fm.espn.settings import LeagueSettings
 from fm.model.ids import Crosswalk, UnmappedPlayer, UnmappedPlayersError, check_rostered, fetch_crosswalk
-from fm.model.ids_nba import NBA_SPORT, NbaCrosswalk, check_nba_rostered, fetch_nba_crosswalk
+from fm.model.ids_nba import NBA_SPORT, NbaCrosswalk, fetch_nba_crosswalk, nba_gate
 from fm.model.projections import sleeper_rows
 from fm.sources.base import Fetched, FetchOptions
 from fm.sources.darko import DarkoSource
@@ -103,6 +105,9 @@ class GateResult:
 
     checked: int
     error: UnmappedPlayersError | None = None
+    no_history: tuple[UnmappedPlayer, ...] = ()
+    """NBA only: rostered players who passed without an nba.com id because nba.com lists nobody who could be them (or
+    an override keeps them without one). The stats-based sources skip them; ESPN's projection values them."""
 
     @property
     def passed(self) -> bool:
@@ -634,15 +639,13 @@ def _sync_nba_sources(
 
 
 def _gate_nba(store: Store, item: LeagueSync, crosswalk: NbaCrosswalk | None) -> LeagueSync:
-    """:func:`fm.model.ids_nba.check_nba_rostered` for an NBA league (against ``crosswalk``, else the saved one), its
-    failure recorded on the result rather than raised."""
-    try:
-        checked = check_nba_rostered(
-            store, item.league_id, crosswalk=crosswalk, scoring_period_id=item.scoring_period_id
-        )
-    except UnmappedPlayersError as exc:
-        return replace(item, gate=GateResult(checked=item.rostered, error=exc))
-    return replace(item, gate=GateResult(checked=len(checked)))
+    """:func:`fm.model.ids_nba.nba_gate` for an NBA league (against ``crosswalk``, else the saved one): its failure is
+    recorded on the result rather than raised, its no-history players on the result too, and its warnings (who has no
+    nba.com history, which matches rest on the name alone) join the league's, pass or fail."""
+    verdict = nba_gate(store, item.league_id, crosswalk=crosswalk, scoring_period_id=item.scoring_period_id)
+    checked = len(verdict.checked) if verdict.passed else item.rostered
+    gate = GateResult(checked=checked, error=verdict.error, no_history=verdict.no_history)
+    return replace(item, gate=gate, warnings=(*item.warnings, *verdict.warnings))
 
 
 def _keeps_saved_crosswalk(store: Store, sport: Sport, crosswalk: Fetched[Any]) -> bool:

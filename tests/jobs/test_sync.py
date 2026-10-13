@@ -6,7 +6,8 @@ opening day, with a one-team roster built from the scoreboard fixture). Player c
 free-agent and player-card fixtures so a card request answers exactly the ids it asked for. The nflverse ID map is the
 recorded ff_playerids file plus synthetic rows for the fixture's other rostered players, so the gate passes, and
 leaving one out makes it fail. The NBA crosswalk matches Jokic through the recorded stats.nba.com splits
-(tests/fixtures/sources/nba_stats), DARKO's talent export (tests/fixtures/sources/darko) and nba_api's bundled table.
+(tests/fixtures/sources/nba_stats), DARKO's talent export (tests/fixtures/sources/darko) and nba_api's bundled table;
+the NBA gate's other cases add synthetic players (``Rookie One``) cloned from his roster entry.
 
 Containment: ``fm sync`` harvests the ESPN session from the browser profile and writes the state DB, so a test that
 lost the isolation tests/conftest.py sets up would sync a real league. :func:`_contained` refuses to run a test unless
@@ -16,6 +17,7 @@ the config and cache dirs are that test's temp dirs, and turns a real browser la
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -41,10 +43,18 @@ from fm.config import Config
 from fm.espn import client as espn_client
 from fm.espn.auth import EspnSession
 from fm.espn.client import FILTER_HEADER, READS_HOST, ClientOptions, EspnHttpError
+from fm.espn.ids import FBA
 from fm.jobs import sync as sync_job
 from fm.jobs.sync import ESPN_SOURCE, KEPT_CROSSWALK, SourceSync, SyncError, SyncReport, select_leagues, sync
 from fm.model.ids import GSIS, SLEEPER, Crosswalk, CrosswalkError, UnmappedPlayer, check_rostered
-from fm.model.ids_nba import NBA_SOURCE, NbaCrosswalk, UnmappedNbaPlayersError, check_nba_rostered
+from fm.model.ids_nba import (
+    NBA_SOURCE,
+    OVERRIDE_HOWTO,
+    NbaCrosswalk,
+    NbaGate,
+    UnmappedNbaPlayersError,
+    check_nba_rostered,
+)
 from fm.proposals.policy import stored_settings
 from fm.sources.base import RateLimiter, SourceError
 from fm.sources.darko import TALENT_URL, DarkoSource
@@ -98,6 +108,7 @@ SLEEPER_LINES = 10  # stat lines in projections_2026_4.json once ADP-only placeh
 NBA_SPLITS = FIXTURES / "sources" / "nba_stats" / "leaguedashplayerstats_Base_2025-26.json"  # Jokic, SGA, Wembanyama
 DARKO_TALENT = FIXTURES / "sources" / "darko" / "talent.csv"
 JOKIC_NBA_ID = 203999
+ROOKIE, SOMEONE = 9_100_001, 9_100_002  # synthetic ESPN ids: a rookie nba.com does not list, a wrongly pinned player
 
 runner = CliRunner()
 
@@ -158,6 +169,25 @@ def synthetic_wire(count: int) -> list[dict[str, Any]]:
 def jokic_entry() -> dict[str, Any]:
     matchup = espn_json("fba_scoreboard_9cat_day1.json")["schedule"][0]
     return matchup["home"]["rosterForCurrentScoringPeriod"]["entries"][0]
+
+
+def nba_entry(espn_id: int, name: str, position: str, team: str) -> dict[str, Any]:
+    """Jokic's roster entry (stats and all) as another player: ``position`` is his ESPN default and only position
+    slot, ``team`` his pro team's label."""
+    entry = copy.deepcopy(jokic_entry())
+    first, _, last = name.partition(" ")
+    card = entry["playerPoolEntry"]
+    card["player"].update(
+        id=espn_id,
+        fullName=name,
+        firstName=first,
+        lastName=last,
+        defaultPositionId=FBA.position_id(position),
+        proTeamId=next(team_id for team_id, label in FBA.pro_teams.items() if label == team),
+        eligibleSlots=[FBA.slot_id(position), FBA.slot_id("UTIL"), FBA.bench_slot],
+    )
+    card["id"] = entry["playerId"] = espn_id
+    return entry
 
 
 def nba_views() -> dict[str, dict[str, Any]]:
@@ -296,6 +326,14 @@ class Routes:
 
     def filters(self, key: str) -> list[dict[str, Any]]:
         return [json.loads(request.headers[FILTER_HEADER])["players"] for request in self.requests[key]]
+
+    def nba_roster(self, *entries: dict[str, Any]) -> None:
+        """Answer the NBA league's one roster with ``entries`` (and their player cards) instead of Jokic alone."""
+        envelope = {"gameId": 3, "id": NBA_LEAGUE, "seasonId": NBA_SEASON, "scoringPeriodId": 1}
+        roster = {"id": NBA_TEAM, "roster": {"entries": list(entries)}}
+        self.answers["mRoster"] = httpx.Response(200, json={**envelope, "teams": [roster]})
+        cards = [entry["playerPoolEntry"] for entry in entries]
+        self.answers["kona_playercard"] = httpx.Response(200, json={**envelope, "players": cards})
 
 
 @pytest.fixture
@@ -617,18 +655,18 @@ def test_the_gate_is_picked_by_the_stored_league_sport(
     job: Runner, store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checked: dict[str, list[int]] = {"nfl": [], "nba": []}
-    real_nfl, real_nba = sync_job.check_rostered, sync_job.check_nba_rostered
+    real_nfl, real_nba = sync_job.check_rostered, sync_job.nba_gate
 
     def recording_nfl(store: Store, league_id: int, **options: Any) -> set[int]:
         checked["nfl"].append(league_id)
         return real_nfl(store, league_id, **options)
 
-    def recording_nba(store: Store, league_id: int, **options: Any) -> set[int]:
+    def recording_nba(store: Store, league_id: int, **options: Any) -> NbaGate:
         checked["nba"].append(league_id)
         return real_nba(store, league_id, **options)
 
     monkeypatch.setattr(sync_job, "check_rostered", recording_nfl)
-    monkeypatch.setattr(sync_job, "check_nba_rostered", recording_nba)
+    monkeypatch.setattr(sync_job, "nba_gate", recording_nba)
     report = job.run(leagues=None)
     nfl, nba = report.leagues
     assert checked == {"nfl": [nfl.league_id], "nba": [nba.league_id]}  # each gate sees its own sport only
@@ -800,17 +838,92 @@ def test_nba_league_syncs_espn_state_and_gates_through_the_nba_crosswalk(
     assert sync_cmd.render(report)[-1] == "gate nba: 1 rostered players mapped"
 
 
-def test_nba_gate_fails_naming_the_unmapped_rostered_player(job: Runner, store: Store, tmp_path: Path) -> None:
+def test_nba_gate_fails_on_a_rostered_player_whose_identity_is_in_doubt(
+    job: Runner, store: Store, tmp_path: Path
+) -> None:
     overrides = tmp_path / "id_overrides_nba.csv"
-    overrides.write_text(f"espn_id,source,source_id,name,note\n{JOKIC},nba,,Nikola Jokic,held back\n", "utf-8")
+    pin = f"{SOMEONE},nba,{JOKIC_NBA_ID},Someone Else,a wrong pin"  # his nba.com namesake belongs to another player
+    overrides.write_text(f"espn_id,source,source_id,name,note\n{pin}\n", "utf-8")
     report = job.run(leagues=["nba"], nba_overrides=overrides)
     assert not report.ok
     (league,) = report.leagues
     assert report.failed == (league,) and league.gate is not None and not league.gate.passed
+    assert league.gate.no_history == () and league.warnings == ()
     (error,) = report.gate_errors
     assert isinstance(error, UnmappedNbaPlayersError) and [player.espn_id for player in error.unmapped] == [JOKIC]
-    assert "add rows to id_overrides_nba.csv" in str(error) and "keeps him unmapped" in str(error)
+    assert str(error) == (
+        f"rostered players in league {league.league_id} (scoring period 1): 1 unmapped; add rows to "
+        "id_overrides_nba.csv and sync again:\n"
+        f"  Nikola Jokic (C DEN, ESPN {JOKIC}): no nba id (the nba.com player with this name is mapped already: nba "
+        f"{JOKIC_NBA_ID} Nikola Jokic (C-F DEN) to ESPN {SOMEONE} (by an override))\n"
+        f"{OVERRIDE_HOWTO}\n"
+        f"  {JOKIC},nba,<nba.com person id>,Nikola Jokic,<why>"
+    )
     assert store.players.get("nba", JOKIC) is not None  # the ESPN state is kept; the fix is an override line
+
+
+def test_a_rookie_nba_com_does_not_list_passes_the_nba_gate_as_no_history(
+    job: Runner, store: Store, routes: Routes
+) -> None:
+    routes.nba_roster(jokic_entry(), nba_entry(ROOKIE, "Rookie One", "PG", "BOS"))
+    report = job.run(leagues=["nba"])
+    assert report.ok and report.gate_errors == ()
+    (league,) = report.leagues
+    assert league.gate is not None and league.gate.passed and league.gate.checked == 2
+    assert league.gate.no_history == (UnmappedPlayer(ROOKIE, (NBA_SOURCE,), "Rookie One", "PG", "BOS"),)
+    walk = NbaCrosswalk.from_store(store)
+    assert walk.nba_id(JOKIC) == JOKIC_NBA_ID and walk.nba_id(ROOKIE) is None  # DARKO and the baseline skip him
+    assert league.warnings == (
+        f"rostered players in league {league.league_id} (scoring period 1): 1 with no nba.com history, valued on "
+        "ESPN's projection alone (DARKO and the stats baseline key players by nba.com id): Rookie One (PG BOS, ESPN "
+        f"{ROOKIE}); if one has an nba.com id, add his line to data/id_overrides_nba.csv",
+    )
+    (crosswalk,) = report.sources
+    assert crosswalk.warnings == (
+        "no_history: 1 of 2 ESPN players have no nba.com player by name, or on their team by surname and first name "
+        "(Rookie One); they get no nba.com id",
+    )
+    assert report.warnings == (*league.warnings, *crosswalk.warnings)  # what fm sync prints and the tick logs
+    assert sync_cmd.render(report)[1] == f"  warning: {league.warnings[0]}"
+
+
+def test_a_lone_nba_namesake_on_another_team_and_position_maps_with_a_warning(
+    job: Runner, store: Store, routes: Routes
+) -> None:
+    # ESPN has him at PG on Sacramento; nba.com's splits still say Denver and DARKO a C-F: the name alone links them.
+    routes.nba_roster(nba_entry(JOKIC, "Nikola Jokic", "PG", "SAC"))
+    report = job.run(leagues=["nba"])
+    assert report.ok
+    (league,) = report.leagues
+    assert league.gate is not None and league.gate.passed and league.gate.no_history == ()
+    assert NbaCrosswalk.from_store(store).nba_id(JOKIC) == JOKIC_NBA_ID
+    reason = (
+        f"matched nba {JOKIC_NBA_ID} Nikola Jokic (C-F DEN) by name alone (the only nba.com player with this name), "
+        "but ESPN lists him as PG SAC; the team and position disagree"
+    )
+    assert league.warnings == (
+        f"rostered players in league {league.league_id} (scoring period 1): 1 matched by name alone, ESPN disagreeing "
+        "on team and position (an offseason move nba.com has not caught up with, or a namesake): Nikola Jokic (PG "
+        f"SAC, ESPN {JOKIC}) [{reason}]; if one is someone else, add his line to data/id_overrides_nba.csv (an empty "
+        "source_id if nba.com has no history for him)",
+    )
+    (crosswalk,) = report.sources
+    assert crosswalk.warnings == (
+        "name_match: 1 matches rest on the name alone, ESPN disagreeing on team and position (Nikola Jokic)",
+    )
+
+
+def test_an_empty_nba_override_runs_a_rostered_player_as_no_history(job: Runner, store: Store, tmp_path: Path) -> None:
+    overrides = tmp_path / "id_overrides_nba.csv"
+    overrides.write_text(f"espn_id,source,source_id,name,note\n{JOKIC},nba,,Nikola Jokic,held back\n", "utf-8")
+    report = job.run(leagues=["nba"], nba_overrides=overrides)
+    assert report.ok
+    (league,) = report.leagues
+    assert league.gate is not None and league.gate.passed
+    assert league.gate.no_history == (UnmappedPlayer(JOKIC, (NBA_SOURCE,), "Nikola Jokic", "C", "DEN"),)
+    (warning,) = league.warnings
+    kept = "[id_overrides_nba.csv keeps him without an nba.com id (an empty source_id): no history]"
+    assert "1 with no nba.com history" in warning and f"Nikola Jokic (C DEN, ESPN {JOKIC}) {kept}" in warning
 
 
 def test_a_degraded_nba_crosswalk_keeps_the_one_an_earlier_sync_saved(
