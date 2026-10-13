@@ -66,6 +66,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Final, Literal, get_args
 
+from starlette import routing
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers, MutableHeaders
@@ -73,7 +74,6 @@ from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 import fm.views as views
@@ -136,7 +136,7 @@ _FALSE = frozenset({"", "0", "false", "no", "off"})
 _SETTINGS_KEYS = frozenset({"league", "preset", "reset_overrides", "trade_finder_enabled", "notify_channel"})
 _CHANNELS: tuple[str, ...] = get_args(Channel)
 
-type Decision = Literal["approve", "reject"]
+type _Decision = Literal["approve", "reject"]
 type _Json = dict[str, Any]
 
 
@@ -164,21 +164,21 @@ def create_app(*, port: int, token: str | None = None) -> Starlette:
     hosts = frozenset({f"127.0.0.1:{port}", f"localhost:{port}"})
     app = Starlette(
         routes=[
-            Route("/", _index, methods=["GET"]),
-            Route("/static/{name}", _static, methods=["GET"]),
-            Route("/api/overview", _get_overview, methods=["GET"]),
-            Route("/api/proposals", _get_proposals, methods=["GET"]),
-            Route("/api/proposals/{proposal_id:int}/approve", _post_approve, methods=["POST"]),
-            Route("/api/proposals/{proposal_id:int}/reject", _post_reject, methods=["POST"]),
-            Route("/api/pause", _post_pause, methods=["POST"]),
-            Route("/api/resume", _post_resume, methods=["POST"]),
-            Route("/api/lineup/{league}", _get_lineup, methods=["GET"]),
-            Route("/api/waivers/{league}", _get_waivers, methods=["GET"]),
-            Route("/api/reports", _get_reports, methods=["GET"]),
-            Route("/api/reports/{name}", _get_report, methods=["GET"]),
-            Route("/api/health", _get_health, methods=["GET"]),
-            Route("/api/settings", _get_settings, methods=["GET"]),
-            Route("/api/settings", _post_settings, methods=["POST"]),
+            routing.Route("/", _index, methods=["GET"]),
+            routing.Route("/static/{name}", _static, methods=["GET"]),
+            routing.Route("/api/overview", _get_overview, methods=["GET"]),
+            routing.Route("/api/proposals", _get_proposals, methods=["GET"]),
+            routing.Route("/api/proposals/{proposal_id:int}/approve", _post_approve, methods=["POST"]),
+            routing.Route("/api/proposals/{proposal_id:int}/reject", _post_reject, methods=["POST"]),
+            routing.Route("/api/pause", _post_pause, methods=["POST"]),
+            routing.Route("/api/resume", _post_resume, methods=["POST"]),
+            routing.Route("/api/lineup/{league}", _get_lineup, methods=["GET"]),
+            routing.Route("/api/waivers/{league}", _get_waivers, methods=["GET"]),
+            routing.Route("/api/reports", _get_reports, methods=["GET"]),
+            routing.Route("/api/reports/{name}", _get_report, methods=["GET"]),
+            routing.Route("/api/health", _get_health, methods=["GET"]),
+            routing.Route("/api/settings", _get_settings, methods=["GET"]),
+            routing.Route("/api/settings", _post_settings, methods=["POST"]),
         ],
         middleware=[Middleware(_Guard, hosts=hosts, token=secret)],
         exception_handlers={HTTPException: _http_error},
@@ -477,7 +477,7 @@ async def _post_reject(request: Request) -> _Json:
     return await run_in_threadpool(_decide, request.path_params["proposal_id"], "reject")
 
 
-def _decide(proposal_id: int, decision: Decision) -> _Json:
+def _decide(proposal_id: int, decision: _Decision) -> _Json:
     """Record a human decision. Approving issues the execution token inside the store and executes nothing; a decision
     the proposal's status does not allow (decided already, past its deadline) is a ``ProposalError``: 409."""
     with Store.open() as store:
