@@ -237,14 +237,14 @@ class _Guard:
         return None
 
 
-def _error(status: int, message: str) -> JSONResponse:
-    return JSONResponse({"error": message}, status_code=status)
+def _error(status: int, message: str, headers: Mapping[str, str] | None = None) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status, headers=headers)
 
 
 async def _http_error(request: Request, exc: Exception) -> Response:
-    """Starlette's own refusals (no such route, a method a route does not take) as JSON too."""
+    """Starlette's own refusals (no such route, a method a route does not take, with its ``Allow``) as JSON too."""
     if isinstance(exc, HTTPException):
-        return _error(exc.status_code, exc.detail)
+        return _error(exc.status_code, exc.detail, exc.headers)
     return _error(500, "internal error")
 
 

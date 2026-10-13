@@ -247,11 +247,13 @@
       .map((league) => ({ key: league.league, label: `${league.sport.toUpperCase()} · ${league.name ?? league.league}` }));
     fillLeagueSelects();
     setPause(data.paused);
-    const open = data.leagues.reduce((total, league) => total + (league.open_proposals?.length ?? 0), 0);
+    const waiting = data.leagues
+      .flatMap((league) => league.open_proposals ?? [])
+      .filter((proposal) => proposal.status === "proposed").length;
     const count = $("#proposal-count");
-    count.textContent = String(open);
-    count.setAttribute("aria-label", `${open} open`);
-    count.hidden = open === 0;
+    count.textContent = String(waiting);
+    count.setAttribute("aria-label", `${waiting} waiting for your decision`);
+    count.hidden = waiting === 0;
     const session = data.session && data.session.status !== "ok" ? ` · ESPN session: ${data.session.status}` : "";
     setTopStatus(`Updated ${clock.format(new Date())}${session}`);
     return data;
@@ -276,8 +278,7 @@
     const card = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h3", { text: "This machine" })));
     const list = h("dl", { class: "kv" });
     if (data.session) {
-      const fix = data.session.fix ? [" Fix: ", h("code", { text: data.session.fix })] : null;
-      list.append(dt("ESPN session"), dd(badge(data.session.status), " ", data.session.detail, fix));
+      list.append(dt("ESPN session"), dd(badge(data.session.status), " ", data.session.detail, fixLine(data.session.fix)));
     }
     const { fail, warn } = data.health;
     const summary = fail || warn ? `${fail} failing, ${warn} to look at` : "every check passes";
@@ -767,14 +768,24 @@
 
   // --- health --------------------------------------------------------------------------------------------------------
 
+  function fixLine(fix) {
+    return fix ? h("div", { class: "small" }, "Fix: ", h("code", { text: fix })) : null;
+  }
+
   async function loadHealth(container) {
     const data = await api("/api/health");
-    const rows = data.checks.map((check) =>
-      h("tr", {}, td(badge(check.status)), td(check.name), td(check.detail, check.fix ? [h("br"), "Fix: ", h("code", { text: check.fix })] : null)),
+    const checks = data.checks.map((check) =>
+      h(
+        "li",
+        { class: "check-row" },
+        h("div", { class: "check-head" }, badge(check.status), h("strong", { text: check.name })),
+        h("div", { text: check.detail }),
+        fixLine(check.fix),
+      ),
     );
     clear(container).append(
       h("p", {}, data.has_failure ? badge("fail", "something is failing") : badge("ok", "nothing is failing"), ` Checked ${when(data.as_of)}.`),
-      table(["Status", "Check", "Detail"], rows),
+      h("ul", { class: "checks card", "aria-label": "Checks" }, checks),
     );
   }
 

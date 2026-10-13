@@ -227,7 +227,8 @@ def test_a_decision_the_status_does_not_allow_is_409_and_an_unknown_proposal_404
     assert "rejected" in refused(post(client, token, f"/api/proposals/{proposal}/approve"), 409)
     assert stored(home, proposal) == ("rejected", "dashboard")
     assert refused(post(client, token, "/api/proposals/9999/approve"), 404) == "no proposal #9999"
-    assert refused(client.get(f"/api/proposals/{proposal}/approve"), 405)
+    wrong_method = client.get(f"/api/proposals/{proposal}/approve")
+    assert refused(wrong_method, 405) and wrong_method.headers["allow"] == "POST"
 
 
 def test_the_proposal_list_says_what_each_proposal_still_allows(client: TestClient, home: Path, token: str) -> None:

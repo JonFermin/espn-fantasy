@@ -155,7 +155,7 @@ def test_fm_run_on_a_taken_port_runs_the_loop_without_the_dashboard(
     result = runner.invoke(cli(), ["run"], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert events == ["loop"] and loop == [RunOptions()]
-    assert "dashboard not started: 127.0.0.1:8711 is unavailable" in result.output
+    assert "fm run: dashboard not started: 127.0.0.1:8711 is unavailable" in result.output  # the console log line
     assert "fm run --port N" in result.output
     log = run_log_path().read_text(encoding="utf-8")
     assert "WARNING fm.commands.run fm run: dashboard not started: 127.0.0.1:8711 is unavailable" in log
@@ -170,7 +170,7 @@ def test_fm_run_with_a_dashboard_that_fails_to_start_still_runs_the_loop(
     monkeypatch.setattr(web_server, "bind_dashboard", broken)
     result = runner.invoke(cli(), ["run"], catch_exceptions=False)
     assert result.exit_code == 0 and events == ["loop"]
-    assert "dashboard not started; see" in result.output
+    assert "fm run: dashboard not started; the loop runs without it" in result.output
     assert "index.html is missing" in run_log_path().read_text(encoding="utf-8")  # with its traceback
 
 

@@ -111,7 +111,8 @@ def run_(
 @contextmanager
 def _dashboard(enabled: bool, port: int) -> Iterator[str | None]:
     """Serve the dashboard in a daemon thread for the duration and yield its URL; ``None`` when ``enabled`` is off or
-    it could not start (a taken port, anything else), which is logged and printed but never stops the loop."""
+    it could not start (a taken port, anything else), which is logged (``run.log``, and the console when there is one)
+    but never stops the loop."""
     if not enabled:
         yield None
         return
@@ -121,18 +122,19 @@ def _dashboard(enabled: bool, port: int) -> Iterator[str | None]:
         dashboard = bind_dashboard(port)
         dashboard.start()
     except OSError as exc:
-        reason = f"{LOOPBACK}:{port} is unavailable ({exc.strerror or exc}); fm run --port N picks another"
-        logger.warning("fm run: dashboard not started: %s", reason)
-        typer.echo(f"dashboard not started: {reason}", err=True)
+        logger.warning(
+            "fm run: dashboard not started: %s:%d is unavailable (%s); fm run --port N picks another",
+            LOOPBACK,
+            port,
+            exc.strerror or exc,
+        )
         yield None
         return
     except Exception:
-        logger.exception("fm run: dashboard not started")
-        typer.echo(f"dashboard not started; see {run_log_path()}", err=True)
+        logger.exception("fm run: dashboard not started; the loop runs without it")
         yield None
         return
     logger.info("fm run: dashboard at %s", dashboard.url)
-    typer.echo(f"dashboard at {dashboard.url}")
     try:
         yield dashboard.url
     finally:

@@ -438,6 +438,10 @@ th {
   white-space: nowrap;
 }
 
+td {
+  overflow-wrap: anywhere;
+}
+
 td.num,
 th.num {
   text-align: right;
@@ -447,6 +451,30 @@ th.num {
 
 tr.moved td {
   background: var(--ok-bg);
+}
+
+/* --- health ----------------------------------------------------------------------------------------------------- */
+
+ul.checks {
+  list-style: none;
+  padding: 0 16px;
+}
+
+.check-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.check-row:last-child {
+  border-bottom: 0;
+}
+
+.check-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
 }
 
 /* --- reports ---------------------------------------------------------------------------------------------------- */
