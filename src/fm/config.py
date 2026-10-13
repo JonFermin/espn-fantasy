@@ -1,7 +1,9 @@
 """Configuration: ``config.toml`` plus ``.env``, validated into frozen pydantic models (DESIGN section 14).
 
-``config.toml`` declares the leagues (``[[league]]``, each with a ``[league.policy]`` and an optional
-``[league.trade_finder]``), ``[llm]`` and ``[notify]``.
+``config.toml`` declares the leagues (``[[league]]``, each with an optional ``preset``, a ``[league.policy]`` and an
+optional ``[league.trade_finder]``), ``[llm]`` and ``[notify]``. A preset (``fm.presets``) fills every policy and
+trade-finder key the league's tables leave unset; a key written in the file always wins, and a league without a preset
+loads exactly as it did before presets existed.
 ``.env`` next to it holds the secrets: ``ANTHROPIC_API_KEY``, ``ODDS_API_KEY`` and the phone channel's credentials
 (``TELEGRAM_BOT_TOKEN`` + ``TELEGRAM_CHAT_ID``, or ``NTFY_TOPIC`` + ``NTFY_REPLY_TOPIC``). A variable set in the
 process environment wins over the file. Nothing ESPN-related is configured here: the session lives in the browser
@@ -10,6 +12,8 @@ profile (``fm.paths.browser_profile_dir``).
 Validation is strict so a typo cannot silently fall back to a default: unknown keys are errors, league keys are
 unique, ``auto`` exists only for lineup kinds, and trades have no policy knob at all because they are approval-only
 (CLAUDE.md). ``load_config`` raises ``ConfigError`` listing every problem; ``fm config check`` prints it.
+``parse_config`` validates text the same way, which is how ``fm.config_edit`` checks an edit before it replaces the
+file. This module only reads ``config.toml``; every write goes through ``fm.config_edit``.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from pydantic import (
 )
 
 from fm import paths
+from fm.presets import PresetName, preset_for
 
 Sport = Literal["nfl", "nba"]
 EspnGame = Literal["ffl", "fba"]
@@ -131,7 +136,11 @@ class TradeFinder(BaseModel):
 
 
 class League(BaseModel):
-    """One ESPN league and the team this tool manages in it."""
+    """One ESPN league and the team this tool manages in it.
+
+    ``preset`` names a ``fm.presets`` table that supplies the ``policy`` and ``trade_finder`` keys the file leaves
+    unset; it is kept on the model so ``fm config check``, the dashboard and ``fm doctor`` can show it.
+    """
 
     model_config = _TABLE
 
@@ -140,13 +149,52 @@ class League(BaseModel):
     espn_league_id: int = Field(ge=1, description="leagueId= in the league URL.")
     season: int = Field(ge=2000, le=2100, description="ESPN labels NBA seasons by their end year.")
     team_id: int = Field(ge=1, description="teamId= on the team page.")
+    preset: PresetName | None = Field(
+        default=None,
+        description="Fills every policy and trade_finder key this league leaves unset (fm.presets); explicit keys win.",
+    )
     policy: Policy = Field(default_factory=Policy)
     trade_finder: TradeFinder = Field(default_factory=TradeFinder)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_preset(cls, data: Any) -> Any:
+        """Fill the unset ``policy`` and ``trade_finder`` keys from the preset, leaving every written key alone.
+
+        An unknown preset or sport is left for the field validators, which report it with a located message. The
+        input is never mutated: the merged copy is what gets validated.
+        """
+        if not isinstance(data, Mapping) or data.get("preset") is None:
+            return data
+        try:
+            preset = preset_for(str(data["preset"]), str(data.get("sport")))
+        except ValueError:
+            return data
+        policy = _unset_aware(data.get("policy"))
+        trade_finder = _unset_aware(data.get("trade_finder"))
+        if policy is None or trade_finder is None:
+            return data  # a table that is not a table: let the field validator say so
+        return {**data, "policy": {**preset.policy, **policy}, "trade_finder": {**preset.trade_finder, **trade_finder}}
 
     @property
     def game(self) -> EspnGame:
         """ESPN game key used in API URLs: ``ffl`` for NFL, ``fba`` for NBA."""
         return ESPN_GAME[self.sport]
+
+
+def _unset_aware(table: Any) -> dict[str, Any] | None:
+    """The keys a ``[league.policy]``-style value sets explicitly: a mapping as is, a model's set fields, else None.
+
+    A ``Policy``/``TradeFinder`` instance passed from Python counts only the fields its caller gave, so
+    ``League(preset="hands_off", policy=Policy(lineup="approve"))`` keeps the preset's other keys.
+    """
+    if table is None:
+        return {}
+    if isinstance(table, BaseModel):
+        return table.model_dump(exclude_unset=True)
+    if isinstance(table, Mapping):
+        return {str(key): value for key, value in table.items()}
+    return None
 
 
 class Llm(BaseModel):
@@ -268,10 +316,43 @@ def load_config(
     found in ``environ`` (default ``os.environ``) override the file, so a shell export wins. Raises ``ConfigError``.
     """
     config_path, env_path = config_paths(path, env_path)
-    data = _read_toml(config_path)
+    return _validate(_read_toml(config_path), config_path, env_path, environ, secrets=None)
+
+
+def parse_config(
+    text: str,
+    config_path: Path,
+    *,
+    env_path: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    secrets: Mapping[str, str] | None = None,
+) -> Config:
+    """Validate ``text`` as the contents of ``config_path`` without reading that file.
+
+    Problems are located at ``config_path`` exactly as ``load_config`` would report them, which is what makes a
+    rejected edit's message useful. Secrets come from ``env_path`` (default: the ``.env`` beside ``config_path``)
+    overlaid with ``environ``, or from ``secrets`` when given (a fresh file with no ``.env`` to consult passes ``{}``).
+    Raises ``ConfigError``.
+    """
+    config_path, env_path = config_paths(config_path, env_path)
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{config_path}: invalid TOML: {exc}") from exc
+    return _validate(data, config_path, env_path, environ, secrets=secrets)
+
+
+def _validate(
+    data: dict[str, Any],
+    config_path: Path,
+    env_path: Path,
+    environ: Mapping[str, str] | None,
+    *,
+    secrets: Mapping[str, str] | None,
+) -> Config:
     if "secrets" in data:
         raise ConfigError(f"{config_path}: [secrets] belongs in {env_path}, not in config.toml")
-    data["secrets"] = _read_secrets(env_path, environ)
+    data["secrets"] = _read_secrets(env_path, environ) if secrets is None else dict(secrets)
     try:
         return Config.model_validate(data)
     except ValidationError as exc:

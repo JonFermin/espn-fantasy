@@ -6,6 +6,7 @@ command module from another task cannot break this file; ``tests/test_cli.py`` c
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -25,12 +26,15 @@ from fm.config import (
     Notify,
     Policy,
     Secrets,
+    TradeFinder,
     config_paths,
     load_config,
 )
+from fm.config_edit import backup_path
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SAMPLE = FIXTURES / "config.sample.toml"
+HOME = FIXTURES / "home" / "config.toml"
 
 MINIMAL = """\
 [[league]]
@@ -138,6 +142,106 @@ class TestValid:
         assert Config(leagues=(league,)).league("nba") is league
 
 
+HANDS_OFF_NFL = Policy(
+    bench_inactive="auto",
+    lineup="auto",
+    add="auto",
+    auto_add_min_gain=15,
+    add_drop="approve",
+    waiver="approve",
+    max_transactions_per_week=3,
+)
+FINDER_ON = TradeFinder(enabled=True, min_accept=0.5, min_title_gain=0.015, min_ros_gain=0.3, max_offers=1)
+
+
+class TestPresets:
+    """``preset`` fills the unset policy and trade_finder keys; without one nothing changes (PLUG_AND_PLAY 1)."""
+
+    def test_fixture_home_loads_to_the_same_config_as_before(self) -> None:
+        config = load_config(HOME, environ={})
+        assert config == Config(
+            leagues=(
+                League(
+                    key="nfl",
+                    sport="nfl",
+                    espn_league_id=1234567,
+                    season=2026,
+                    team_id=1,
+                    policy=Policy(
+                        bench_inactive="auto",
+                        lineup="approve",
+                        add_drop="approve",
+                        waiver="approve",
+                        max_transactions_per_week=3,
+                        max_faab_pct_per_bid=0.35,
+                        untouchables=("Josh Allen",),
+                    ),
+                ),
+            ),
+            llm=Llm(model="claude-opus-5-5", daily_budget_usd=0.0),
+            notify=Notify(channel="telegram"),
+        )
+        (league,) = config.leagues
+        assert league.preset is None and league.trade_finder == TradeFinder()
+        assert load_config(SAMPLE, environ={}).leagues[0].preset is None
+
+    def test_preset_fills_every_unset_key(self, tmp_path: Path) -> None:
+        (league,) = load_config(write(tmp_path, MINIMAL + 'preset = "hands_off"\n'), environ={}).leagues
+        assert league.preset == "hands_off"
+        assert league.policy == HANDS_OFF_NFL  # max_faab_pct_per_bid and untouchables keep the model defaults
+        assert league.trade_finder == FINDER_ON
+
+    def test_explicit_keys_win(self, tmp_path: Path) -> None:
+        text = (
+            MINIMAL + 'preset = "hands_off"\n'
+            '[league.policy]\nlineup = "approve"\nuntouchables = ["Sample Player"]\n'
+            "[league.trade_finder]\nenabled = false\n"
+        )
+        (league,) = load_config(write(tmp_path, text), environ={}).leagues
+        assert league.policy == HANDS_OFF_NFL.model_copy(
+            update={"lineup": "approve", "untouchables": ("Sample Player",)}
+        )
+        assert league.trade_finder == FINDER_ON.model_copy(update={"enabled": False})  # the thresholds still apply
+
+    def test_nba_and_ask_first(self, tmp_path: Path) -> None:
+        nba = MINIMAL.replace('key = "nfl"', 'key = "nba"').replace('sport = "nfl"', 'sport = "nba"')
+        (hands_off,) = load_config(write(tmp_path, nba + 'preset = "hands_off"\n'), environ={}).leagues
+        assert (hands_off.policy.add, hands_off.policy.auto_add_min_gain) == ("approve", None)  # NBA add never auto
+        assert hands_off.policy.max_transactions_per_week == 7 and hands_off.policy.lineup == "auto"
+        (ask_first,) = load_config(write(tmp_path, nba + 'preset = "ask_first"\n'), environ={}).leagues
+        assert ask_first.policy == Policy(bench_inactive="approve", lineup="approve", max_transactions_per_week=7)
+        assert ask_first.trade_finder == TradeFinder(enabled=False)
+
+    def test_python_construction_applies_the_preset(self) -> None:
+        league = League(key="nfl", sport="nfl", espn_league_id=1, season=2026, team_id=1, preset="balanced")
+        assert league.policy.lineup == "auto" and league.policy.add == "approve" and league.trade_finder == FINDER_ON
+        explicit = League(
+            key="nfl",
+            sport="nfl",
+            espn_league_id=1,
+            season=2026,
+            team_id=1,
+            preset="hands_off",
+            policy=Policy(lineup="approve"),  # only the field given counts as set
+        )
+        assert explicit.policy == HANDS_OFF_NFL.model_copy(update={"lineup": "approve"})
+        with pytest.raises(ValidationError, match="Input should be 'hands_off', 'balanced' or 'ask_first'"):
+            League(key="nfl", sport="nfl", espn_league_id=1, season=2026, team_id=1, preset="yolo")  # type: ignore[arg-type]
+
+    def test_input_is_not_mutated(self) -> None:
+        data = {"key": "nfl", "sport": "nfl", "espn_league_id": 1, "season": 2026, "team_id": 1, "preset": "balanced"}
+        policy = {"lineup": "approve"}
+        League.model_validate({**data, "policy": policy})
+        assert policy == {"lineup": "approve"} and "policy" not in data
+
+    def test_preset_with_a_bad_sport_reports_the_sport(self, tmp_path: Path) -> None:
+        path = write(tmp_path, MINIMAL.replace('sport = "nfl"', 'sport = "mlb"') + 'preset = "balanced"\n')
+        with pytest.raises(ConfigError) as info:
+            load_config(path, environ={})
+        assert "league[0].sport: Input should be 'nfl' or 'nba' (got 'mlb')" in str(info.value)
+        assert str(info.value).startswith("invalid configuration (1 problem)")
+
+
 BAD_CASES: dict[str, tuple[str, list[str]]] = {
     "no league table": ("[llm]\nmodel = 'x'\n", ["at least one [[league]] table is required"]),
     "empty league array": ("league = []\n", ["at least one [[league]] table is required"]),
@@ -210,6 +314,18 @@ BAD_CASES: dict[str, tuple[str, list[str]]] = {
     "unknown channel": (
         MINIMAL + '[notify]\nchannel = "sms"\n',
         ["notify.channel: Input should be 'telegram' or 'ntfy' (got 'sms')"],
+    ),
+    "unknown preset": (
+        MINIMAL + 'preset = "yolo"\n',
+        ["league[0].preset: Input should be 'hands_off', 'balanced' or 'ask_first' (got 'yolo')"],
+    ),
+    "an explicit auto add under a preset still needs a threshold": (
+        MINIMAL + 'preset = "balanced"\n[league.policy]\nadd = "auto"\n',
+        ['league[0].policy: add = "auto" needs auto_add_min_gain'],
+    ),
+    "a preset cannot smuggle a trade key past the policy": (
+        MINIMAL + 'preset = "hands_off"\n[league.policy]\ntrade = "auto"\n',
+        ["league[0].policy: trade: trades are approval-only and not configurable"],
     ),
     "toml syntax": ("[[league]\n", ["invalid TOML"]),
 }
@@ -416,10 +532,76 @@ class TestCheckCommand:
         assert result.exit_code == 0, result.output
         assert f"config: {paths.config_file()}" in result.output
 
+    def test_preset_is_shown_with_the_policy_it_gives(self, tmp_path: Path) -> None:
+        path = write(tmp_path, MINIMAL + 'preset = "hands_off"\n[league.policy]\nlineup = "approve"\n')
+        result = runner.invoke(cli(), ["config", "check", "--path", str(path)])
+        assert result.exit_code == 0, result.output
+        assert "nfl: nfl (ffl) league 1234567, season 2026, team 4, preset hands_off" in result.output
+        assert (
+            "bench_inactive=auto lineup=approve add=auto (min gain 15) add_drop=approve waiver=approve" in result.output
+        )
+        assert "trade finder: drafts up to 1 offer(s) a period for approval when P(accept) >= 50%" in result.output
+        assert ", preset" not in runner.invoke(cli(), ["config", "check", "--path", str(SAMPLE)]).output
+
     def test_group_help(self) -> None:
         result = runner.invoke(cli(), ["config", "--help"])
         assert result.exit_code == 0, result.output
-        assert "check" in result.output
+        assert "check" in result.output and "set-preset" in result.output
         result = runner.invoke(cli(), ["config", "check", "--help"])
         assert result.exit_code == 0, result.output
         assert "--path" in result.output and "-p" in result.output
+
+
+class TestSetPresetCommand:
+    def test_writes_the_preset_and_shows_the_resulting_policy(self, tmp_path: Path) -> None:
+        path = write(tmp_path, SAMPLE.read_text(encoding="utf-8"))
+        before = path.read_bytes()
+        result = runner.invoke(cli(), ["config", "set-preset", "nba", "hands_off", "--path", str(path)])
+        assert result.exit_code == 0, result.output
+        assert f"{path}: nba uses the hands_off preset: lineups are set on their own" in result.output
+        assert "nba: nba (fba) league 7654321, season 2027, team 9, preset hands_off" in result.output
+        assert "bench_inactive=auto lineup=approve add=approve add_drop=approve waiver=approve" in result.output
+        assert "max 7 transactions/week" in result.output  # the file's explicit keys still win
+        assert "trade finder: drafts up to 1 offer(s)" in result.output
+        assert backup_path(path).read_bytes() == before
+        config = load_config(path, environ={})
+        assert config.league("nba").preset == "hands_off" and config.league("nfl").preset is None
+        newline = b"\r\n" if b"\r\n" in before else b"\n"  # write_text uses the platform's; the edit keeps it
+        assert path.read_bytes().replace(b'preset = "hands_off"' + newline, b"") == before  # one line added, no more
+
+    def test_default_path_is_the_config_dir_file(self) -> None:
+        write(paths.config_dir(), MINIMAL)
+        result = runner.invoke(cli(), ["config", "set-preset", "nfl", "ask_first"])
+        assert result.exit_code == 0, result.output
+        assert f"{paths.config_file()}: nfl uses the ask_first preset" in result.output
+        assert load_config(environ={}).league("nfl").preset == "ask_first"
+
+    def test_unknown_preset_is_a_usage_error_and_touches_nothing(self, tmp_path: Path) -> None:
+        path = write(tmp_path, MINIMAL)
+        before = path.read_bytes()
+        result = runner.invoke(cli(), ["config", "set-preset", "nfl", "yolo", "--path", str(path)])
+        assert result.exit_code == 2, result.output
+        plain = " ".join(re.sub(r"[\u2500-\u257f]", " ", result.output).split())  # typer may draw a wrapped box
+        assert "unknown preset 'yolo'; choose one of hands_off, balanced, ask_first" in plain
+        assert path.read_bytes() == before and not backup_path(path).exists()
+
+    def test_unknown_league_exits_one(self, tmp_path: Path) -> None:
+        path = write(tmp_path, MINIMAL)
+        result = runner.invoke(cli(), ["config", "set-preset", "mlb", "balanced", "--path", str(path)])
+        assert result.exit_code == 1, result.output
+        assert f"error: {path}: no league 'mlb'; known: nfl" in result.stderr
+        assert not backup_path(path).exists()
+
+    def test_invalid_file_exits_one_and_stays_byte_identical(self, tmp_path: Path) -> None:
+        path = write(tmp_path, MINIMAL + '[league.policy]\nlineup = "always"\n')
+        before = path.read_bytes()
+        result = runner.invoke(cli(), ["config", "set-preset", "nfl", "balanced", "--path", str(path)])
+        assert result.exit_code == 1, result.output
+        assert "league[0].policy.lineup: Input should be 'off', 'approve' or 'auto' (got 'always')" in result.stderr
+        assert path.read_bytes() == before and not backup_path(path).exists()
+
+    def test_help(self) -> None:
+        result = runner.invoke(cli(), ["config", "set-preset", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "hands_off, balanced, ask_first" in result.output
+        assert "config.toml.bak" in result.output

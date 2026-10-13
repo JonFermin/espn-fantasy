@@ -1,4 +1,5 @@
-"""``fm config check``: validate ``config.toml`` and ``.env`` and show what was loaded."""
+"""``fm config check``: validate ``config.toml`` and ``.env`` and show what was loaded; ``fm config set-preset``: the
+CLI front of ``fm.config_edit.set_value`` for a league's policy preset."""
 
 from __future__ import annotations
 
@@ -7,7 +8,9 @@ from typing import Annotated
 
 import typer
 
-from fm.config import OPTIONAL_SECRET_ENV_VARS, Config, ConfigError, config_paths, load_config
+from fm.config import OPTIONAL_SECRET_ENV_VARS, Config, ConfigError, League, config_paths, load_config
+from fm.config_edit import set_value
+from fm.presets import PRESET_NAMES, preset_for
 
 app = typer.Typer(help="Inspect and validate the configuration.", no_args_is_help=True)
 
@@ -37,27 +40,37 @@ def check(path: PathOption = None) -> None:
         typer.echo(line)
 
 
+@app.command("set-preset")
+def set_preset(
+    league: Annotated[str, typer.Argument(help="League key from config.toml.", show_default=False)],
+    preset: Annotated[str, typer.Argument(help=f"One of {', '.join(PRESET_NAMES)}.", show_default=False)],
+    path: PathOption = None,
+) -> None:
+    """Set a league's policy preset in config.toml and show the policy that results.
+
+    The preset fills every [league.policy] and [league.trade_finder] key the league leaves unset; a key written in the
+    file still wins, so delete it there to let the preset decide it. The edit is validated before the file changes,
+    the replace is atomic, and the previous file is kept as config.toml.bak.
+    """
+    if preset not in PRESET_NAMES:
+        raise typer.BadParameter(f"unknown preset {preset!r}; choose one of {', '.join(PRESET_NAMES)}")
+    config_path, env_path = config_paths(path)
+    try:
+        config = set_value(config_path, league, "preset", preset, env_path=env_path)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    chosen = config.league(league)
+    typer.echo(f"{config_path}: {league} uses the {preset} preset: {preset_for(preset, chosen.sport).description}")
+    for line in _league_lines(chosen):
+        typer.echo(line)
+
+
 def _summary(config: Config, config_path: Path, env_path: Path) -> list[str]:
     lines = [f"config: {config_path}", f"env:    {env_path}{'' if env_path.is_file() else ' (not found)'}"]
     lines.append(f"leagues ({len(config.leagues)}):")
     for league in config.leagues:
-        policy = league.policy
-        lines += [
-            f"  {league.key}: {league.sport} ({league.game}) league {league.espn_league_id}, season {league.season}, "
-            f"team {league.team_id}",
-            f"    bench_inactive={policy.bench_inactive} lineup={policy.lineup} add={policy.add}"
-            + (f" (min gain {policy.auto_add_min_gain:g})" if policy.add == "auto" else "")
-            + f" add_drop={policy.add_drop} waiver={policy.waiver}",
-            f"    max {policy.max_transactions_per_week} transactions/week, bids <= {policy.max_faab_pct_per_bid:.0%} "
-            f"of FAAB, {len(policy.untouchables)} untouchable(s)",
-        ]
-        finder = league.trade_finder
-        if finder.enabled:
-            lines.append(
-                f"    trade finder: drafts up to {finder.max_offers} offer(s) a period for approval when P(accept) >= "
-                f"{finder.min_accept:.0%} and title odds +{finder.min_title_gain * 100:g} pts "
-                f"(or +{finder.min_ros_gain:g} starter seasons)"
-            )
+        lines += _league_lines(league)
     lines.append(f"llm:    {config.llm.model}, ${config.llm.daily_budget_usd:.2f}/day budget")
     lines.append(f"notify: {config.notify.channel}")
     lines.append("secrets:")
@@ -70,6 +83,28 @@ def _summary(config: Config, config_path: Path, env_path: Path) -> list[str]:
     missing = config.missing_secrets()
     verdict = f"{len(missing)} required secret(s) missing from .env" if missing else "all required secrets set"
     lines.append(f"ok: config.toml is valid; {verdict}")
+    return lines
+
+
+def _league_lines(league: League) -> list[str]:
+    """The league's identity, its preset when it has one, and the policy that results."""
+    policy = league.policy
+    lines = [
+        f"  {league.key}: {league.sport} ({league.game}) league {league.espn_league_id}, season {league.season}, "
+        f"team {league.team_id}" + (f", preset {league.preset}" if league.preset else ""),
+        f"    bench_inactive={policy.bench_inactive} lineup={policy.lineup} add={policy.add}"
+        + (f" (min gain {policy.auto_add_min_gain:g})" if policy.add == "auto" else "")
+        + f" add_drop={policy.add_drop} waiver={policy.waiver}",
+        f"    max {policy.max_transactions_per_week} transactions/week, bids <= {policy.max_faab_pct_per_bid:.0%} "
+        f"of FAAB, {len(policy.untouchables)} untouchable(s)",
+    ]
+    finder = league.trade_finder
+    if finder.enabled:
+        lines.append(
+            f"    trade finder: drafts up to {finder.max_offers} offer(s) a period for approval when P(accept) >= "
+            f"{finder.min_accept:.0%} and title odds +{finder.min_title_gain * 100:g} pts "
+            f"(or +{finder.min_ros_gain:g} starter seasons)"
+        )
     return lines
 
 
