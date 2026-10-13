@@ -24,7 +24,8 @@ scheduler backends; the default, :func:`quiet_runner`, opens no console window a
 go on whatever a helper does. :func:`open_append` opens the log a child writes to with appends the OS makes atomic
 (``FILE_APPEND_DATA`` without write access on Windows, ``O_APPEND`` elsewhere), so the child's output and the parent's
 own log lines interleave and never overwrite each other. :func:`is_running` says whether a pid is alive; the test that
-proves a kill uses it.
+proves a kill uses it. :func:`kill_pid_tree` stops a tree known only by its root's pid (the same ``taskkill /T`` or
+descendants-then-``SIGKILL``), which is how ``fm run`` stops a scheduled ``fm tick`` stuck holding the run lock.
 """
 
 from __future__ import annotations
@@ -92,6 +93,13 @@ if sys.platform == "win32":
             process.kill()
         return [f"taskkill failed ({problem}); terminated pid {process.pid} alone, its children may still run"]
 
+    def _kill_pid_tree(pid: int, runner: Runner) -> list[str]:
+        result = runner(taskkill_argv(pid))
+        if result.ok or not is_running(pid):
+            return []
+        lines = result.output.splitlines()
+        return [f"taskkill /PID {pid} failed ({lines[0] if lines else f'exit {result.returncode}'})"]
+
     def open_append(path: Path) -> int:
         """A write-only descriptor on ``path`` (created when missing) whose every write the OS appends at the end,
         shared for read, write and delete so the parent's log rotation can still rename the file. Close it with
@@ -149,6 +157,21 @@ else:
                 os.kill(pid, signal.SIGKILL)
         with contextlib.suppress(OSError):
             process.kill()
+        return notes
+
+    def _kill_pid_tree(pid: int, runner: Runner) -> list[str]:
+        notes: list[str] = []
+        descendants = _descendants(pid, runner)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if os.getpgid(pid) == pid:  # a group leader (a session we started): its group goes too
+                os.killpg(pid, signal.SIGKILL)
+        for target in (pid, *descendants):
+            try:
+                os.kill(target, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError as exc:
+                notes.append(f"could not signal pid {target}: {exc}")
         return notes
 
     def open_append(path: Path) -> int:
@@ -219,6 +242,17 @@ def _descendants(root: int, runner: Runner) -> list[int]:
     return found
 
 
+def kill_pid_tree(pid: int, *, runner: Runner = quiet_runner) -> list[str]:
+    """Stop the process ``pid`` and every process under it, by pid alone: for a tree this process did not start
+    itself, such as a scheduled ``fm tick`` that has held the run lock far past any tick's timeout (``fm run`` stops
+    it so the loop can take over). Windows: ``taskkill /PID <pid> /T /F``. macOS: the descendants by parent pid, then
+    ``SIGKILL`` to each and to ``pid`` (and to its group when it leads one). Returns what did not go to plan; a pid
+    that is already gone is not an error. Never pass this process's own pid."""
+    if pid == os.getpid():
+        raise ValueError("kill_pid_tree refuses to stop this process's own tree")
+    return _kill_pid_tree(pid, runner)
+
+
 class ProcessTree:
     """A child started by :func:`spawn`, and everything it starts."""
 
@@ -271,6 +305,7 @@ __all__ = [
     "TASKKILL",
     "ProcessTree",
     "is_running",
+    "kill_pid_tree",
     "open_append",
     "ps_argv",
     "quiet_runner",

@@ -50,6 +50,7 @@ from fm.jobs.scheduler_windows import (
     RUN_RESTART_MINUTES,
     UVW_FALLBACK_NOTE,
     WINDOWS_AUTOSTART,
+    WINDOWS_AUTOSTART_NO_START,
     dotenv_quote,
     env_file_env,
     install_autostart,
@@ -58,6 +59,7 @@ from fm.jobs.scheduler_windows import (
     render_env_file,
     render_get_task,
     render_register_logon_task,
+    render_start_task,
     render_unregister_task,
     show_autostart,
     uninstall_autostart,
@@ -96,14 +98,18 @@ def pinned(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
 
 
 class FakePowerShell:
-    """Answers the logon task's ``Register-`` / ``Unregister-`` / ``Get-ScheduledTask`` scripts; records every argv."""
+    """Answers the logon task's ``Register-`` / ``Start-`` / ``Unregister-`` / ``Get-ScheduledTask`` scripts; records
+    every argv. ``started`` says whether ``Start-ScheduledTask`` ran the task."""
 
-    def __init__(self, *, installed: bool = False, register_ok: bool = True) -> None:
+    def __init__(self, *, installed: bool = False, register_ok: bool = True, start_ok: bool = True) -> None:
         self.calls: list[list[str]] = []
         self.verbs: list[str] = []
         self.installed = installed
         self.register_ok = register_ok
+        self.start_ok = start_ok
+        self.started = False
         self.raise_on_query = False
+        self.raise_on_start = False
 
     def __call__(self, argv: Sequence[str]) -> RunResult:
         args = [str(arg) for arg in argv]
@@ -115,6 +121,14 @@ class FakePowerShell:
             if not self.installed:
                 return RunResult(tuple(args), 1, stderr=TASK_MISSING)
             self.installed = False
+            return RunResult(tuple(args), 0)
+        if script.startswith("Start-ScheduledTask"):
+            self.verbs.append("start")
+            if self.raise_on_start:
+                raise SchedulerError("powershell timed out after 60s")
+            if not self.installed or not self.start_ok:
+                return RunResult(tuple(args), 1, stderr="Start-ScheduledTask : The task is disabled.")
+            self.started = True
             return RunResult(tuple(args), 0)
         if script.startswith("$t = Get-ScheduledTask"):
             self.verbs.append("query")
@@ -253,17 +267,53 @@ def test_install_writes_the_env_file_registers_once_and_keeps_the_tick_task(
     spec = windows_spec(pinned, FM_CONFIG_DIR=str(tmp_path / "cfg"))
     fake = FakePowerShell()
     report = install_autostart(spec, fake)
-    assert fake.calls == [render_register_logon_task(spec)] and report.installed
+    assert fake.calls == [render_register_logon_task(spec), render_start_task(AUTOSTART_TASK_NAME)]
+    assert report.installed and fake.started
     assert report.files == [spec.env_file_path]
     assert env_file_env(spec.env_file_path) == {"FM_CONFIG_DIR": str((tmp_path / "cfg").resolve())}
-    assert report.notes == [WAKE_TIMER_NOTE]
+    assert report.notes == [WAKE_TIMER_NOTE, STARTED]
     assert report.lines()[0] == f"install (windows) task {AUTOSTART_TASK_NAME}"
+
+
+STARTED = f"{AUTOSTART_TASK_NAME}: started now, so fm run is running (Start-ScheduledTask)"
+
+
+def test_install_starts_fm_run_now_rather_than_at_the_next_logon(pinned: dict[str, Path]) -> None:
+    argv = render_start_task(AUTOSTART_TASK_NAME)
+    assert argv[:-1] == [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+    assert argv[-1] == f"Start-ScheduledTask -TaskName '{AUTOSTART_TASK_NAME}' -ErrorAction Stop"
+    spec = windows_spec(pinned)
+    assert "  " + subprocess.list2cmdline(argv) in render_autostart_plan(spec)
+    assert "  " + subprocess.list2cmdline(argv) not in render_autostart_plan(spec, start=False)
+
+
+@pytest.mark.parametrize("raise_on_start", [False, True])
+def test_a_start_that_fails_is_a_note_and_the_task_stays_installed(
+    pinned: dict[str, Path], raise_on_start: bool
+) -> None:
+    fake = FakePowerShell(start_ok=False)
+    fake.raise_on_start = raise_on_start
+    report = install_autostart(windows_spec(pinned), fake)
+    assert report.installed and fake.installed and not fake.started
+    assert fake.verbs == ["register", "start"]
+    note = report.notes[-1]
+    assert note.startswith(f"{AUTOSTART_TASK_NAME}: registered but not started now (")
+    assert ("timed out" if raise_on_start else "The task is disabled") in note
+    later = f"it starts at the next logon, or now with: Start-ScheduledTask -TaskName {AUTOSTART_TASK_NAME}"
+    assert note.endswith(later)
+
+
+def test_install_without_starting_registers_only(pinned: dict[str, Path]) -> None:
+    fake = FakePowerShell()
+    report = install_autostart(windows_spec(pinned), fake, start=False)
+    assert fake.verbs == ["register"] and not fake.started and report.installed
+    assert report.notes[-1] == f"{AUTOSTART_TASK_NAME}: not started now (--no-start); it starts at the next logon"
 
 
 def test_install_with_uv_exe_says_a_console_window_stays_open(pinned: dict[str, Path]) -> None:
     spec = windows_spec(pinned, windowless=False)
     report = install_autostart(spec, FakePowerShell())
-    assert report.notes == [UVW_FALLBACK_NOTE, WAKE_TIMER_NOTE]
+    assert report.notes == [UVW_FALLBACK_NOTE, WAKE_TIMER_NOTE, STARTED]
     assert f"-Execute '{pinned['uv']}'" in render_register_logon_task(spec)[-1]
     assert render_autostart_plan(spec)[-1] == f"note: {UVW_FALLBACK_NOTE}"
 
@@ -292,7 +342,7 @@ def test_uninstall_removes_the_task_and_the_env_file(pinned: dict[str, Path]) ->
     assert "State: Running" in show_autostart(spec, fake)
     report = uninstall_autostart(spec, fake)
     assert report.files == [spec.env_file_path] and not spec.env_file_path.exists()
-    assert fake.verbs == ["register", "query", "unregister"]
+    assert fake.verbs == ["register", "start", "query", "unregister"]
 
 
 # --- macOS: the KeepAlive LaunchAgent ---------------------------------------------------------------------------------
@@ -383,6 +433,7 @@ def test_install_show_uninstall_round_trip_and_show_says_whether_fm_run_is_activ
     output = run("autostart", "install")
     assert f"install (windows) task {AUTOSTART_TASK_NAME}" in output
     assert "installed: fm run at logon (Windows Task Scheduler)" in output and "wake timer" in output
+    assert f"note  {STARTED}" in output and "Start-ScheduledTask" in output
     output = run("autostart", "show")
     assert "State: Running" in output and "fm run" in output
     assert "Active now:                           no (the run lock is free)" in output
@@ -390,7 +441,27 @@ def test_install_show_uninstall_round_trip_and_show_says_whether_fm_run_is_activ
         assert f"Active now:                           yes, fm run (pid {os.getpid()})" in run("autostart", "show")
     output = run("autostart", "uninstall")
     assert f"uninstall (windows) task {AUTOSTART_TASK_NAME}" in output
-    assert fake.verbs == ["register", "query", "query", "unregister"]
+    assert fake.verbs == ["register", "start", "query", "query", "unregister"]
+
+
+def test_install_no_start_registers_only_on_windows_and_is_a_note_on_macos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakePowerShell()
+    use(monkeypatch, WINDOWS_AUTOSTART, fake)
+    monkeypatch.setattr(autostart_cmd, "NO_START_BACKENDS", {sys.platform: WINDOWS_AUTOSTART_NO_START})
+    output = run("autostart", "install", "--dry-run", "--no-start")
+    assert "Register-ScheduledTask" in output and "Start-ScheduledTask" not in output and fake.calls == []
+    output = run("autostart", "install", "--no-start")
+    assert fake.verbs == ["register"] and not fake.started
+    assert "not started now (--no-start); it starts at the next logon" in output
+
+    launchctl = FakeLaunchctl()
+    use(monkeypatch, MACOS_AUTOSTART, launchctl)
+    monkeypatch.setattr(autostart_cmd, "NO_START_BACKENDS", {})
+    output = run("autostart", "install", "--no-start")
+    assert "note: --no-start does not apply to launchd" in output
+    assert launchctl.verbs() == ["bootout", "enable", "bootstrap"]
 
 
 def test_a_failed_install_and_an_unsupported_platform_fail_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:

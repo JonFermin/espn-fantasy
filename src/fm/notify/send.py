@@ -21,12 +21,21 @@ from fm.notify.telegram import TelegramChannel
 from fm.proposals.policy import as_utc
 from fm.store import Store
 
+NO_CHANNEL_MESSAGE = "no phone channel configured (notify.channel = none)"
+"""The ``NotifyError`` :func:`open_channel` raises for ``channel = "none"``: callers already treat any
+``NotifyError`` from it as "no channel" (proposals wait in the store, alerts stay in the log)."""
+
 
 def open_channel(config: Config, *, client: httpx.Client | None = None) -> NotifyChannel:
-    """The channel ``[notify].channel`` names, built from its ``.env`` secrets; ``NotifyError`` says what is missing."""
-    if config.notify.channel == "telegram":
-        return TelegramChannel.from_config(config, client=client)
-    return NtfyChannel.from_config(config, client=client)
+    """The channel ``[notify].channel`` names, built from its ``.env`` secrets; ``NotifyError`` says what is missing,
+    or that the configuration has no phone channel on purpose (``channel = "none"``)."""
+    match config.notify.channel:
+        case "telegram":
+            return TelegramChannel.from_config(config, client=client)
+        case "ntfy":
+            return NtfyChannel.from_config(config, client=client)
+        case "none":
+            raise NotifyError(NO_CHANNEL_MESSAGE)
 
 
 def notify_proposal(

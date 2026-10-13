@@ -16,15 +16,22 @@ Read-only: every call here is a GET, and nothing here touches ``fm.executor`` or
   without regard to case. When that path yields no NFL or NBA league, the deep walk scans every string in the JSON for
   a fantasy URL carrying ``leagueId=`` (plus ``teamId=`` / ``seasonId=`` when present) under ``/football/`` or
   ``/basketball/``, and yields leagues without names. Other ESPN games (hockey, baseball) and non-fantasy preferences
-  are dropped, duplicates are merged, and only each sport's current season is kept unless ``all_seasons`` is set. Any
-  failure (transport after one retry, an error status, a body that is not a JSON object) raises
-  :class:`DiscoveryError`, and the caller falls back to pasted URLs.
+  are dropped and duplicates are merged. Per league, only the newest season that is not older than the sport's
+  current one is kept unless ``all_seasons`` is set: in July, while the NFL's "current" season is still last year's, a
+  league already renewed for the coming kickoff is the one to set up. Any failure (transport after one retry, an error
+  status, a body that is not a JSON object) raises :class:`DiscoveryError`, and the caller falls back to pasted URLs.
+- **Team ids from URLs are hints, never answers.** Only the structured path's ``entryId`` (the account's own entry)
+  sets :attr:`DiscoveredLeague.team_id`. A ``teamId=`` in a URL may name any team in the league (a fan profile links
+  to opponents' pages too, and the deep walk keeps the first URL it meets), so it is kept as ``team_hint`` and the
+  team is settled by :func:`confirm_league`, which matches the session's SWID against the league's owners.
 - :func:`parse_league_url` turns any ``fantasy.espn.com/{football|basketball}/...`` URL with ``leagueId=`` (team,
   league, scoreboard, standings pages, or text containing one) into a :class:`LeagueRef`.
 - :func:`resolve_team` finds the one team in an ``mTeam`` view whose ``owners`` holds the account's SWID.
 - :func:`confirm_league` reads the league through :class:`fm.espn.client.EspnClient` (``mTeam`` + ``mStandings`` with
   ``mSettings`` in the same GET, for the league name) and fills in whatever a URL left out: the season, the team and
-  both names. The client factory is injectable so tests stay offline.
+  both names. A team id it is given (a pasted team URL) must be owned by the session's account, or it refuses and
+  names the account's own team: a pasted opponent's URL would otherwise have this tool manage the opponent's team.
+  The client factory is injectable so tests stay offline.
 
 Cookie values never reach a log line or an error message; SWIDs are account ids, not secrets, but are not logged
 either.
@@ -81,12 +88,14 @@ class DiscoveryError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class LeagueRef:
-    """A league named by a URL or by hand. ``season`` and ``team_id`` are filled by :func:`confirm_league`."""
+    """A league named by a URL or by hand. ``season`` and ``team_id`` are filled by :func:`confirm_league`, which
+    refuses a ``team_id`` the account does not own; ``team_hint`` only breaks a tie between teams it does own."""
 
     sport: Sport
     espn_league_id: int
     season: int | None = None
     team_id: int | None = None
+    team_hint: int | None = None
 
     @property
     def game(self) -> Game:
@@ -95,7 +104,11 @@ class LeagueRef:
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredLeague:
-    """One league the account plays in, with as much as the source knew; names are ``None`` when it did not say."""
+    """One league the account plays in, with as much as the source knew; names are ``None`` when it did not say.
+
+    ``team_id`` is set only when the source says which team is the account's own (the fan API's ``entryId``);
+    ``team_hint`` is a team id seen in a URL, which may be anyone's team, for :func:`confirm_league` to weigh.
+    """
 
     sport: Sport
     espn_league_id: int
@@ -103,6 +116,7 @@ class DiscoveredLeague:
     team_id: int | None = None
     league_name: str | None = None
     team_name: str | None = None
+    team_hint: int | None = None
 
     @property
     def game(self) -> Game:
@@ -110,7 +124,7 @@ class DiscoveredLeague:
 
     @property
     def ref(self) -> LeagueRef:
-        return LeagueRef(self.sport, self.espn_league_id, self.season, self.team_id)
+        return LeagueRef(self.sport, self.espn_league_id, self.season, self.team_id, self.team_hint)
 
 
 # --- seasons ----------------------------------------------------------------------------------------------------------
@@ -142,9 +156,10 @@ def discover_leagues(
 ) -> list[DiscoveredLeague]:
     """The NFL and NBA leagues of the signed-in account, from one GET of its fan profile.
 
-    ``client`` may be an injected ``httpx.Client`` (left open afterwards); otherwise one is opened for the call. Only
-    the current season per sport is returned unless ``all_seasons`` is set. Raises :class:`DiscoveryError` on any
-    failure, including a rejected session (the message says to run ``fm login``).
+    ``client`` may be an injected ``httpx.Client`` (left open afterwards); otherwise one is opened for the call. Per
+    league only the newest season at or after the sport's current one is returned unless ``all_seasons`` is set.
+    Raises :class:`DiscoveryError` on any failure, including a rejected session (the message says to run
+    ``fm login``).
     """
     normalized = replace(session, swid=normalize_swid(session.swid))
     url = f"{FAN_API_URL}/{normalized.swid}"
@@ -179,9 +194,26 @@ def parse_fan_profile(
         source = "deep walk"
     leagues = _merge(found)
     if not all_seasons:
-        leagues = [league for league in leagues if league.season == current_season(league.sport, now)]
+        leagues = _newest_current(leagues, now)
     logger.info("discover: %d league(s) via the %s path, %d before the season filter", len(leagues), source, len(found))
     return leagues
+
+
+def _newest_current(leagues: list[DiscoveredLeague], now: datetime | date | None) -> list[DiscoveredLeague]:
+    """Per (sport, league id), the newest season that is not older than :func:`current_season`; first-seen order.
+
+    Not "the current season only": from February to July the NFL's current label is still last year's, and a league
+    renewed for the coming kickoff (draft prep) carries next year's, which is the one to manage.
+    """
+    newest: dict[tuple[Sport, int], DiscoveredLeague] = {}
+    for league in leagues:
+        if league.season < current_season(league.sport, now):
+            continue
+        key = (league.sport, league.espn_league_id)
+        kept = newest.get(key)
+        if kept is None or league.season > kept.season:
+            newest[key] = league
+    return list(newest.values())
 
 
 def _get(client: httpx.Client | None, url: str, headers: Mapping[str, str]) -> httpx.Response:
@@ -231,9 +263,8 @@ def _leagues_of_entry(entry: Mapping[str, Any], now: datetime | date | None) -> 
     if game is None:
         return
     sport = _SPORT_OF_GAME[game]
-    team_id = _positive_int(_field(entry, "entryId"))
-    if team_id is None and url_ref is not None:
-        team_id = url_ref.team_id
+    team_id = _positive_int(_field(entry, "entryId"))  # the account's own entry: the one trusted team id
+    team_hint = url_ref.team_id if team_id is None and url_ref is not None else None
     season = _positive_int(_field(entry, "seasonId"))
     if season is None and url_ref is not None:
         season = url_ref.season
@@ -249,7 +280,7 @@ def _leagues_of_entry(entry: Mapping[str, Any], now: datetime | date | None) -> 
     if not leagues and url_ref is not None:
         leagues.append((url_ref.espn_league_id, None))
     for league_id, league_name in leagues:
-        yield DiscoveredLeague(sport, league_id, season, team_id, league_name, team_name)
+        yield DiscoveredLeague(sport, league_id, season, team_id, league_name, team_name, team_hint)
 
 
 def _entry_game(entry: Mapping[str, Any], url_ref: LeagueRef | None) -> Game | None:
@@ -310,12 +341,15 @@ def _refs_in(text: str) -> Iterator[LeagueRef]:
 
 
 def _from_ref(ref: LeagueRef, now: datetime | date | None) -> DiscoveredLeague:
+    """A deep-walk league. The URL's ``teamId=`` is only a hint: the walk cannot tell the account's team page from an
+    opponent's, so the team is left for :func:`confirm_league` to settle by SWID."""
     season = ref.season if ref.season is not None else current_season(ref.sport, now)
-    return DiscoveredLeague(ref.sport, ref.espn_league_id, season, ref.team_id)
+    return DiscoveredLeague(ref.sport, ref.espn_league_id, season, team_hint=ref.team_id)
 
 
 def _merge(found: list[DiscoveredLeague]) -> list[DiscoveredLeague]:
-    """One row per (sport, league, season), first seen first; later duplicates fill what the first left ``None``."""
+    """One row per (sport, league, season), first seen first; later duplicates fill what the first left ``None``
+    (a trusted ``team_id`` only ever comes from the structured path, so first-seen never promotes a URL's team)."""
     merged: dict[tuple[Sport, int, int], DiscoveredLeague] = {}
     for league in found:
         key = (league.sport, league.espn_league_id, league.season)
@@ -328,6 +362,7 @@ def _merge(found: list[DiscoveredLeague]) -> list[DiscoveredLeague]:
                 team_id=first.team_id if first.team_id is not None else league.team_id,
                 league_name=first.league_name or league.league_name,
                 team_name=first.team_name or league.team_name,
+                team_hint=first.team_hint if first.team_hint is not None else league.team_hint,
             )
         )
     return list(merged.values())
@@ -382,19 +417,53 @@ def parse_league_url(text: str) -> LeagueRef:
     return ref
 
 
-def resolve_team(teams: TeamsView, swid: str) -> int:
+def owned_teams(teams: TeamsView, swid: str) -> list[int]:
+    """The ids of every team whose ``owners`` holds ``swid`` (braces and case normalized), in league order."""
+    wanted = normalize_swid(swid).upper()
+    return [team.id for team in teams.teams if any(normalize_swid(owner).upper() == wanted for owner in team.owners)]
+
+
+def resolve_team(teams: TeamsView, swid: str, *, hint: int | None = None) -> int:
     """The id of the one team whose ``owners`` holds ``swid`` (braces and case normalized).
 
-    Raises :class:`DiscoveryError` when no team or several teams match (a co-managed league needs the team id).
+    ``hint`` (a team id seen in a URL) settles a tie only when it is one of the account's own teams. Raises
+    :class:`DiscoveryError` when no team matches, or several do and the hint does not pick one (a co-managed league
+    needs the team id).
     """
-    wanted = normalize_swid(swid).upper()
-    matches = [team.id for team in teams.teams if any(normalize_swid(owner).upper() == wanted for owner in team.owners)]
-    league = f"league {teams.league_id}" if teams.league_id is not None else "the league"
+    matches = owned_teams(teams, swid)
+    league = _league_label(teams)
     if not matches:
         raise DiscoveryError(f"no team in {league} is owned by this account; pass the team id")
     if len(matches) > 1:
+        if hint is not None and hint in matches:
+            return hint
         raise DiscoveryError(f"teams {matches} in {league} all list this account as an owner; pass the team id")
     return matches[0]
+
+
+def _league_label(teams: TeamsView) -> str:
+    return f"league {teams.league_id}" if teams.league_id is not None else "the league"
+
+
+def _check_owned(teams: TeamsView, team_id: int, swid: str, label: str) -> None:
+    """Refuse a given team the account does not own, naming the account's own team(s) instead."""
+    try:
+        teams.team(team_id)
+    except KeyError as exc:
+        raise DiscoveryError(f"{label}: {exc.args[0]}") from exc
+    owned = owned_teams(teams, swid)
+    if team_id in owned:
+        return
+    if not owned:
+        mine = f"no team in {_league_label(teams)} is owned by this account"
+    elif len(owned) == 1:
+        mine = f"this account owns team {owned[0]}"
+    else:
+        mine = f"this account owns teams {owned}"
+    raise DiscoveryError(
+        f"{label}: team {team_id} is not this account's team ({mine}); paste the URL of your own team page, or the "
+        "league URL without teamId="
+    )
 
 
 def confirm_league(
@@ -405,11 +474,14 @@ def confirm_league(
     now: datetime | date | None = None,
 ) -> DiscoveredLeague:
     """Read the league and fill in what ``ref`` left out: the season (current when missing), the team (by SWID when
-    missing) and the league and team names.
+    missing, ``ref.team_hint`` breaking a tie between the account's own teams) and the league and team names.
 
-    One GET of ``mTeam`` + ``mStandings`` + ``mSettings`` through ``client_factory(game, league_id, season, session)``.
-    The league name comes from ``settings.name`` and is ``None`` if ESPN leaves the block out. Raises
-    :class:`DiscoveryError` when the read fails, the body does not parse, or the team cannot be settled.
+    A ``ref.team_id`` (from a pasted team URL) is checked, not trusted: the team's ``owners`` must hold the session's
+    SWID, or :class:`DiscoveryError` names the team the account does own, since a pasted opponent's URL would
+    otherwise have this tool manage the opponent's team. One GET of ``mTeam`` + ``mStandings`` + ``mSettings`` through
+    ``client_factory(game, league_id, season, session)``. The league name comes from ``settings.name`` and is ``None``
+    if ESPN leaves the block out. Raises :class:`DiscoveryError` when the read fails, the body does not parse, or the
+    team cannot be settled.
     """
     season = ref.season if ref.season is not None else current_season(ref.sport, now)
     label = f"{ref.sport.upper()} league {ref.espn_league_id} ({season})"
@@ -422,7 +494,11 @@ def confirm_league(
         teams = TeamsView.model_validate(read.data)
     except ValidationError as exc:
         raise DiscoveryError(f"{label}: the team view did not parse ({exc.error_count()} problems)") from exc
-    team_id = ref.team_id if ref.team_id is not None else resolve_team(teams, session.swid)
+    if ref.team_id is not None:
+        _check_owned(teams, ref.team_id, session.swid, label)
+        team_id = ref.team_id
+    else:
+        team_id = resolve_team(teams, session.swid, hint=ref.team_hint)
     try:
         team = teams.team(team_id)
     except KeyError as exc:

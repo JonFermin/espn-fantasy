@@ -5,7 +5,8 @@ command prints a one-time code and a ``t.me`` link that sends it; the private ch
 ``TELEGRAM_CHAT_ID``, the only chat the bot will ever answer. ntfy: two random topic names are generated and saved
 (``NTFY_TOPIC`` for the phone, ``NTFY_REPLY_TOPIC`` for the PC); subscribe to the first one in the ntfy app. Either
 way a test push follows, so the command doubles as a check that the channel works. Run again with ``.env`` already
-filled in, it only sends the test push; ``--replace`` captures or generates afresh.
+filled in, it only sends the test push; ``--replace`` captures or generates afresh. A config with ``channel = "none"``
+(no phone) has nothing to set up, so the command then needs ``--channel`` to say which one to add.
 """
 
 from __future__ import annotations
@@ -62,6 +63,11 @@ def setup(
     except ConfigError as exc:
         _fail(str(exc))
     name = config.notify.channel if channel is None else channel.value
+    if name == "none":
+        _fail(
+            f'{config_path} says channel = "none" (no phone): pass --channel telegram or --channel ntfy to set one up, '
+            'then set that channel under [notify]'
+        )
     try:
         if name == "telegram":
             _setup_telegram(config, env_path, timeout, replace)

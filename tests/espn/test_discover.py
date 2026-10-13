@@ -51,8 +51,8 @@ SESSION = EspnSession(espn_s2=S2, swid=SWID, expires_at=NOW + timedelta(days=200
 LEAGUE_A = DiscoveredLeague("nfl", 1010101, 2026, 7, "League A", "Fixture Team 7")
 LEAGUE_B = DiscoveredLeague("nba", 2020202, 2027, 3, "League B", "Fixture Team Three")
 LEAGUE_C = DiscoveredLeague("nfl", 3030303, 2025, 2, "League C", "Fixture Team 2")
-NAMELESS_A = DiscoveredLeague("nfl", 1010101, 2026, 7)
-NAMELESS_B = DiscoveredLeague("nba", 2020202, 2027, 3)
+NAMELESS_A = DiscoveredLeague("nfl", 1010101, 2026, team_hint=7)  # a URL's teamId is a hint, never the team
+NAMELESS_B = DiscoveredLeague("nba", 2020202, 2027, team_hint=3)
 NAMELESS_C = DiscoveredLeague("nfl", 3030303, 2025)
 
 REAL_LEAGUE_ID = 1010101
@@ -250,7 +250,7 @@ def test_entry_without_groups_falls_back_to_its_url() -> None:
             }
         ]
     }
-    expected = DiscoveredLeague("nba", 2020202, 2027, 3, None, "Fixture Team Three")
+    expected = DiscoveredLeague("nba", 2020202, 2027, None, None, "Fixture Team Three", team_hint=3)
     assert parse_fan_profile(profile, now=NOW) == [expected]
 
 
@@ -308,7 +308,57 @@ def test_deep_walk_merges_duplicates_and_fills_missing_fields() -> None:
         "b": ["https://fantasy.espn.com/football/team?leagueId=1010101&teamId=7&seasonId=2026"],
         "c": {"d": "https://fantasy.espn.com/football/team?leagueId=1010101&teamId=9&seasonId=2026"},
     }
+    assert parse_fan_profile(profile, now=NOW) == [DiscoveredLeague("nfl", 1010101, 2026, team_hint=7)]
+
+
+def test_the_deep_walk_never_takes_a_urls_team_as_the_accounts_team() -> None:
+    """A fan profile links to an opponent's team page before ours: the first URL wins the merge, so its teamId must
+    stay a hint and the team be settled by SWID in confirm_league."""
+    profile: dict[str, Any] = {
+        "news": "Your opponent: https://fantasy.espn.com/football/team?leagueId=1010101&teamId=3&seasonId=2026",
+        "mine": "https://fantasy.espn.com/football/team?leagueId=1010101&teamId=1&seasonId=2026",
+    }
+    [league] = parse_fan_profile(profile, now=NOW)
+    assert league.team_id is None and league.team_hint == 3
+    assert league.ref == LeagueRef("nfl", 1010101, 2026, None, team_hint=3)
+
+
+def test_a_structured_entry_id_is_trusted_and_its_url_team_is_not_needed() -> None:
+    entry = {
+        "gameId": 1,
+        "seasonId": 2026,
+        "entryId": 7,
+        "entryURL": "https://fantasy.espn.com/football/team?leagueId=1010101&teamId=9",
+        "groups": [{"groupId": 1010101}],
+    }
+    profile: dict[str, Any] = {"preferences": [{"metaData": {"entry": entry}}]}
     assert parse_fan_profile(profile, now=NOW) == [DiscoveredLeague("nfl", 1010101, 2026, 7)]
+
+
+def _seasons_profile(*rows: tuple[int, int, int]) -> dict[str, Any]:
+    """Structured entries ``(gameId, seasonId, leagueId)``, entry 1 in each."""
+    entries = [
+        {"gameId": game, "seasonId": season, "entryId": 1, "groups": [{"groupId": league}]}
+        for game, season, league in rows
+    ]
+    return {"preferences": [{"metaData": {"entry": entry}} for entry in entries]}
+
+
+def test_in_july_a_league_renewed_for_the_coming_season_is_the_one_kept() -> None:
+    july = datetime(2026, 7, 15, tzinfo=UTC)  # NFL current is still 2025, NBA current is 2026
+    assert (current_season("nfl", july), current_season("nba", july)) == (2025, 2026)
+    profile = _seasons_profile((1, 2025, 1010101), (1, 2026, 1010101), (3, 2026, 2020202), (3, 2027, 2020202))
+    assert parse_fan_profile(profile, now=july) == [
+        DiscoveredLeague("nfl", 1010101, 2026, 1),
+        DiscoveredLeague("nba", 2020202, 2027, 1),
+    ]
+
+
+def test_a_league_not_yet_renewed_keeps_its_current_season_and_older_ones_are_dropped() -> None:
+    july = datetime(2026, 7, 15, tzinfo=UTC)
+    profile = _seasons_profile((1, 2024, 1010101), (1, 2025, 1010101), (1, 2024, 3030303))
+    assert parse_fan_profile(profile, now=july) == [DiscoveredLeague("nfl", 1010101, 2025, 1)]
+    assert len(parse_fan_profile(profile, now=july, all_seasons=True)) == 3
 
 
 @pytest.mark.parametrize("data", [[], None, "text", 7])
@@ -428,6 +478,16 @@ def test_resolve_team_with_several_matches() -> None:
         resolve_team(TeamsView.model_validate(shared), SWID)
 
 
+def test_a_url_hint_breaks_a_tie_only_between_the_accounts_own_teams(real_teams: TeamsView) -> None:
+    shared = TeamsView.model_validate(
+        {"id": REAL_LEAGUE_ID, "teams": [{"id": 1, "owners": [SWID]}, {"id": 4, "owners": ["{X}", SWID]}, {"id": 5}]}
+    )
+    assert resolve_team(shared, SWID, hint=4) == 4
+    with pytest.raises(DiscoveryError, match="all list this account"):
+        resolve_team(shared, SWID, hint=5)  # someone else's team never wins the tie
+    assert resolve_team(real_teams, SWID, hint=3) == 1  # one owned team: the hint is not even asked
+
+
 # --- confirm_league ---------------------------------------------------------------------------------------------------
 
 
@@ -471,10 +531,26 @@ def test_confirm_league_fills_season_team_and_names(reads: FakeReads) -> None:
     assert request.headers["cookie"] == f"espn_s2={S2}; SWID={SWID}"
 
 
-def test_confirm_league_keeps_a_given_team_and_season(reads: FakeReads) -> None:
-    confirmed = confirm_league(LeagueRef("nfl", REAL_LEAGUE_ID, REAL_SEASON, 3), SESSION, now=NOW)
+def test_confirm_league_keeps_a_given_team_the_account_owns_and_the_season(reads: FakeReads) -> None:
+    owner_of_3 = EspnSession(espn_s2=S2, swid="{00000000-0000-0000-0000-000000000002}", expires_at=None)
+    confirmed = confirm_league(LeagueRef("nfl", REAL_LEAGUE_ID, REAL_SEASON, 3), owner_of_3, now=NOW)
     assert confirmed.team_id == 3 and confirmed.team_name == "Team 3" and confirmed.season == REAL_SEASON
     assert reads.requests[0].url.path.startswith(f"/apis/v3/games/ffl/seasons/{REAL_SEASON}/")
+
+
+def test_confirm_league_refuses_a_pasted_team_the_account_does_not_own(reads: FakeReads) -> None:
+    """A pasted opponent's team URL must never make the tool manage the opponent's team."""
+    with pytest.raises(DiscoveryError, match=r"team 3 is not this account's team \(this account owns team 1\)"):
+        confirm_league(LeagueRef("nfl", REAL_LEAGUE_ID, REAL_SEASON, 3), SESSION, now=NOW)
+    stranger = EspnSession(espn_s2=S2, swid="{00000000-0000-0000-0000-0000000000FF}", expires_at=None)
+    with pytest.raises(DiscoveryError, match="team 3 is not this account's team.*no team in league 1010101 is owned"):
+        confirm_league(LeagueRef("nfl", REAL_LEAGUE_ID, REAL_SEASON, 3), stranger, now=NOW)
+
+
+def test_confirm_league_settles_a_deep_walk_league_by_swid_not_by_its_url_hint(reads: FakeReads) -> None:
+    walked = DiscoveredLeague("nfl", REAL_LEAGUE_ID, REAL_SEASON, team_hint=3)  # an opponent's page came first
+    confirmed = confirm_league(walked.ref, SESSION, now=NOW)
+    assert confirmed.team_id == 1 and confirmed.team_name == "Team 1"
 
 
 def test_confirm_league_prefers_the_season_espn_reports(reads: FakeReads) -> None:

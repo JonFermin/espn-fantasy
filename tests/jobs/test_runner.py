@@ -2,10 +2,11 @@
 
 The loop runs with a fake clock (time moves only when the loop sleeps, a poll waits, or a fake tick takes time), a
 fake phone channel that delivers scripted presses, and a fake tick runner that records each call and answers with a
-scripted :class:`TickResult` or exception. Presses go through the real :func:`fm.notify.handle_reply` and the real
-:func:`fm.jobs.tick.execute_on_approval` into the executor, over the NFL fixture league with a fake read API, a fake
-write transport and a minimal lineup flow (as in ``test_tick.py``), so a near-deadline approval is executed and
-verified without a browser or a socket. The run lock is the real one, in the per-test config dir.
+scripted :class:`TickResult` or exception. Presses go through the real :func:`fm.notify.handle_reply` over the NFL
+fixture league; a near-deadline approval must bring the next tick forward and never execute in the loop's process,
+which the fake opener and write transport (as in ``test_tick.py``) prove by staying untouched. The run lock is the
+real one, in the per-test config dir; a stuck scheduled tick holding it is a real, tiny process this test starts and
+``fm run`` kills.
 
 The tick child itself is tested with real, tiny, offline processes: a child that hangs with a grandchild is stopped
 at a one-second timeout and nothing of it survives, a child's output and exit code come back, and the real
@@ -18,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -34,15 +36,18 @@ from fm.config import Config, ConfigError
 from fm.espn.settings import load_league_settings
 from fm.executor import ExecutorOptions
 from fm.jobs import proctree
-from fm.jobs.runlock import HELD_BY_ENV, RunLock
+from fm.jobs import runner as runner_module
+from fm.jobs.runlock import HELD_BY_ENV, LockHolder, RunLock
 from fm.jobs.runner import (
     DEFAULT_TICK_TIMEOUT,
+    STUCK_TICK_GRACE,
     TICK_CHILD_MODULE,
     TICK_CRASHED_EXIT,
     RunOptions,
     RunStats,
     TickCall,
     TickResult,
+    TreeKiller,
     child_tick,
     in_process_tick,
     run_forever,
@@ -148,6 +153,7 @@ class FakeChannel:
         self.wait_s = wait_s
         self.inbox: list[tuple[datetime, Reply]] = []
         self.errors: list[Exception] = []
+        self.send_errors: list[NotifyError] = []
         self.polls: list[tuple[datetime, bool]] = []
         self.sent: list[Message] = []
         self.confirmed: list[DecisionResult] = []
@@ -172,6 +178,8 @@ class FakeChannel:
         return [reply for at, reply in self.inbox if at <= self.time.now]
 
     def send(self, message: Message) -> None:
+        if self.send_errors:
+            raise self.send_errors.pop(0)
         self.sent.append(message)
 
     def send_proposal(self, notice: ProposalNotice) -> None:
@@ -194,8 +202,8 @@ def no_channel(config: Config) -> NotifyChannel:
     raise NotifyError("TELEGRAM_BOT_TOKEN is not set")
 
 
-def refuse_opener(league: LeagueRow, *, dry_run: bool) -> Any:
-    raise AssertionError("nothing should execute in this test")
+def refuse_kill(pid: int) -> list[str]:
+    raise AssertionError(f"no process may be killed in this test (pid {pid})")
 
 
 class SwapFlow(Flow[LineupPayload]):
@@ -312,7 +320,7 @@ class World:
         with Store.open(self.store_path) as store:
             return get_proposal(store, proposal_id).status
 
-    def run(self, *, channel: bool = True, **options: Any) -> RunStats:
+    def run(self, *, channel: bool = True, tree_killer: TreeKiller = refuse_kill, **options: Any) -> RunStats:
         opts = {"interval": TEN_MINUTES, "executor": FAST, **options}
         return run_forever(
             options=RunOptions(**opts),
@@ -322,8 +330,7 @@ class World:
             store_opener=self.open_store,
             channel_opener=(lambda _config: self.channel) if channel else no_channel,
             tick_fn=self.ticks,
-            opener=self.opener,
-            flows=self.flows,
+            tree_killer=tree_killer,
         )
 
 
@@ -416,30 +423,49 @@ def test_a_config_that_will_not_load_skips_the_tick_and_the_next_one_reloads(wor
     assert world.channel.titles() == ["fm run: config.toml not loaded"]
 
 
-def test_without_a_channel_the_loop_sleeps_to_the_tick_and_alerts_nowhere(world: World) -> None:
+def test_without_a_channel_the_loop_sleeps_to_the_tick_and_alerts_nowhere(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
     world.ticks.answer(RuntimeError("boom"))
-    stats = world.run(max_ticks=2, channel=False)
-    assert stats.alerts == ["fm run: tick failed"] and world.channel.sent == []
+    with caplog.at_level(logging.INFO, logger="fm"):
+        stats = world.run(max_ticks=2, channel=False)
+    assert stats.alerts == [] and world.channel.sent == []  # nothing was pushed, so nothing counts as alerted
+    assert "alert not pushed (no phone channel): fm run: tick failed: RuntimeError: boom" in caplog.text
     assert world.channel.polls == []
     assert sum(world.time.sleeps) == pytest.approx(TEN_MINUTES.total_seconds())
+
+
+def test_an_alert_that_did_not_go_out_does_not_silence_the_next_one(world: World) -> None:
+    """The throttle records an alert only once the channel took it: a failed push is retried at the next failure
+    instead of the problem going unreported for an hour."""
+    world.channel.send_errors = [NotifyError("502 Bad Gateway")]
+    world.ticks.answer(RuntimeError("boom"), RuntimeError("boom again"), RuntimeError("and again"))
+    stats = world.run(max_ticks=3)
+    assert stats.tick_failures == 3
+    assert world.channel.titles() == ["fm run: tick failed"]  # the 2nd failure's push; the 3rd is within the hour
+    assert "boom again" in world.channel.sent[0].body
+    assert stats.alerts == ["fm run: tick failed"]
 
 
 # --- approvals --------------------------------------------------------------------------------------------------------
 
 
-def test_a_press_between_ticks_is_recorded_and_a_near_deadline_approval_executes_at_once(world: World) -> None:
+def test_a_near_deadline_approval_brings_the_next_tick_forward_instead_of_executing_here(world: World) -> None:
+    """Nothing executes in the loop's process (it would have no timeout): the press pulls the next tick to now, and
+    that tick child executes the approval under the tick timeout and kill-tree."""
     deadline = T0 + timedelta(minutes=20)
     proposal_id = world.propose(deadline=deadline)
-    world.channel.press(T0 + timedelta(minutes=2), approve_press(proposal_id, deadline=deadline))
-    stats = world.run(max_ticks=2)
-    assert stats.decisions == 1 and stats.executions == 1
-    assert world.status(proposal_id) == "verified"
-    assert world.opener.calls == [(world.league.row_id, False)] and len(world.transport.sent) == 1
+    pressed = T0 + timedelta(minutes=2)
+    world.channel.press(pressed, approve_press(proposal_id, deadline=deadline))
+    stats = world.run(max_ticks=3)
+    assert stats.decisions == 1 and stats.expedited == 1
+    assert world.status(proposal_id) == "approved"  # recorded; left for the tick child to execute
+    assert world.opener.calls == [] and world.transport.sent == []  # no browser and no write in this process
     assert [result.headline for result in world.channel.confirmed] == [f"#{proposal_id} approved"]
-    assert [title for title in world.channel.titles() if title.startswith("✅ Done")]
-    assert len(world.ticks.calls) == 2  # the approval did not wait for the next tick
-    polls = [at for at, _ in world.channel.polls]
-    assert polls and all(T0 <= at < T0 + TEN_MINUTES for at in polls)  # all between the two ticks
+    first, second, third = world.ticks.times
+    assert first == T0 and second == pressed  # at once, not at T0 + 10 min
+    assert third == second + TEN_MINUTES  # and the schedule carries on from the extra tick
+    assert all(call.options.execute for _, call in world.ticks.calls)
 
 
 def test_a_press_far_from_its_deadline_is_recorded_and_left_to_the_tick(world: World) -> None:
@@ -447,8 +473,9 @@ def test_a_press_far_from_its_deadline_is_recorded_and_left_to_the_tick(world: W
     proposal_id = world.propose(deadline=deadline)
     world.channel.press(T0 + timedelta(minutes=1), approve_press(proposal_id, deadline=deadline))
     stats = world.run(max_ticks=2)
-    assert stats.decisions == 1 and stats.executions == 0
+    assert stats.decisions == 1 and stats.expedited == 0
     assert world.status(proposal_id) == "approved" and world.opener.calls == []
+    assert world.ticks.times == [T0, T0 + TEN_MINUTES]
 
 
 def test_with_no_execute_a_press_is_recorded_but_nothing_runs(world: World) -> None:
@@ -456,15 +483,28 @@ def test_with_no_execute_a_press_is_recorded_but_nothing_runs(world: World) -> N
     proposal_id = world.propose(deadline=deadline)
     world.channel.press(T0 + timedelta(minutes=1), approve_press(proposal_id, deadline=deadline))
     stats = world.run(max_ticks=2, execute=False)
-    assert stats.decisions == 1 and stats.executions == 0 and world.opener.calls == []
+    assert stats.decisions == 1 and stats.expedited == 0 and world.opener.calls == []
     assert world.status(proposal_id) == "approved"
     assert all(not call.options.execute for _, call in world.ticks.calls)
+    assert world.ticks.times == [T0, T0 + TEN_MINUTES]
+
+
+def test_a_near_deadline_approval_while_paused_waits_for_the_regular_tick(world: World) -> None:
+    from fm.proposals import pause
+
+    deadline = T0 + timedelta(minutes=20)
+    proposal_id = world.propose(deadline=deadline)
+    world.channel.press(T0 + timedelta(minutes=1), approve_press(proposal_id, deadline=deadline))
+    pause("checking the roster", now=T0)
+    stats = world.run(max_ticks=2)
+    assert stats.decisions == 1 and stats.expedited == 0
+    assert world.ticks.times == [T0, T0 + TEN_MINUTES]
 
 
 def test_an_unknown_button_is_ignored(world: World) -> None:
     world.channel.press(T0 + timedelta(minutes=1), Reply("fake", 99, "approve", "x" * 24, "test"))
     stats = world.run(max_ticks=2)
-    assert stats.decisions == 0 and stats.executions == 0
+    assert stats.decisions == 0 and stats.expedited == 0
 
 
 def test_poll_errors_back_off_doubling_and_are_alerted_once(world: World) -> None:
@@ -491,7 +531,7 @@ def test_a_press_that_blows_up_is_alerted_and_the_loop_goes_on(world: World) -> 
         channel_opener=lambda _config: world.channel,
         tick_fn=world.ticks,
         reply_handler=broken,
-        opener=refuse_opener,
+        tree_killer=refuse_kill,
     )
     assert stats.ticks == 2 and stats.decisions == 0
     assert world.channel.titles() == ["fm run: press on #1 not recorded"]
@@ -516,7 +556,7 @@ def test_stop_ends_the_loop_cleanly_and_releases_the_lock(world: World) -> None:
         store_opener=world.open_store,
         channel_opener=lambda _config: world.channel,
         tick_fn=world.ticks,
-        opener=refuse_opener,
+        tree_killer=refuse_kill,
     )
     assert stats.stopped_by == "stop" and stats.ticks == 2
     assert held == [True, True]
@@ -541,6 +581,83 @@ def test_the_loop_waits_for_a_tick_that_holds_the_lock_and_says_so(
     assert stats.ticks == 1 and world.time.sleeps[:4] == [0.5, 0.5, 0.5, 0.5]
     assert f"waiting for the run lock held by fm tick (pid {os.getpid()})" in caplog.text
     assert world.ticks.times == [T0 + timedelta(seconds=2)]
+
+
+def test_stop_while_waiting_for_the_lock_ends_the_run_without_ticking(world: World) -> None:
+    import threading
+
+    stop = threading.Event()
+    world.time.on_sleep = lambda: stop.set() if len(world.time.sleeps) == 3 else None
+    with RunLock(command="fm run"):  # another fm run, here in this process
+        stats = run_forever(
+            options=RunOptions(interval=TEN_MINUTES),
+            stop=stop,
+            clock=world.time.clock,
+            sleep=world.time.sleep,
+            config_loader=world.load_config,
+            store_opener=world.open_store,
+            channel_opener=lambda _config: world.channel,
+            tick_fn=world.ticks,
+            tree_killer=refuse_kill,
+        )
+    assert stats.stopped_by == "stop" and stats.attempts == 0 and world.ticks.calls == []
+
+
+def holder(command: str, *, pid: int, age: timedelta) -> LockHolder:
+    return LockHolder(pid=pid, command=command, started_at=T0 - age)
+
+
+def test_only_a_scheduled_tick_held_past_the_timeout_and_grace_counts_as_stuck() -> None:
+    options = RunOptions(tick_timeout=timedelta(minutes=20))
+    limit = options.tick_timeout + STUCK_TICK_GRACE
+    other = os.getpid() + 1
+    assert runner_module._stuck(holder("fm tick", pid=other, age=limit + timedelta(seconds=1)), options, T0)
+    assert not runner_module._stuck(holder("fm tick", pid=other, age=limit), options, T0)
+    assert not runner_module._stuck(holder("fm run", pid=other, age=timedelta(days=3)), options, T0)
+    assert not runner_module._stuck(holder("fm doctor", pid=other, age=timedelta(days=3)), options, T0)
+    assert not runner_module._stuck(holder("fm tick", pid=os.getpid(), age=timedelta(days=3)), options, T0)
+
+
+HOLDER = (
+    "import sys, time\n"
+    "from datetime import datetime\n"
+    "from fm.jobs.runlock import RunLock\n"
+    "RunLock(command='fm tick', clock=lambda: datetime.fromisoformat(sys.argv[1])).acquire()\n"
+    "print('locked', flush=True)\n"
+    "time.sleep(120)\n"
+)
+"""A scheduled ``fm tick`` that took the run lock at ``argv[1]`` and hangs (the five-day hang, in miniature)."""
+
+
+def test_fm_run_stops_a_stuck_scheduled_tick_takes_the_lock_and_alerts_once(world: World) -> None:
+    started = T0 - timedelta(minutes=30)  # the default timeout is 20 min, plus 2 min of grace: stuck
+    stuck = subprocess.Popen([sys.executable, "-c", HOLDER, started.isoformat()], stdin=subprocess.DEVNULL)
+    killed: list[int] = []
+    try:
+        deadline = time.monotonic() + 30
+        while RunLock().holder() is None or not RunLock().is_locked():
+            assert time.monotonic() < deadline and stuck.poll() is None, "the stand-in tick never took the lock"
+            time.sleep(0.05)
+        record = RunLock().holder()
+        assert record is not None and record.command == "fm tick" and record.started_at == started
+
+        def kill(pid: int) -> list[str]:
+            killed.append(pid)
+            return proctree.kill_pid_tree(pid)  # a process this test started, killed for real
+
+        world.time.on_sleep = lambda: time.sleep(0.02)  # let the OS release the dead holder's lock
+        stats = world.run(max_ticks=1, tree_killer=kill)
+        assert killed == [record.pid] and stats.stuck_ticks_stopped == 1 and stats.ticks == 1
+        assert still_running({record.pid}) == set()
+        assert world.channel.titles() == ["fm run: stuck tick stopped"]
+        assert f"a stuck fm tick (pid {record.pid}, started 2026-10-04 14:30 UTC) was stopped" in (
+            world.channel.sent[0].body
+        )
+        assert not RunLock().is_locked()  # released again when the run ended
+    finally:
+        if stuck.poll() is None:
+            proctree.kill_pid_tree(stuck.pid)
+            stuck.wait(10)
 
 
 # --- the tick runners -------------------------------------------------------------------------------------------------
@@ -620,7 +737,7 @@ def test_a_tick_function_report_reaches_the_loop_log(world: World, caplog: pytes
             store_opener=world.open_store,
             channel_opener=no_channel,
             tick_fn=in_process_tick(tick_fn=fake_tick),
-            opener=refuse_opener,
+            tree_killer=refuse_kill,
         )
     assert stats.ticks == 1 and "nfl (nfl): period 4" in caplog.text
 
@@ -739,7 +856,7 @@ def test_tick_child_main_runs_the_cli_and_maps_a_crash_to_its_own_exit_code(monk
         raise RuntimeError("boom")
 
     monkeypatch.setattr(schedule_cmd, "_tick_once", boom)
-    assert tick_child_main(["tick", "--no-sync"]) == TICK_CRASHED_EXIT
+    assert tick_child_main(["tick", "--in-process", "--no-sync"]) == TICK_CRASHED_EXIT
     assert not RunLock().is_locked()  # the tick's own lock was released on the way out
     assert tick_child_main(["no-such-command"]) == 2
 

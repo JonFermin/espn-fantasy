@@ -32,7 +32,8 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -234,6 +235,27 @@ class RunLock:
         os.write(fd, payload)
 
 
+@contextmanager
+def exclusive_lock(
+    path: Path,
+    *,
+    command: str,
+    timeout: float,
+    poll_s: float = LOCK_POLL_S,
+    sleep: Callable[[float], object] = time.sleep,
+) -> Iterator[RunLock]:
+    """Hold the same OS-level exclusive lock as the run lock, on any file ``path`` (created when missing), for the
+    duration of the ``with`` block. Waits at most ``timeout`` seconds for another holder and raises
+    :class:`RunLockHeld` (naming it) when the lock does not come free. ``fm.config_edit`` serialises its
+    read-modify-write edits of ``config.toml`` with it, so the platform branch stays in this module."""
+    lock = RunLock(path, command=command)
+    lock.acquire(blocking=True, timeout=timeout, poll_s=poll_s, sleep=sleep)
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
 def held_by_parent(holder: LockHolder | None, environ: Mapping[str, str] | None = None) -> bool:
     """Whether the lock is held on this process's behalf: ``environ`` (default ``os.environ``) names, in
     :data:`HELD_BY_ENV`, the very pid ``holder`` (the current lock record) belongs to. ``fm tick`` then runs as the
@@ -259,6 +281,7 @@ __all__ = [
     "LockHolder",
     "RunLock",
     "RunLockHeld",
+    "exclusive_lock",
     "held_by_parent",
     "lock_path",
 ]

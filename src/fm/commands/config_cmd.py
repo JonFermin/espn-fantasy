@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 
 from fm.config import OPTIONAL_SECRET_ENV_VARS, Config, ConfigError, League, config_paths, load_config
-from fm.config_edit import set_value
+from fm.config_edit import preset_overrides, set_value, set_values
 from fm.presets import PRESET_NAMES, preset_for
 
 app = typer.Typer(help="Inspect and validate the configuration.", no_args_is_help=True)
@@ -45,23 +45,47 @@ def set_preset(
     league: Annotated[str, typer.Argument(help="League key from config.toml.", show_default=False)],
     preset: Annotated[str, typer.Argument(help=f"One of {', '.join(PRESET_NAMES)}.", show_default=False)],
     path: PathOption = None,
+    reset_overrides: Annotated[
+        bool,
+        typer.Option(
+            "--reset-overrides",
+            help="Also remove the [league.policy] / [league.trade_finder] keys written in config.toml that would "
+            "override the preset, so the preset decides them.",
+        ),
+    ] = False,
 ) -> None:
     """Set a league's policy preset in config.toml and show the policy that results.
 
     The preset fills every [league.policy] and [league.trade_finder] key the league leaves unset; a key written in the
-    file still wins, so delete it there to let the preset decide it. The edit is validated before the file changes,
-    the replace is atomic, and the previous file is kept as config.toml.bak.
+    file still wins, and the command names any such key (or removes them with --reset-overrides). The edit is
+    validated before the file changes, the replace is atomic, and the previous file is kept as config.toml.bak.
     """
     if preset not in PRESET_NAMES:
         raise typer.BadParameter(f"unknown preset {preset!r}; choose one of {', '.join(PRESET_NAMES)}")
     config_path, env_path = config_paths(path)
+    removed: list[str] = []
     try:
-        config = set_value(config_path, league, "preset", preset, env_path=env_path)
-    except ConfigError as exc:
+        if reset_overrides:
+            removed = preset_overrides(config_path, league, preset=preset)
+            config = set_values(config_path, league, {"preset": preset, **dict.fromkeys(removed)}, env_path=env_path)
+            overrides: list[str] = []
+        else:
+            config = set_value(config_path, league, "preset", preset, env_path=env_path)
+            overrides = preset_overrides(config_path, league)
+    except (ConfigError, ValueError) as exc:  # ValueError: a sport no preset knows, in a file that does not validate
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from None
     chosen = config.league(league)
-    typer.echo(f"{config_path}: {league} uses the {preset} preset: {preset_for(preset, chosen.sport).description}")
+    if overrides:
+        typer.echo(f"{config_path}: {league} uses the {preset} preset, with keys written in config.toml overriding it")
+        typer.echo(
+            f"note: these keys written in config.toml override the preset: {', '.join(overrides)}; remove them or run "
+            "with --reset-overrides"
+        )
+    else:
+        typer.echo(f"{config_path}: {league} uses the {preset} preset: {preset_for(preset, chosen.sport).description}")
+    if removed:
+        typer.echo(f"removed from config.toml so the preset decides them: {', '.join(removed)}")
     for line in _league_lines(chosen):
         typer.echo(line)
 

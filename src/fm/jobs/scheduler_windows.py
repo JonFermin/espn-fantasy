@@ -29,10 +29,14 @@ an at-logon trigger for one user together with restart-on-failure, an unlimited 
 - The task keeps the interactive token (no ``-User``/``-Password`` on the registration), like the tick: the browser
   profile belongs to the logged-on user. ``-MultipleInstances IgnoreNew`` keeps a second copy from starting, the
   run lock (:mod:`fm.jobs.runlock`) covers the ``fm tick`` task, which stays installed as the wake timer.
+- An at-logon trigger first fires at the next logon, so the install starts the task at once with
+  ``Start-ScheduledTask`` (a failure there is a note: the task is registered either way), as launchd's ``RunAtLoad``
+  does on macOS. ``fm autostart install --no-start`` registers only (:data:`WINDOWS_AUTOSTART_NO_START`).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import re
 import subprocess
@@ -341,6 +345,12 @@ def render_register_logon_task(spec: AutostartSpec) -> list[str]:
     return [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]
 
 
+def render_start_task(task_name: str) -> list[str]:
+    """``powershell`` argv that starts the registered task now (``Start-ScheduledTask``), as a logon would."""
+    script = f"Start-ScheduledTask -TaskName {ps_quote(task_name)} -ErrorAction Stop"
+    return [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]
+
+
 def render_unregister_task(task_name: str) -> list[str]:
     script = f"Unregister-ScheduledTask -TaskName {ps_quote(task_name)} -Confirm:$false -ErrorAction Stop"
     return [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]
@@ -365,20 +375,26 @@ def is_task_missing(result: RunResult) -> bool:
     return not result.ok and any(marker in text for marker in TASK_MISSING_MARKERS)
 
 
-def render_autostart_plan(spec: AutostartSpec) -> list[str]:
+def render_autostart_plan(spec: AutostartSpec, *, start: bool = True) -> list[str]:
     """What :func:`install_autostart` would do, as lines, for ``fm autostart install --dry-run``."""
     lines = [f"env file {spec.env_file_path}:"]
     lines.extend(f"  {line}" for line in render_env_file(spec).splitlines())
     lines.append("commands:")
     lines.append("  " + subprocess.list2cmdline(render_register_logon_task(spec)))
+    if start:
+        lines.append("  " + subprocess.list2cmdline(render_start_task(spec.task_name)))
     if not spec.windowless:
         lines.append(f"note: {UVW_FALLBACK_NOTE}")
     return lines
 
 
-def install_autostart(spec: AutostartSpec, runner: Runner) -> ScheduleReport:
-    """Write the env file and register the logon task (replacing one that exists). Raises :class:`SchedulerError`
-    when the registration fails. The tick task is left alone: it is the wake timer."""
+def install_autostart(spec: AutostartSpec, runner: Runner, *, start: bool = True) -> ScheduleReport:
+    """Write the env file, register the logon task (replacing one that exists) and, unless ``start`` is off, start it
+    now with ``Start-ScheduledTask``: an at-logon trigger first fires at the next logon, so without the start ``fm run``
+    would not run until then (launchd's ``RunAtLoad`` starts the macOS agent at once). Raises :class:`SchedulerError`
+    when the registration fails; a start that fails is a note, since the task is installed and the next logon starts
+    it. ``-MultipleInstances IgnoreNew`` makes the start a no-op when the task is already running. The tick task is
+    left alone: it is the wake timer."""
     report = ScheduleReport(action="install", task_name=spec.task_name, backend="windows", unit="task")
     spec.scripts_dir.mkdir(parents=True, exist_ok=True)
     spec.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -394,7 +410,25 @@ def install_autostart(spec: AutostartSpec, runner: Runner) -> ScheduleReport:
     if not spec.windowless:
         report.notes.append(UVW_FALLBACK_NOTE)
     report.notes.append(WAKE_TIMER_NOTE)
+    if start:
+        report.notes.append(_start_now(spec.task_name, runner, report))
+    else:
+        report.notes.append(f"{spec.task_name}: not started now (--no-start); it starts at the next logon")
     return report
+
+
+def _start_now(task_name: str, runner: Runner, report: ScheduleReport) -> str:
+    """Run ``Start-ScheduledTask`` and say how it went; never raises."""
+    argv = render_start_task(task_name)
+    report.commands.append(argv)
+    later = f"it starts at the next logon, or now with: Start-ScheduledTask -TaskName {task_name}"
+    try:
+        result = runner(argv)
+    except SchedulerError as exc:
+        return f"{task_name}: registered but not started now ({exc}); {later}"
+    if not result.ok:
+        return f"{task_name}: registered but not started now ({result.output or f'exit {result.returncode}'}); {later}"
+    return f"{task_name}: started now, so fm run is running (Start-ScheduledTask)"
 
 
 def uninstall_autostart(spec: AutostartSpec, runner: Runner) -> ScheduleReport:
@@ -447,7 +481,14 @@ WINDOWS_AUTOSTART = AutostartBackend(
     uninstall=uninstall_autostart,
     show=show_autostart,
 )
-"""The logon job as ``fm autostart`` drives it."""
+"""The logon job as ``fm autostart`` drives it: registered, then started at once."""
+
+WINDOWS_AUTOSTART_NO_START = dataclasses.replace(
+    WINDOWS_AUTOSTART,
+    plan=functools.partial(render_autostart_plan, start=False),
+    install=functools.partial(install_autostart, start=False),
+)
+"""``fm autostart install --no-start``: registered only; ``fm run`` first starts at the next logon."""
 
 
 __all__ = [
@@ -469,6 +510,7 @@ __all__ = [
     "WAKE_TIMER_NOTE",
     "WINDOWS",
     "WINDOWS_AUTOSTART",
+    "WINDOWS_AUTOSTART_NO_START",
     "WRAPPER_SUFFIX",
     "AutostartBackend",
     "AutostartSpec",
@@ -498,6 +540,7 @@ __all__ = [
     "render_schtasks_create",
     "render_schtasks_delete",
     "render_schtasks_query",
+    "render_start_task",
     "render_unregister_task",
     "render_wrapper_cmd",
     "show",

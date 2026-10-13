@@ -11,13 +11,21 @@ Offline checks, in order:
 - ``config``: ``config.toml`` and ``.env`` load (``ConfigError`` is a FAIL). A missing ``ANTHROPIC_API_KEY`` is a WARN
   because every read-only command works without it and the advisor falls back to template rationales.
 - ``session``: the browser profile exists and the ESPN login cookie's expiry gives ok (OK), expiring (WARN) or expired
-  (FAIL). The cookie comes from the injectable loader, which is called only once the profile exists, so a fresh
-  install never starts a browser; a profile that will not open (held by another ``fm`` process) is a WARN.
+  (FAIL). Reading the cookie means launching a headless browser on the profile, and a launch that coincides with a
+  tick's makes the tick's own session check fail, so the verdict comes first from the record every tick leaves in
+  ``tick-state.json`` (``session: {status, expires_at, checked_at, detail}``, :func:`fm.jobs.tick.session_record`).
+  Only a caller that passes ``launch_browser=True`` (``fm doctor``) may launch, and only when the run lock is free
+  (it is held for the launch and released right after, so no tick starts beside it) and the record is older than
+  :data:`SESSION_RECORD_FRESH` (or the online ESPN reads need the cookies themselves). The dashboard and the MCP tool
+  never launch: without a fresh record they report WARN "not checked recently" and point at ``fm doctor``. The loader
+  is called only once the profile exists, so a fresh install never starts a browser; a profile that will not open
+  (held by another ``fm`` process) is a WARN.
 - ``browser``: Microsoft Edge or Google Chrome is installed, found where Playwright's registry looks for the channel
   executables (:func:`find_browsers`) without launching anything.
-- ``notify``: the ``[notify]`` channel's secrets are in ``.env``.
+- ``notify``: the ``[notify]`` channel's secrets are in ``.env``; ``channel = "none"`` (no phone on purpose) is a WARN.
 - ``tick``: the last tick in ``tick-state.json``: WARN after :data:`TICK_WARN_AFTER`, FAIL after
-  :data:`TICK_FAIL_AFTER` or when no tick ever ran.
+  :data:`TICK_FAIL_AFTER` or when no tick ever ran. The fix is ``fm run`` when nothing holds the run lock, and a
+  pointer at ``logs/run.log`` when ``fm run`` holds it but its ticks are late.
 - ``sync:<league>``: the store's ``as_of`` per configured league: WARN after :data:`SYNC_WARN_AFTER` (the tick syncs
   a league hourly, so an older sync means the ticks are not syncing), FAIL after :data:`SYNC_FAIL_AFTER` or before
   the first sync.
@@ -25,13 +33,16 @@ Offline checks, in order:
 - ``proposals``: what is open, by status. ``deadlines``: open proposals due within :data:`DEADLINE_SOON` or overdue.
 - ``llm``: today's recorded Claude spend against ``[llm] daily_budget_usd``; the cap reached is a WARN.
 
-``--online`` adds ``espn:<league>`` (an ``mStatus`` read through :class:`fm.espn.client.EspnClient`) and ``channel``
-(Telegram ``getMe``, or the ntfy server's ``/v1/health``).
+The store checks need ``state.db``; on a fresh install it does not exist yet, and opening it would create and migrate
+it, so they report WARN "no state yet" instead. ``--online`` adds ``espn:<league>`` (an ``mStatus`` read through
+:class:`fm.espn.client.EspnClient`) and ``channel`` (Telegram ``getMe``, or the ntfy server's ``/v1/health``).
 
 Verdicts: FAIL means something cannot do its job and ``fix`` names the command that repairs it; WARN means it works but
 needs attention; SKIP means the check could not run because an earlier one failed (no config, no session). This
-module reads only: it never touches ESPN's write path and imports neither ``fm.executor`` nor the browser flows,
-and it stays clear of the tick's and the advisor's import graphs so the dashboard can load it cheaply.
+module reads only: nothing is created or changed, except that a session launch with ``launch_browser=True`` takes the
+run lock for its duration (writing the holder record into ``run.lock``). It never touches ESPN's write path, imports
+neither ``fm.executor`` nor the browser flows, and stays clear of the tick's and the advisor's import graphs so the
+dashboard can load it cheaply.
 """
 
 from __future__ import annotations
@@ -55,6 +66,8 @@ from fm.config import Config, ConfigError, League, load_config
 from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus, describe, load_session
 from fm.espn.client import EspnAuthError, EspnClient, EspnClientError
 from fm.espn.models import LeagueStatus
+from fm.jobs.runlock import RunLock, RunLockHeld
+from fm.jobs.scheduler_base import LOGS_DIRNAME, RUN_LOG_FILENAME
 from fm.notify import NotifyError, NtfyChannel, TelegramChannel, open_channel
 from fm.notify.ntfy import DEFAULT_SERVER, REQUEST_TIMEOUT
 from fm.proposals import PauseState, pause_state
@@ -62,6 +75,11 @@ from fm.store import OPEN_PROPOSAL_STATUSES, ProposalRow, SchemaError, Store
 
 TICK_STATE_FILE = "tick-state.json"
 """``fm.jobs.tick.STATE_FILE``, read here directly: importing the tick would pull in the executor and the flows."""
+SESSION_RECORD_FRESH = timedelta(minutes=30)
+"""A tick's session record younger than this is the session verdict; an older one is "not checked recently"."""
+TICK_LATE_FIX = f"fm run is running but ticks are late: check {LOGS_DIRNAME}/{RUN_LOG_FILENAME}"
+"""The tick check's fix when ``fm run`` holds the run lock: starting another loop would not help."""
+NO_STATE = "no state yet: state.db does not exist (run fm setup, or fm sync once config.toml is in place)"
 TICK_WARN_AFTER = timedelta(minutes=30)
 """A tick older than this is overdue (the scheduler runs one every few minutes)."""
 TICK_FAIL_AFTER = timedelta(hours=6)
@@ -166,30 +184,46 @@ def run_checks(
     *,
     online: bool = False,
     now: datetime | None = None,
+    launch_browser: bool = False,
     config_loader: Callable[[], Config] = load_config,
     store_opener: Callable[[], Store] = Store.open,
+    state_db: Path | None = None,
     session_loader: Callable[[], EspnSession] = load_session,
     profile_dir: Path | None = None,
     browsers: Callable[[], Mapping[str, Path]] = find_browsers,
     tick_state: Path | None = None,
+    run_lock: RunLock | None = None,
     pause_reader: Callable[[], PauseState | None] = pause_state,
     client_factory: EspnClientFactory = _default_client,
     http_client: httpx.Client | None = None,
 ) -> list[Check]:
-    """Every check, in the order the module docstring lists them. Pure data; nothing is written anywhere.
+    """Every check, in the order the module docstring lists them. Pure data; nothing is written anywhere unless
+    ``launch_browser`` lets the session check take the run lock.
 
-    ``session_loader`` is called only when ``profile_dir`` (default ``fm.paths.browser_profile_dir()``) holds a
-    profile. ``online`` adds the ESPN reads (through ``client_factory``) and the channel ping (through
-    ``http_client`` when given, else the channel's own client).
+    The session verdict comes from the last tick's record in ``tick_state`` (default ``tick-state.json``) when it is
+    fresh. ``session_loader`` (which launches a browser on the profile) is called only when ``launch_browser`` is set,
+    ``profile_dir`` (default ``fm.paths.browser_profile_dir()``) holds a profile, ``run_lock`` (default the real one,
+    as ``fm doctor``) can be taken without waiting, and the record is stale or ``online`` needs the cookies. The store
+    checks open ``state.db`` through ``store_opener`` only when ``state_db`` (default ``fm.paths.state_db()``) exists.
+    ``online`` adds the ESPN reads (through ``client_factory``) and the channel ping (through ``http_client`` when
+    given, else the channel's own client).
     """
     at = datetime.now(UTC) if now is None else now.astimezone(UTC)
     profile = profile_dir if profile_dir is not None else paths.browser_profile_dir()
     state_file = tick_state if tick_state is not None else paths.config_dir() / TICK_STATE_FILE
+    database = state_db if state_db is not None else paths.state_db()
+    lock = run_lock if run_lock is not None else RunLock(command="fm doctor")
+    record = _tick_record(state_file)
 
     config_check, config = _config(config_loader)
-    session_check, session = _session(profile, session_loader, at)
-    checks = [config_check, session_check, _browser(browsers()), _notify(config), _tick(state_file, at)]
-    checks.extend(_store_checks(store_opener, config, pause_reader(), at))
+    session_check, session = _session(
+        profile, session_loader, at, record=record.session, launch=launch_browser, need_cookies=online, lock=lock
+    )
+    checks = [config_check, session_check, _browser(browsers()), _notify(config), _tick(record, state_file, at, lock)]
+    if database.exists():
+        checks.extend(_store_checks(store_opener, config, pause_reader(), at))
+    else:
+        checks.extend(_no_state(config, pause_reader()))
     if online:
         if config is None:
             checks.append(_skipped("espn"))
@@ -220,14 +254,96 @@ def _config(loader: Callable[[], Config]) -> tuple[Check, Config | None]:
     return Check("config", CheckStatus.OK, detail), config
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionRecord:
+    """The session verdict a tick left in ``tick-state.json`` (:func:`fm.jobs.tick.session_record`)."""
+
+    status: str
+    checked_at: datetime
+    expires_at: datetime | None
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TickRecord:
+    last_tick: datetime | None = None
+    session: _SessionRecord | None = None
+
+
+def _tick_record(path: Path) -> _TickRecord:
+    """``last_tick`` and the session record from the tick's state file; either is ``None`` when the file is missing,
+    unreadable, or the value is malformed or naive (the tick itself ignores such a file, so it has no memory either)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _TickRecord()
+    if not isinstance(data, dict):
+        return _TickRecord()
+    return _TickRecord(last_tick=_aware(data.get("last_tick")), session=_session_record(data.get("session")))
+
+
+def _session_record(value: object) -> _SessionRecord | None:
+    if not isinstance(value, dict):
+        return None
+    status, detail = value.get("status"), value.get("detail")
+    checked_at = _aware(value.get("checked_at"))
+    if not isinstance(status, str) or checked_at is None:
+        return None
+    return _SessionRecord(
+        status=status,
+        checked_at=checked_at,
+        expires_at=_aware(value.get("expires_at")),
+        detail=detail if isinstance(detail, str) else "",
+    )
+
+
+def _aware(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return None if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
 def _session(
-    profile: Path, loader: Callable[[], EspnSession], now: datetime
+    profile: Path,
+    loader: Callable[[], EspnSession],
+    now: datetime,
+    *,
+    record: _SessionRecord | None,
+    launch: bool,
+    need_cookies: bool,
+    lock: RunLock,
 ) -> tuple[Check, EspnSession | None]:
-    """The session verdict and, when ESPN reads can use it, the session itself."""
+    """The session verdict and, when it was loaded and ESPN reads can use it, the session itself."""
     name = "session"
     if not profile_exists(profile):
         detail = "no browser profile yet: nothing is signed in to ESPN"
         return Check(name, CheckStatus.FAIL, detail, fix="fm login"), None
+    fresh = record is not None and now - record.checked_at < SESSION_RECORD_FRESH
+    if launch and (need_cookies or not fresh):
+        try:
+            lock.acquire()
+        except RunLockHeld as exc:
+            held_by = exc.holder.describe() if exc.holder is not None else "another fm process"
+            if record is not None and fresh:
+                return _from_record(record, now), None
+            return _not_checked(record, now, f"{held_by} holds the run lock, so no browser is started beside it"), None
+        except OSError as exc:
+            return _not_checked(record, now, f"the run lock could not be taken ({exc})"), None
+        try:
+            return _load_session(loader, now)
+        finally:
+            lock.release()
+    if record is not None and fresh:
+        return _from_record(record, now), None
+    return _not_checked(record, now, "fm doctor checks it", fix="fm doctor" if not launch else None), None
+
+
+def _load_session(loader: Callable[[], EspnSession], now: datetime) -> tuple[Check, EspnSession | None]:
+    name = "session"
     try:
         session = loader()
     except NotLoggedInError as exc:
@@ -247,6 +363,36 @@ def _session(
             return Check(name, CheckStatus.OK, detail), session
 
 
+def _from_record(record: _SessionRecord, now: datetime) -> Check:
+    """The verdict a fresh tick record gives. A cookie verdict (ok, expiring, expired) is judged again against ``now``
+    from the recorded expiry date, so the line reads exactly as a fresh load would."""
+    name = "session"
+    checked = f" (the tick checked it {_age(now - record.checked_at)} ago)"
+    status = record.status
+    detail = record.detail
+    if status in tuple(SessionStatus) and record.expires_at is not None:
+        cookie = EspnSession(espn_s2="", swid="", expires_at=record.expires_at)
+        status, detail = cookie.status(now).value, describe(cookie, now)
+    match status:
+        case SessionStatus.OK:
+            return Check(name, CheckStatus.OK, detail + checked)
+        case SessionStatus.EXPIRING:
+            return Check(name, CheckStatus.WARN, detail + checked, fix="fm login")
+        case "unavailable":
+            return Check(name, CheckStatus.WARN, detail + checked + "; another fm process may have held the profile")
+        case _:  # expired, missing: nothing reads or writes until fm login
+            return Check(name, CheckStatus.FAIL, detail + checked, fix="fm login")
+
+
+def _not_checked(record: _SessionRecord | None, now: datetime, why: str, *, fix: str | None = None) -> Check:
+    if record is None:
+        last = "no tick has recorded it yet"
+    else:
+        last = f"the last tick checked it {_age(now - record.checked_at)} ago ({record.status})"
+    detail = f"ESPN session not checked recently: {last}; {why}"
+    return Check("session", CheckStatus.WARN, detail, fix=fix if fix is not None else "fm login --check")
+
+
 def _browser(installed: Mapping[str, Path]) -> Check:
     if not installed:
         detail = "no supported browser found; install Microsoft Edge or Google Chrome (fm login drives it)"
@@ -259,6 +405,12 @@ def _notify(config: Config | None) -> Check:
     if config is None:
         return _skipped("notify")
     channel = config.notify.channel
+    if channel == "none":
+        detail = (
+            'no phone channel (notify.channel = "none"): proposals wait for fm proposals or the dashboard, and '
+            "alerts stay in the logs"
+        )
+        return Check("notify", CheckStatus.WARN, detail, fix="fm notify setup")
     missing = [name for name in config.missing_secrets() if name != ADVISOR_KEY]
     if missing:
         detail = f"{channel} is not set up: {', '.join(missing)} missing from .env"
@@ -266,31 +418,40 @@ def _notify(config: Config | None) -> Check:
     return Check("notify", CheckStatus.OK, f"{channel} configured")
 
 
-def _tick(path: Path, now: datetime) -> Check:
-    last = _last_tick(path)
+def _tick(record: _TickRecord, path: Path, now: datetime, lock: RunLock) -> Check:
+    last = record.last_tick
     if last is None:
-        return Check("tick", CheckStatus.FAIL, f"no tick has run yet (no last tick in {path.name})", fix="fm run")
+        detail = f"no tick has run yet (no last tick in {path.name})"
+        return Check("tick", CheckStatus.FAIL, detail, fix=_tick_fix(lock))
     age = now - last
     detail = f"last tick {_age(age)} ago ({render.stamp(last)})"
     if age >= TICK_FAIL_AFTER:
-        return Check("tick", CheckStatus.FAIL, f"{detail}; ticks have stopped", fix="fm run")
+        return Check("tick", CheckStatus.FAIL, f"{detail}; ticks have stopped", fix=_tick_fix(lock))
     if age >= TICK_WARN_AFTER:
-        return Check("tick", CheckStatus.WARN, f"{detail}; the next tick is overdue", fix="fm run")
+        return Check("tick", CheckStatus.WARN, f"{detail}; the next tick is overdue", fix=_tick_fix(lock))
     return Check("tick", CheckStatus.OK, detail)
 
 
-def _last_tick(path: Path) -> datetime | None:
-    """``last_tick`` from the tick's state file; ``None`` when the file is missing, unreadable or naive (the tick
-    itself ignores such a file, so it has no memory either)."""
+def _tick_fix(lock: RunLock) -> str:
+    """``fm run`` when nothing holds the run lock; when something does (``fm run``, or a tick that is stuck), starting
+    another loop would only wait on it, so the fix points at the log instead. A lock file that does not exist is not
+    probed (probing would create it)."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        value = data.get("last_tick") if isinstance(data, dict) else None
-        if not isinstance(value, str):
-            return None
-        parsed = datetime.fromisoformat(value)
-    except (OSError, ValueError):
-        return None
-    return None if parsed.tzinfo is None else parsed.astimezone(UTC)
+        held = lock.path.exists() and lock.is_locked()
+    except OSError:
+        held = False
+    return TICK_LATE_FIX if held else "fm run"
+
+
+def _no_state(config: Config | None, paused: PauseState | None) -> list[Check]:
+    """The store checks on an installation that has no ``state.db`` yet: WARN, not FAIL (nothing is broken, nothing
+    has run), and not opened, since opening would create and migrate it."""
+    fix = "fm sync" if config is not None else "fm setup"
+    syncs = [f"sync:{league.key}" for league in config.leagues] if config is not None else ["sync"]
+    checks = [Check(name, CheckStatus.WARN, NO_STATE, fix=fix) for name in syncs]
+    checks.append(_pause(paused))
+    checks.extend(Check(name, CheckStatus.WARN, NO_STATE, fix=fix) for name in ("proposals", "deadlines", "llm"))
+    return checks
 
 
 def _store_checks(
@@ -410,6 +571,8 @@ def _espn(league: League, session: EspnSession | None, factory: EspnClientFactor
 def _channel(config: Config | None, http_client: httpx.Client | None) -> Check:
     if config is None:
         return _skipped("channel")
+    if config.notify.channel == "none":
+        return Check("channel", CheckStatus.SKIP, 'no phone channel to ping (notify.channel = "none")')
     try:
         channel = open_channel(config, client=http_client)
     except NotifyError as exc:
@@ -463,10 +626,13 @@ __all__ = [
     "BROWSER_NAMES",
     "BROWSER_PATHS",
     "DEADLINE_SOON",
+    "NO_STATE",
     "NTFY_HEALTH_PATH",
+    "SESSION_RECORD_FRESH",
     "SYNC_FAIL_AFTER",
     "SYNC_WARN_AFTER",
     "TICK_FAIL_AFTER",
+    "TICK_LATE_FIX",
     "TICK_STATE_FILE",
     "TICK_WARN_AFTER",
     "Check",

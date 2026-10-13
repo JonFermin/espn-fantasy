@@ -29,7 +29,9 @@ which does, in this order:
    rejected (:func:`reject_alternatives`) rather than left to auto-approve at T-15 and fail. Failures are alerted
    with a link to the team page.
 5. **Record** the tick (``tick-state.json`` under the config dir: last run, windows run, proposals notified, alerts
-   sent, inputs refreshed), so the next tick knows what it already did and what closed in between.
+   sent, inputs refreshed, and the session verdict of step 2 as ``session: {status, expires_at, checked_at, detail}``),
+   so the next tick knows what it already did and what closed in between, and ``fm.health`` can report the session
+   without launching a second browser on the profile.
 
 Decision modules register at import (:mod:`fm.decide.registry` has no discovery helper), so this module imports
 :mod:`fm.decide.lineup` and :mod:`fm.decide.waivers`. A decision is called as ``fn(store, config, league_row,
@@ -199,6 +201,9 @@ class TickState:
     """Alert key -> when it was last sent, for the ones that repeat."""
     inputs: dict[str, datetime] = field(default_factory=dict[str, datetime])
     """League key -> when its availability inputs were last refreshed."""
+    session: dict[str, str | None] | None = None
+    """The last session verdict (:func:`session_record`): ``fm.health`` reads it instead of launching the browser on
+    the profile a tick may be using."""
 
     @classmethod
     def load(cls, path: Path) -> TickState:
@@ -217,6 +222,7 @@ class TickState:
                 notified={int(v) for v in data.get("notified", [])},
                 alerts=_stamps(data.get("alerts", {})),
                 inputs=_stamps(data.get("inputs", {})),
+                session=_session_dict(data.get("session")),
             )
         except (TypeError, ValueError, AttributeError) as exc:
             logger.warning("tick: ignoring malformed state file %s: %s", path, exc)
@@ -229,6 +235,7 @@ class TickState:
             "notified": sorted(self.notified),
             "alerts": {k: v.isoformat() for k, v in sorted(self.alerts.items())},
             "inputs": {k: v.isoformat() for k, v in sorted(self.inputs.items())},
+            "session": self.session,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(path.name + ".tmp")
@@ -248,6 +255,24 @@ def _stamp(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         raise ValueError(f"naive timestamp {value!r}")
     return parsed.astimezone(UTC)
+
+
+def session_record(check: SessionCheck, now: datetime) -> dict[str, str | None]:
+    """``{status, expires_at, checked_at, detail}`` for ``tick-state.json``: the verdict and the cookie's expiry, never
+    a cookie value."""
+    expires_at = check.session.expires_at if check.session is not None else None
+    return {
+        "status": check.verdict.value,
+        "expires_at": None if expires_at is None else expires_at.isoformat(),
+        "checked_at": now.isoformat(),
+        "detail": check.detail,
+    }
+
+
+def _session_dict(value: object) -> dict[str, str | None] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): item if isinstance(item, str) else None for key, item in value.items()}
 
 
 def _stamps(value: object) -> dict[str, datetime]:
@@ -641,6 +666,7 @@ class _Tick:
                     league_id=row.league_id,
                 )
         self.session = check_session(self.session_loader, now=self.now)
+        self.state.session = session_record(self.session, self.now)
         if self.session.verdict is not SessionVerdict.OK:
             self._alert(
                 f"ESPN session {self.session.verdict.value}", self.session.detail, key=f"session:{self.session.verdict}"
@@ -1156,6 +1182,7 @@ __all__ = [
     "refresh_nba_inputs",
     "refresh_nfl_inputs",
     "reject_alternatives",
+    "session_record",
     "state_path",
     "tick",
     "tracked_players",
