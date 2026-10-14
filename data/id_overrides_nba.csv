@@ -18,3 +18,4 @@
 # add it here and sync again. A row also confirms a partial match (Herb Jones -> Herbert Jones) and silences its
 # warning, and one with an empty source_id undoes a wrong match on the name alone.
 espn_id,source,source_id,name,note
+5041955,nba,,Darryn Peterson,2026 rookie with no nba.com history; nba.com Drew Peterson (CHA) shares his surname and initial but is not him
