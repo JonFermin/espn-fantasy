@@ -56,8 +56,8 @@ def set_preset(
 ) -> None:
     """Set a league's policy preset in config.toml and show the policy that results.
 
-    The preset fills every \\[league.policy] and \\[league.trade_finder] key the league leaves unset; a key written in the
-    file still wins, and the command names any such key (or removes them with --reset-overrides). The edit is
+    The preset fills every \\[league.policy] and \\[league.trade_finder] key the league leaves unset; a key written
+    in the file still wins, and the command names any such key (or removes them with --reset-overrides). The edit is
     validated before the file changes, the replace is atomic, and the previous file is kept as config.toml.bak.
     """
     if preset not in PRESET_NAMES:
