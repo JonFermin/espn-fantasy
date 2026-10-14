@@ -638,7 +638,7 @@ import-light: no executor, flows, tick, advisor, fastmcp or anthropic (a test pi
 ### 12.4 Dashboard
 
 `src/fm/web/`: a Starlette app (`fm.web.app.create_app`) with a JSON API and one static page
-(`src/fm/web/static/index.html`, `app.js`, `app.css`). It is vanilla JS with no CDN and no build step, works offline,
+(`src/fm/web/static/index.html`, `app.js`, `app.css`, plus `signin.html` shown without a session). It is vanilla JS with no CDN and no build step, works offline,
 has light and dark themes and stays usable at phone width. `fm.web.__init__` holds constants only, so the CLI never
 imports Starlette.
 
@@ -831,9 +831,9 @@ and any key written there wins over the preset. `notify.channel` is `telegram`, 
 [[league]]
 key = "nfl"                   # short name used on the command line (fm sync --league <key>)
 sport = "nfl"                 # nfl | nba
-espn_league_id = 0            # leagueId=… in the league URL
+espn_league_id = 1234567      # leagueId=… in the league URL
 season = 2026
-team_id = 0                   # teamId=… on your team page
+team_id = 1                   # teamId=… on your team page
 preset = "balanced"           # hands_off | balanced | ask_first
 
 [league.policy]               # optional; each key written here overrides the preset
@@ -842,9 +842,9 @@ untouchables = []             # player names or ESPN IDs; resolved at sync
 [[league]]
 key = "nba"
 sport = "nba"
-espn_league_id = 0
+espn_league_id = 7654321
 season = 2027                 # ESPN labels NBA seasons by end year; confirm with seasonId= in the URL
-team_id = 0
+team_id = 1
 preset = "balanced"
 
 [llm]
@@ -898,7 +898,7 @@ espn-fantasy/
     setup/        wizard.py (fm setup)
     web/          app.py, login.py, server.py, static/ (the dashboard)
     claude/       install.py, assets/ (fm claude install)
-    store/        db.py, models.py, migrations/
+    store/        db.py, models.py, repos.py, migrations/
     espn/         client.py, models.py, auth.py, settings.py, ids.py, discover.py, calendar.py
     browser/      session.py, transactions.py, selectors.py, canary.py, drills.py, fakes.py,
                   flows/{lineup,add_drop,waiver,trade}.py

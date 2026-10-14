@@ -33,3 +33,4 @@ auto-roadmap-summary.md
 # Claude Code local state: agent worktrees and personal permission settings
 .claude/worktrees/
 .claude/settings.local.json
+.claude/.doc-lint-hash
