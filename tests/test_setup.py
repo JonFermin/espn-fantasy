@@ -1,4 +1,4 @@
-"""``fm setup`` (ROADMAP #53, docs/PLUG_AND_PLAY.md section 6): the wizard over fake collaborators, offline.
+"""``fm setup`` (ROADMAP #53, docs/DESIGN.md section 12.2): the wizard over fake collaborators, offline.
 
 Every external effect is a fake from :class:`Fakes`: the session loader and login, discovery and league
 confirmation, the phone setup (which writes made-up ntfy topics or Telegram values to ``.env`` the way the real one

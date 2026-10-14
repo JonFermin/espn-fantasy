@@ -1,4 +1,4 @@
-"""Phone channel setup, shared by ``fm notify setup`` and the ``fm setup`` wizard (PLUG_AND_PLAY section 6).
+"""Phone channel setup, shared by ``fm notify setup`` and the ``fm setup`` wizard (DESIGN section 12.2).
 
 Telegram: a bot from @BotFather (``/newbot``) whose token is ``TELEGRAM_BOT_TOKEN``. :func:`setup_telegram` proves
 the token with ``getMe``, prints a one-time code and a ``t.me`` link that sends it, and saves the private chat that

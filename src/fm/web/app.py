@@ -1,4 +1,4 @@
-"""The dashboard's Starlette app (PLUG_AND_PLAY section 7, ROADMAP #54): a JSON API and one static page.
+"""The dashboard's Starlette app (DESIGN section 12.4, ROADMAP #54): a JSON API and one static page.
 
 :func:`create_app` builds it for the port it will be served on. Every endpoint reads through the same modules the CLI
 and the MCP server use, per request, so the page shows what ``fm sync`` and the ticks stored since it opened:

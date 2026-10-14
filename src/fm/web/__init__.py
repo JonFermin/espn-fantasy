@@ -1,4 +1,4 @@
-"""The local dashboard (PLUG_AND_PLAY section 7, ROADMAP #54): ``fm ui`` serves it, and ``fm run`` serves it beside
+"""The local dashboard (DESIGN section 12.4, ROADMAP #54): ``fm ui`` serves it, and ``fm run`` serves it beside
 the loop unless ``--no-ui``.
 
 - :mod:`fm.web.app`: the Starlette app. A JSON API over :mod:`fm.views`, :mod:`fm.health`, the proposal queue, the

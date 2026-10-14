@@ -1,4 +1,4 @@
-"""Claude integration (docs/PLUG_AND_PLAY.md section 8, ROADMAP #55): ``fm claude install|uninstall|show``.
+"""Claude integration (docs/DESIGN.md section 12.5, ROADMAP #55): ``fm claude install|uninstall|show``.
 
 :mod:`fm.claude.install` registers the read-only MCP server (:mod:`fm.mcp_server`) with Claude Code and Claude
 Desktop and installs a skill and slash commands for Claude Code. The skill and commands are packaged files under

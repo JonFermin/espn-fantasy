@@ -1,4 +1,4 @@
-"""Connect Claude Code and Claude Desktop to ``fm`` (docs/PLUG_AND_PLAY.md section 8, ROADMAP #55).
+"""Connect Claude Code and Claude Desktop to ``fm`` (docs/DESIGN.md section 12.5, ROADMAP #55).
 
 Both clients get the same MCP server, ``espn-fantasy``, started as ``<uv> run --project <repo> fm mcp``
 (:class:`McpCommand`). A client starts it with its own environment, so ``FM_CONFIG_DIR`` / ``FM_CACHE_DIR`` go into the

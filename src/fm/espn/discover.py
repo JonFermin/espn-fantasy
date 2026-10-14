@@ -1,4 +1,4 @@
-"""League discovery for ``fm setup`` (docs/PLUG_AND_PLAY.md section 2): which ESPN leagues and teams a signed-in
+"""League discovery for ``fm setup`` (docs/DESIGN.md section 12.2): which ESPN leagues and teams a signed-in
 account has, from the fan API or from a pasted league URL, confirmed against the league's own views.
 
 Read-only: every call here is a GET, and nothing here touches ``fm.executor`` or ``fm.browser``. The pieces:

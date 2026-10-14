@@ -1,4 +1,4 @@
-"""The ``fm run`` loop (PLUG_AND_PLAY section 4): ticks on a wall-clock timer and approvals in between, one process.
+"""The ``fm run`` loop (DESIGN section 13.1): ticks on a wall-clock timer and approvals in between, one process.
 
 :func:`run_forever` replaces the scheduled ``fm tick`` plus a separately started ``fm bot``:
 

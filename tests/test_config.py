@@ -155,7 +155,7 @@ FINDER_ON = TradeFinder(enabled=True, min_accept=0.5, min_title_gain=0.015, min_
 
 
 class TestPresets:
-    """``preset`` fills the unset policy and trade_finder keys; without one nothing changes (PLUG_AND_PLAY 1)."""
+    """``preset`` fills the unset policy and trade_finder keys; without one nothing changes (DESIGN section 11)."""
 
     def test_fixture_home_loads_to_the_same_config_as_before(self) -> None:
         config = load_config(HOME, environ={})

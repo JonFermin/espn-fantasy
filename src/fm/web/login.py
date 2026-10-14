@@ -1,4 +1,4 @@
-"""Signing in to the dashboard (PLUG_AND_PLAY section 7): one-time login links, the URL file, and finding a dashboard
+"""Signing in to the dashboard (DESIGN section 12.4): one-time login links, the URL file, and finding a dashboard
 that is already served. Standard library only, so ``fm ui`` can look for a running dashboard without loading Starlette.
 
 Why a sign-in at all: the dashboard binds 127.0.0.1, which every account on the machine (and every process) can reach.

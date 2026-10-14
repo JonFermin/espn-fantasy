@@ -1,4 +1,4 @@
-"""The ``fm setup`` wizard (docs/PLUG_AND_PLAY.md section 6): from a fresh checkout to a running installation.
+"""The ``fm setup`` wizard (docs/DESIGN.md section 12.2): from a fresh checkout to a running installation.
 
 :func:`run_setup` walks the steps in order, printing through an injected ``echo`` and asking through an injected
 :class:`Prompts`:

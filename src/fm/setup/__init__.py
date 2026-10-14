@@ -1,4 +1,4 @@
-"""``fm setup``'s logic (docs/PLUG_AND_PLAY.md section 6), kept apart from the prompts in ``fm.commands.setup``.
+"""``fm setup``'s logic (docs/DESIGN.md section 12.2), kept apart from the prompts in ``fm.commands.setup``.
 
 Usage::
 

@@ -1,5 +1,5 @@
 """``fm setup``: sign in, find your leagues, pick presets, add keys, pair the phone, write the config, sync, and start
-``fm run`` at logon, in one command (docs/PLUG_AND_PLAY.md section 6).
+``fm run`` at logon, in one command (docs/DESIGN.md section 12.2).
 
 The steps live in :mod:`fm.setup.wizard`; this module holds the terminal prompts (:class:`TerminalPrompts`) and
 :func:`live_deps`, the real collaborators: the browser profile's session and the ``fm login`` flow, ESPN discovery
