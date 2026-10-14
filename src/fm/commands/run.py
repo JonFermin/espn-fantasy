@@ -1,4 +1,4 @@
-"""``fm run``: ticks and phone approvals in one long-running foreground process (PLUG_AND_PLAY section 4).
+"""``fm run``: ticks and phone approvals in one long-running foreground process (DESIGN section 13.1).
 
 It is what ``fm autostart install`` starts at logon, and what replaces the scheduled ``fm tick`` plus a separately
 started ``fm bot``: :func:`fm.jobs.runner.run_forever` ticks every ``--every`` minutes by wall clock (so a laptop

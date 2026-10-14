@@ -1,5 +1,5 @@
-"""``fm ui [--port 8711] [--no-open]``: open the local dashboard, serving it first when nothing does yet (PLUG_AND_PLAY
-section 7, ROADMAP #54).
+"""``fm ui [--port 8711] [--no-open]``: open the local dashboard, serving it first when nothing does yet (DESIGN
+section 12.4, ROADMAP #54).
 
 The dashboard (:mod:`fm.web`) shows the leagues, the proposal queue with Approve and Reject, lineup and waiver plans,
 the reports, settings and health. It is served on ``127.0.0.1`` only, records decisions without executing them (``fm

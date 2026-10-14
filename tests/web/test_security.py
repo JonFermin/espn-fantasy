@@ -1,4 +1,4 @@
-"""The dashboard's guard (ROADMAP #54, PLUG_AND_PLAY section 7): what a request needs before it reaches a route.
+"""The dashboard's guard (ROADMAP #54, DESIGN section 12.4): what a request needs before it reaches a route.
 
 - A ``Host`` other than ``127.0.0.1:<port>`` / ``localhost:<port>`` is refused with 400 on every path, so a page
   that rebinds its own name to 127.0.0.1 reads nothing.

@@ -1,4 +1,4 @@
-"""The run lock (PLUG_AND_PLAY section 4): one process at a time ticks and executes.
+"""The run lock (DESIGN section 13.2): one process at a time ticks and executes.
 
 ``fm run`` holds ``run.lock`` under the config dir for its lifetime and ``fm tick`` holds it for one tick. A scheduled
 tick that fires while the loop is up therefore skips (``fm run is active (pid N); skipping``, exit 0) instead of

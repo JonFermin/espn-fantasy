@@ -1,4 +1,4 @@
-"""Health checks: what is broken and how to fix it (docs/PLUG_AND_PLAY.md section 3, ROADMAP #50).
+"""Health checks: what is broken and how to fix it (docs/DESIGN.md section 12.3, ROADMAP #50).
 
 :func:`run_checks` answers a fixed list of questions about the installation and returns plain data, one
 :class:`Check` per question, so ``fm doctor``, the dashboard (#54) and the MCP ``health`` tool (#55) show one set of

@@ -17,7 +17,7 @@ Every ``render_*`` function is pure and :func:`install`, :func:`uninstall` and :
 :class:`Runner`, so tests render the commands and never touch the real scheduler (nothing here is run for real in a
 unit test). ``fm schedule install|uninstall|show`` (:mod:`fm.commands.schedule`) drives it through :data:`WINDOWS`.
 
-The logon job for ``fm run`` (PLUG_AND_PLAY section 4, :data:`WINDOWS_AUTOSTART`, driven by ``fm autostart``) is
+The logon job for ``fm run`` (DESIGN section 13.3, :data:`WINDOWS_AUTOSTART`, driven by ``fm autostart``) is
 registered through PowerShell's ``Register-ScheduledTask`` rather than ``schtasks``, because only the cmdlets expose
 an at-logon trigger for one user together with restart-on-failure, an unlimited run time and the power settings:
 

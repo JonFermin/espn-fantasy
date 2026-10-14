@@ -1,4 +1,4 @@
-"""Serving the dashboard (PLUG_AND_PLAY section 7): one socket on ``127.0.0.1`` and uvicorn on it.
+"""Serving the dashboard (DESIGN section 12.4): one socket on ``127.0.0.1`` and uvicorn on it.
 
 :func:`bind_dashboard` binds the socket itself, before uvicorn starts, for three reasons:
 

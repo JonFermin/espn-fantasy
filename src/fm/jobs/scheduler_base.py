@@ -11,7 +11,7 @@ Each platform renders that wrapper and registers it its own way: :mod:`fm.jobs.s
 a :class:`Backend`, and ``fm schedule`` (:mod:`fm.commands.schedule`) picks one by ``sys.platform``. Every backend
 action takes an injectable :class:`Runner`, so tests render the commands and never touch a real scheduler.
 
-The second job (PLUG_AND_PLAY section 4) is ``fm run`` at logon: :class:`AutostartSpec` and :class:`AutostartBackend`
+The second job (DESIGN section 13.3) is ``fm run`` at logon: :class:`AutostartSpec` and :class:`AutostartBackend`
 are the same shape for the long-running loop, which the backends register as a logon task (Windows, running
 ``uvw.exe`` so no console window stays open) or a ``KeepAlive`` LaunchAgent (macOS). The tick job stays installed
 beside it as the Windows wake timer: a tick that finds the run lock held exits at once (:mod:`fm.jobs.runlock`).

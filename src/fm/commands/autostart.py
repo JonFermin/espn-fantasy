@@ -1,4 +1,4 @@
-"""``fm autostart install|uninstall|show``: start ``fm run`` at logon (PLUG_AND_PLAY section 4).
+"""``fm autostart install|uninstall|show``: start ``fm run`` at logon (DESIGN section 13.3).
 
 The logon job goes through the platform's scheduler backend (:func:`backend`): on Windows a Task Scheduler task with
 an at-logon trigger for the current user, restart on failure and no run-time limit, whose action is ``uvw.exe`` (uv's

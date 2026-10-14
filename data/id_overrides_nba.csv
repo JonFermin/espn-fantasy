@@ -11,11 +11,19 @@
 # Example (synthetic): 9000001,nba,1641999,Veteran Two,ESPN has him on DEN after a trade; nba.com still on SAC
 #
 # A row pins the player to that nba.com id whatever the name match says, and takes the id out of play for everyone
-# else. The match already maps a player whose name only one nba.com player has, even when the team and position
-# disagree (a warning), and lets a rostered player nba.com lists nobody for through as no history (a rookie: also a
-# warning). `fm sync` stops only on a rostered player whose identity is in doubt: several nba.com players fit him, or
-# his namesake is mapped to someone else. Its error says why, names the candidates and prints the line to complete;
-# add it here and sync again. A row also confirms a partial match (Herb Jones -> Herbert Jones) and silences its
-# warning, and one with an empty source_id undoes a wrong match on the name alone.
+# else. Without a row, `fm sync` treats a rostered player as the match leaves him (docs/DESIGN.md section 7):
+#   maps, with a warning  NAME_ONLY: the only nba.com person with his name, though team or position disagree (an
+#                         offseason move), or a partial name on his team (Herb Jones -> Herbert Jones). A match on the
+#                         name alone is taken only to a person in this season's data (splits, DARKO, the active list).
+#   passes, no history    NO_HISTORY: nobody nba.com lists could be him (no free person with his surname on his team,
+#                         none anywhere with his surname and first initial), as with a rookie. ESPN's projection
+#                         values him; the verdict is saved, so a sync with a source down still passes him.
+#   stops the sync        several nba.com players fit him (AMBIGUOUS), his namesake is mapped to another player, the
+#                         only namesake is from an earlier season, or someone plausible is listed (NO_MATCH, e.g. a
+#                         veteran ESPN spells differently). The error says why, names the candidates and prints the
+#                         line to complete; add it here and sync again.
+# A row also confirms a partial or name-only match and silences its warning. One with an empty source_id runs the
+# player with no history: it undoes a wrong match on the name alone, or settles a NO_MATCH whose candidate is someone
+# else (as the row below does).
 espn_id,source,source_id,name,note
 5041955,nba,,Darryn Peterson,2026 rookie with no nba.com history; nba.com Drew Peterson (CHA) shares his surname and initial but is not him

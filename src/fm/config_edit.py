@@ -1,4 +1,4 @@
-"""The one writer of ``config.toml`` (PLUG_AND_PLAY section 1): ``fm setup``, ``fm config set-preset`` and the
+"""The one writer of ``config.toml`` (DESIGN section 14): ``fm setup``, ``fm config set-preset`` and the
 dashboard all edit the file through here, and ``fm.config`` only ever reads it.
 
 tomlkit keeps comments, key order and formatting, so a hand-edited file survives a programmatic edit, and a file

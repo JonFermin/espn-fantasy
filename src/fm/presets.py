@@ -1,4 +1,4 @@
-"""Policy presets: ``preset = "hands_off" | "balanced" | "ask_first"`` on a ``[[league]]`` (PLUG_AND_PLAY section 1).
+"""Policy presets: ``preset = "hands_off" | "balanced" | "ask_first"`` on a ``[[league]]`` (DESIGN section 11).
 
 A preset is plain data per sport: the ``[league.policy]`` and ``[league.trade_finder]`` keys it supplies. ``fm.config``
 applies it while validating a league, filling only the keys the file leaves unset, so a key written in the file always
@@ -48,7 +48,7 @@ class Preset:
         return PRESET_DESCRIPTIONS[self.name]
 
 
-# The table from PLUG_AND_PLAY section 1, one row per (preset, sport). Lineup kinds are the only ones that may be auto
+# The table in DESIGN section 11, one row per (preset, sport). Lineup kinds are the only ones that may be auto
 # besides add; add_drop and waiver are approve everywhere; the weekly cap follows the sport's cadence.
 _POLICY: Mapping[PresetName, Mapping[Sport, Mapping[str, object]]] = {
     "hands_off": {

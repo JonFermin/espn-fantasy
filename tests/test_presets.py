@@ -1,4 +1,4 @@
-"""The preset table (PLUG_AND_PLAY section 1) and the invariants no preset may loosen.
+"""The preset table (DESIGN section 11) and the invariants no preset may loosen.
 
 Loading a preset league through ``config.toml`` is covered by ``tests/test_config.py``; this file holds the data
 itself to the spec table and to CLAUDE.md: no ``trade*`` policy key, no ``auto`` add_drop or waiver, NBA ``add``

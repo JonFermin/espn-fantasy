@@ -1,4 +1,4 @@
-"""Start a child as the root of a process tree, and stop the whole tree (PLUG_AND_PLAY section 4).
+"""Start a child as the root of a process tree, and stop the whole tree (DESIGN section 13.1).
 
 Why this exists: on a real machine a scheduled ``fm tick`` hung for five days inside a headless Playwright session
 (``python`` -> ``node.exe`` -> ``msedge.exe``), and the Task Scheduler's two-hour limit killed only the wrapper at the

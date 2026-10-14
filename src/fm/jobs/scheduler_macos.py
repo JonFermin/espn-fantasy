@@ -20,7 +20,7 @@ Every ``render_*`` function is pure and :func:`install_agent`, :func:`uninstall_
 injectable :class:`Runner`, so tests render the commands and never touch launchd. ``fm schedule`` drives this backend
 through :data:`MACOS`.
 
-The logon job for ``fm run`` (PLUG_AND_PLAY section 4, :data:`MACOS_AUTOSTART`, driven by ``fm autostart``) is a
+The logon job for ``fm run`` (DESIGN section 13.3, :data:`MACOS_AUTOSTART`, driven by ``fm autostart``) is a
 second LaunchAgent, ``local.espn-fantasy-run.plist``, with ``RunAtLoad`` (start at login) and ``KeepAlive`` (restart
 whenever it exits), loaded into the same GUI domain. It needs no wrapper: the ``FM_*`` overrides go in the plist's
 ``EnvironmentVariables``, and the loop writes its own ``logs/run.log``; launchd's capture of its stdout/stderr (what

@@ -1,4 +1,4 @@
-"""``fm claude install|uninstall|show``: connect Claude Code and Claude Desktop to ``fm`` (PLUG_AND_PLAY section 8).
+"""``fm claude install|uninstall|show``: connect Claude Code and Claude Desktop to ``fm`` (DESIGN section 12.5).
 
 ``install`` registers the MCP server ``espn-fantasy`` (``<uv> run --project <repo> fm mcp``) with Claude Code through
 ``claude mcp add-json --scope user`` and copies the skill and the slash commands (``/espn-fantasy:week``, ``:lineup``,
