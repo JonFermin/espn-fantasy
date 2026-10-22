@@ -335,6 +335,7 @@ def iteration(clock: Clock, espn: FakeEspn, phone: FakePhone, syncs: Syncs, *, e
             clients=espn.client,
             syncer=syncs,
             refresh=None,  # the availability inputs come from nflverse and the NBA injury report: online only
+            news=None,  # the news feeds are online only
         )
 
     return run_forever(

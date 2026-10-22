@@ -16,11 +16,17 @@ which does, in this order:
    period between syncs with ``plugin.scoring_period_at(now, schedule)`` (periods turn at 03:00 ET,
    :data:`fm.sports.base.PERIOD_TURN`); compute the deadlines and decision windows (:mod:`fm.jobs.deadlines`: every
    lock from the pro schedule, international and holiday slots included, the NBA first-tip add cutoff, the waiver
-   run from the league settings); alert the windows missed since the previous tick; refresh the availability inputs
+   run from the league settings); alert the windows missed since the previous tick; poll the news
+   (:func:`fm.sources.news.poll_news`: ESPN and RotoWire, every :data:`NEWS_EVERY`), store the new items
+   (:func:`fm.model.relevance.ingest_news`, no key needed) and have the advisor triage the untriaged ones about the
+   sport's relevant players (:func:`fm.model.relevance.relevance_for` for every configured league of the sport, then
+   :func:`fm.advisor.news_triage.triage_news`, which stores bounded ``news_signals``; without an advisor,
+   :func:`fm.jobs.advice.advisor_for`, the items wait and the reason is noted); refresh the availability inputs
    (:func:`refresh_inputs`: nflverse practice reports for the NFL, the official injury report and the DARKO blend for
-   the NBA, a few times a day); run each registered decision whose window is due, **once** per window (the run is
+   the NBA, a few times a day, and at once when the triage stored new signals, since the stored availability rows are
+   where the decisions read them); run each registered decision whose window is due, **once** per window (the run is
    recorded in the tick's state file); push every new proposal to the phone with Approve / Reject buttons
-   (:func:`fm.notify.notify_proposal`).
+   (:func:`fm.notify.notify_proposal`). News and advisor failures are warnings, never a skipped league.
 4. **Auto-approve** at T-15 (:func:`fm.proposals.auto_approve_due`, which fires only inside :data:`AUTO_LEAD` and
    never while paused), then **execute** every approved proposal whose deadline has not passed, soonest deadline
    first, through :func:`fm.executor.execute`, the one write path. Nothing executes while paused
@@ -29,7 +35,8 @@ which does, in this order:
    rejected (:func:`reject_alternatives`) rather than left to auto-approve at T-15 and fail. Failures are alerted
    with a link to the team page.
 5. **Record** the tick (``tick-state.json`` under the config dir: last run, windows run, proposals notified, alerts
-   sent, inputs refreshed, and the session verdict of step 2 as ``session: {status, expires_at, checked_at, detail}``),
+   sent, inputs refreshed, news polled, and the session verdict of step 2 as ``session: {status, expires_at,
+   checked_at, detail}``),
    so the next tick knows what it already did and what closed in between, and ``fm.health`` can report the session
    without launching a second browser on the profile.
 
@@ -41,8 +48,10 @@ schedule=..., now=..., opponent_team_id=...)`` with only the keywords its signat
 
 ``fm bot`` records decisions and nothing more; :func:`execute_on_approval` is the ``on_result`` hook for
 :func:`fm.notify.listen` that executes an approval at once when its deadline is within :data:`NEAR_DEADLINE`, instead
-of waiting for the next tick. Every collaborator (session loader, ESPN client factory, sync, inputs refresh, runtime
-opener, phone channel, decision and flow registries, clock) is injectable, so tests run the whole tick offline.
+of waiting for the next tick. Every collaborator (session loader, ESPN client factory, sync, inputs refresh, news
+poller, advisor factory, runtime opener, phone channel, decision and flow registries, clock) is injectable, so tests
+run the whole tick offline. The advisor and its triage worker are imported only when a tick builds an advisor
+(:mod:`fm.jobs.advice`), so this module stays as light to import as the SDK-free tick was.
 """
 
 from __future__ import annotations
@@ -56,7 +65,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import fm.decide.lineup  # noqa: F401  (registers the NFL lineup decision)
 import fm.decide.lineup_daily  # noqa: F401  (registers the NBA daily lineup decision)
@@ -84,6 +93,7 @@ from fm.executor import (
     live_opener,
     reconcile_executions,
 )
+from fm.jobs.advice import advisor_for, advisor_off
 from fm.jobs.deadlines import (
     DEFAULT_HORIZON,
     LINEUP_DECISIONS,
@@ -98,7 +108,7 @@ from fm.jobs.sync import SyncError, SyncReport, sync
 from fm.model.availability import assess_stored, practice_from_nflverse
 from fm.model.ids import Crosswalk, CrosswalkError
 from fm.model.projections import BlendWeights
-from fm.model.relevance import opponent_from
+from fm.model.relevance import Relevance, ingest_news, opponent_from, relevance_for
 from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, notify_proposal, send_alert
 from fm.notify.messages import local_time, moves_text, proposal_name
 from fm.proposals import (
@@ -111,9 +121,13 @@ from fm.proposals import (
 from fm.proposals.policy import as_utc, stored_settings
 from fm.sources.base import SourceError
 from fm.sources.nba_injuries import NbaInjuriesSource
+from fm.sources.news import NewsPoll, poll_news
 from fm.sources.nflverse import NflverseSource
 from fm.sports.base import ScheduleLike, SportPlugin, fantasy_day, plugin_for
 from fm.store import LeagueRow, ProposalRow, Store, utc_now
+
+if TYPE_CHECKING:
+    from fm.advisor.client import AdvisorClient
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +140,9 @@ SYNC_MAX_AGE = timedelta(hours=1)
 INPUTS_EVERY: Mapping[Sport, timedelta] = {"nfl": timedelta(hours=8), "nba": timedelta(hours=1)}
 """How often the availability inputs are refreshed: nflverse practice reports a few times a day, the NBA official
 injury report (published through the afternoon of a game day) hourly."""
+NEWS_EVERY: Mapping[Sport, timedelta] = {"nfl": timedelta(hours=1), "nba": timedelta(minutes=30)}
+"""How often a league's news is polled and triaged: NBA news turns over by the half hour on a game day (late
+scratches), NFL news by the hour. The feeds themselves are cached for :data:`fm.sources.news.POLL_INTERVAL`."""
 ALERT_REPEAT = timedelta(hours=12)
 """A standing problem (a missing session, a decision that keeps failing) is alerted again after this long."""
 NEAR_DEADLINE = timedelta(minutes=30)
@@ -201,6 +218,8 @@ class TickState:
     """Alert key -> when it was last sent, for the ones that repeat."""
     inputs: dict[str, datetime] = field(default_factory=dict[str, datetime])
     """League key -> when its availability inputs were last refreshed."""
+    news: dict[str, datetime] = field(default_factory=dict[str, datetime])
+    """League key -> when its news was last polled and stored (and triaged, when there was an advisor)."""
     session: dict[str, str | None] | None = None
     """The last session verdict (:func:`session_record`): ``fm.health`` reads it instead of launching the browser on
     the profile a tick may be using."""
@@ -222,6 +241,7 @@ class TickState:
                 notified={int(v) for v in data.get("notified", [])},
                 alerts=_stamps(data.get("alerts", {})),
                 inputs=_stamps(data.get("inputs", {})),
+                news=_stamps(data.get("news", {})),
                 session=_session_dict(data.get("session")),
             )
         except (TypeError, ValueError, AttributeError) as exc:
@@ -235,6 +255,7 @@ class TickState:
             "notified": sorted(self.notified),
             "alerts": {k: v.isoformat() for k, v in sorted(self.alerts.items())},
             "inputs": {k: v.isoformat() for k, v in sorted(self.inputs.items())},
+            "news": {k: v.isoformat() for k, v in sorted(self.news.items())},
             "session": self.session,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,6 +362,21 @@ class InputsRefresher(Protocol):
     """Refreshes a league's availability inputs (and projections) for the current period; returns notes."""
 
     def __call__(self, ctx: LeagueContext) -> Sequence[str]: ...
+
+
+class NewsPoller(Protocol):
+    """Polls a sport's news feeds (:func:`fm.sources.news.poll_news` live; the recorded fixtures in tests). It may
+    degrade but never raises for a feed that is down."""
+
+    def __call__(self, sport: Sport) -> NewsPoll: ...
+
+
+class AdvisorFactory(Protocol):
+    """Builds the tick's advisor once it is needed (:func:`fm.jobs.advice.advisor_for` live; a client over a fake
+    transport in tests): ``None`` means the tick runs without Claude, and :func:`fm.jobs.advice.advisor_off` says
+    why."""
+
+    def __call__(self, store: Store, config: Config) -> AdvisorClient | None: ...
 
 
 def _default_clients(league: League, session: EspnSession | None) -> EspnClient:
@@ -574,6 +610,8 @@ def tick(
     clients: ClientFactory = _default_clients,
     syncer: Syncer = sync,
     refresh: InputsRefresher | None = refresh_inputs,
+    news: NewsPoller | None = poll_news,
+    advisor_factory: AdvisorFactory = advisor_for,
     opener: RuntimeOpener | None = None,
     channel: NotifyChannel | None = None,
     registry: DecisionRegistry | None = None,
@@ -583,8 +621,9 @@ def tick(
 ) -> TickReport:
     """Run one tick (the module docs give the steps). Every collaborator defaults to the live one: the browser
     profile's session, ``EspnClient.for_league``, :func:`fm.jobs.sync.sync`, :func:`refresh_inputs`,
-    :func:`fm.executor.live_opener`, the process-wide decision and flow registries. ``channel`` ``None`` sends nothing
-    to the phone. ``now`` pins the clock (tests); otherwise ``clock`` is read at the start and for each execution."""
+    :func:`fm.sources.news.poll_news`, :func:`fm.jobs.advice.advisor_for`, :func:`fm.executor.live_opener`, the
+    process-wide decision and flow registries. ``channel`` ``None`` sends nothing to the phone; ``news`` ``None``
+    polls no feed. ``now`` pins the clock (tests); otherwise ``clock`` is read at the start and for each execution."""
     at = as_utc(now) if now is not None else clock()
     run = _Tick(
         store,
@@ -595,6 +634,8 @@ def tick(
         clients=clients,
         syncer=syncer,
         refresh=refresh,
+        news=news,
+        advisor_factory=advisor_factory,
         opener=opener,
         channel=channel,
         registry=registry if registry is not None else decide_registry.registry,
@@ -617,6 +658,8 @@ class _Tick:
         clients: ClientFactory,
         syncer: Syncer,
         refresh: InputsRefresher | None,
+        news: NewsPoller | None,
+        advisor_factory: AdvisorFactory,
         opener: RuntimeOpener | None,
         channel: NotifyChannel | None,
         registry: DecisionRegistry,
@@ -632,6 +675,11 @@ class _Tick:
         self.clients = clients
         self.syncer = syncer
         self.refresh = refresh
+        self.news = news
+        self.advisor_factory = advisor_factory
+        self.advisor: AdvisorClient | None = None
+        self.advisor_note: str | None = None  # why there is none, once _advisor has tried to build one
+        self.advisor_tried = False
         self.opener = opener
         self.channel = channel
         self.registry = registry
@@ -784,7 +832,8 @@ class _Tick:
                     link=ctx.team_url(),
                 )
             due = due_windows(windows, now=self.now, ran=self.state.runs)
-            notes.extend(self._refresh_inputs(ctx, warnings))
+            fresh_signals = self._refresh_news(ctx, notes, warnings)
+            notes.extend(self._refresh_inputs(ctx, warnings, force=fresh_signals))
             decisions = [run for window in due for run in self._run_window(ctx, window, warnings)]
             notified = self._notify_new(ctx, warnings)
         return LeagueTick(
@@ -825,11 +874,13 @@ class _Tick:
         self.schedules[sport] = schedule
         return schedule
 
-    def _refresh_inputs(self, ctx: LeagueContext, warnings: list[str]) -> list[str]:
+    def _refresh_inputs(self, ctx: LeagueContext, warnings: list[str], *, force: bool = False) -> list[str]:
+        """Refresh the availability inputs when :data:`INPUTS_EVERY` is up, or at once with ``force`` (new news
+        signals: the decisions read the stored availability rows, which only this refresh rewrites)."""
         if self.refresh is None:
             return []
         last = self.state.inputs.get(ctx.key)
-        if last is not None and self.now - last < INPUTS_EVERY[ctx.sport]:
+        if not force and last is not None and self.now - last < INPUTS_EVERY[ctx.sport]:
             return []
         try:
             notes = list(self.refresh(ctx))
@@ -841,6 +892,88 @@ class _Tick:
             return []
         self.state.inputs[ctx.key] = self.now
         return notes
+
+    def _refresh_news(self, ctx: LeagueContext, notes: list[str], warnings: list[str]) -> bool:
+        """Poll and store the sport's news when :data:`NEWS_EVERY` is up, then triage what is untriaged with the
+        advisor. Returns whether new signals were stored (the inputs are then refreshed at once). Any failure is a
+        warning: the league's decisions run on what is stored."""
+        if self.news is None:
+            return False
+        last = self.state.news.get(ctx.key)
+        if last is not None and self.now - last < NEWS_EVERY[ctx.sport]:
+            return False
+        try:
+            poll = self.news(ctx.sport)
+            ingest = ingest_news(self.store, poll.items, now=self.now)
+        except _CRITICAL_ERRORS:
+            raise
+        except Exception as exc:  # news is an enrichment: the decision has ESPN's status and the stored signals
+            logger.exception("tick: polling %s news failed", ctx.key)
+            warnings.append(f"{ctx.key}: news not polled: {exc}")
+            return False
+        self.state.news[ctx.key] = self.now
+        warnings.extend(f"{ctx.key}: news: {warning}" for warning in poll.warnings)
+        notes.append(f"{ctx.key}: {poll.describe()}; {ingest.describe()}")
+        pending = [item for item in self.store.news.untriaged() if item.sport == ctx.sport]
+        if not pending:
+            return False
+        advisor = self._advisor()
+        if advisor is None:
+            items = f"{len(pending)} news item" + ("" if len(pending) == 1 else "s")
+            notes.append(f"{ctx.key}: {items} not triaged: {self.advisor_note}")
+            return False
+        from fm.advisor.news_triage import triage_news  # loaded with the advisor, never by a tick without one
+
+        try:
+            relevances = self._relevances(ctx, warnings)
+            report = triage_news(self.store, advisor, relevances, items=pending, now=self.now)
+        except _CRITICAL_ERRORS:
+            raise
+        except Exception as exc:  # the items stay untriaged for the next poll
+            logger.exception("tick: triaging %s news failed", ctx.key)
+            warnings.append(f"{ctx.key}: news not triaged: {exc}")
+            return False
+        notes.append(f"{ctx.key}: {report.describe()}")
+        warnings.extend(f"{ctx.key}: news triage: {warning}" for warning in report.warnings)
+        if report.failures:
+            failed = sum(len(failure.item_ids) for failure in report.failures)
+            status = report.failures[0].status
+            warnings.append(f"{ctx.key}: news triage: {failed} items failed ({status}); asked again next poll")
+        if report.blocked is not None:
+            warnings.append(f"{ctx.key}: news triage stopped: {report.blocked}")
+        return bool(report.signals)
+
+    def _advisor(self) -> AdvisorClient | None:
+        """The tick's advisor, built once on first need; ``None`` with :attr:`advisor_note` set when there is none."""
+        if self.advisor_tried:
+            return self.advisor
+        self.advisor_tried = True
+        try:
+            self.advisor = self.advisor_factory(self.store, self.config)
+        except _CRITICAL_ERRORS:
+            raise
+        except Exception as exc:  # advisor_for never raises; a custom factory might
+            logger.exception("tick: the advisor could not be built")
+            self.advisor_note = f"the advisor could not be built ({exc})"
+            return None
+        if self.advisor is None:
+            self.advisor_note = advisor_off(self.config) or "no advisor was configured for this tick"
+        return self.advisor
+
+    def _relevances(self, ctx: LeagueContext, warnings: list[str]) -> list[Relevance]:
+        """Who matters to this league (with this week's opponent) and to every other configured league of the sport
+        that has synced (with its opponent when this tick read it): the triage marks what it reads as triaged, so one
+        league's run must not bury another league's news."""
+        found = [relevance_for(self.store, ctx.row.row_id, opponent_team_id=self._opponent(ctx))]
+        for league in self.config.leagues:
+            if league.key == ctx.key or league.sport != ctx.sport:
+                continue
+            row = self.store.leagues.by_key(league.key)
+            if row is not None:
+                found.append(relevance_for(self.store, row.row_id, opponent_team_id=self.opponents.get(league.key)))
+        for relevance in found:
+            warnings.extend(f"{ctx.key}: news relevance: {warning}" for warning in relevance.warnings)
+        return found
 
     def _run_window(self, ctx: LeagueContext, window: RunWindow, warnings: list[str]) -> list[DecisionRun]:
         runs: list[DecisionRun] = []
@@ -1160,15 +1293,18 @@ __all__ = [
     "DECIDED_BY_TICK",
     "INPUTS_EVERY",
     "NEAR_DEADLINE",
+    "NEWS_EVERY",
     "RUNS_KEPT",
     "STATE_FILE",
     "SYNC_MAX_AGE",
+    "AdvisorFactory",
     "ClientFactory",
     "DecisionRun",
     "ExecutionOutcome",
     "InputsRefresher",
     "LeagueContext",
     "LeagueTick",
+    "NewsPoller",
     "SessionCheck",
     "SessionVerdict",
     "Syncer",

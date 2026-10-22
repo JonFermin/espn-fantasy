@@ -78,6 +78,7 @@ MODULES = (
     "fm.browser.flows.trade",
     "fm.decide.offers",
     "fm.jobs.tick",
+    "fm.jobs.advice",
     "fm.jobs.deadlines",
     "fm.jobs.scheduler_base",
     "fm.jobs.scheduler_windows",

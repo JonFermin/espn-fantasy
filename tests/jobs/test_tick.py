@@ -4,12 +4,16 @@ The world is the NFL fixture league (``tests/fixtures/espn``: league 1234567, we
 Sunday of week 4. ESPN reads (the pro schedule, matchups, the roster) come from a fake read API, writes land on the
 roster through a fake transport, decisions are recording fakes on a private registry, the lineup flow is a minimal
 ``mRoster`` swap on a private flow registry, and the phone is a fake channel. The session is a saved cookie or a
-``NotLoggedInError``. Nothing opens a browser or a socket; nothing is scheduled.
+``NotLoggedInError``. The news feeds are the recorded captures in ``tests/fixtures/sources/news`` (ROADMAP #58:
+Tyler Allgeier, on team 1's bench, is tagged in ESPN's pickups story) handed over by a fake poller, and Claude is a
+fake transport that answers every triage with an out-of-bounds signal per candidate. Nothing opens a browser or a
+socket; nothing is scheduled.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,13 +25,16 @@ import httpx
 import polars as pl
 import pytest
 import typer
+from pydantic import BaseModel
 from typer.testing import CliRunner
 
+from fm.advisor.client import AdvisorClient, AdvisorError, CallParams, RawReply, TokenUsage, Transport
+from fm.advisor.news_triage import TriagedItem, TriageOutput, TriageSignal
 from fm.browser.fakes import FakeEspnApi, FakeOpener, FakeTransport, fake_runtime
 from fm.browser.flows import Flow, FlowContext, FlowRegistry, Mode, Preconditions, Verification, WriteRequest
 from fm.browser.session import BrowserError
 from fm.commands import schedule as schedule_cmd
-from fm.config import Config, League
+from fm.config import DEFAULT_MODEL, Config, League, Llm, Secrets, Sport
 from fm.decide.registry import DecisionRegistry
 from fm.espn.auth import EspnSession, NotLoggedInError
 from fm.espn.calendar import CalendarError
@@ -41,6 +48,8 @@ from fm.jobs.tick import (
     ALERT_REPEAT,
     DECIDED_BY_TICK,
     INPUTS_EVERY,
+    NEWS_EVERY,
+    AdvisorFactory,
     LeagueContext,
     SessionVerdict,
     TickOptions,
@@ -51,6 +60,7 @@ from fm.jobs.tick import (
     refresh_nfl_inputs,
     tick,
 )
+from fm.model.availability import NEWS_BOUND
 from fm.model.ids import GSIS
 from fm.notify import DecisionResult, Message, NotifyError, ProposalNotice, Reply
 from fm.proposals import (
@@ -64,6 +74,7 @@ from fm.proposals import (
     propose,
 )
 from fm.sources.base import Fetched
+from fm.sources.news import ESPN_NEWS, ROTOWIRE, NewsItem, NewsPoll, dedupe, parse_espn_news, parse_rotowire_rss
 from fm.sports.base import plugin_for
 from fm.store import (
     ExecutionRow,
@@ -77,14 +88,23 @@ from fm.store import (
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "espn"
+NEWS = FIXTURES.parent / "sources" / "news"
 LEAGUE_ID, SEASON, TEAM, WEEK = 1234567, 2026, 1, 4
 # Sunday of week 4: the 1 p.m. ET kickoffs lock at 17:00 UTC, so their decision window opens at 15:30 UTC.
 LOCK = datetime(2026, 10, 4, 17, 0, tzinfo=UTC)
 EARLY = datetime(2026, 10, 4, 15, 0, tzinfo=UTC)
 NOW = datetime(2026, 10, 4, 15, 35, tzinfo=UTC)
 THURSDAY = datetime(2026, 10, 1, 20, 0, tzinfo=UTC)
-HUBBARD, ALLGEIER, GIBBS = 4241416, 4373626, 4429795
+HUBBARD, ALLGEIER, GIBBS, DANIELS = 4241416, 4373626, 4429795, 4426348
 RB, BENCH, FLEX = 2, 20, 23
+# The recorded NFL feeds (2026-10-05): five ESPN articles, one tagging Allgeier, and five RotoWire blurbs, one titled
+# "Jayden Daniels: ...", which the store matches by name once Daniels is a known player.
+NEWS_ITEMS: tuple[NewsItem, ...] = (
+    *parse_espn_news((NEWS / "espn_news_nfl.json").read_bytes(), "nfl"),
+    *parse_rotowire_rss((NEWS / "rotowire_nfl.xml").read_bytes(), "nfl"),
+)
+PICKUPS_STORY = "50108832"
+"""ESPN's free-agent pickups article, the one tagging Allgeier."""
 SWAP = LineupPayload(
     moves=(
         LineupMove(espn_id=HUBBARD, from_slot_id=FLEX, to_slot_id=BENCH),
@@ -198,6 +218,43 @@ class FakeChannel:
         return [message.title for message in self.sent if message.priority == "high"]
 
 
+class FakeClaude(Transport):
+    """Answers every triage chunk with one injury signal per (item, candidate) it was asked about, proposed outside
+    the bounds (delta -0.9, confidence 1.5) so what the tick stores shows the clamping; ``error`` fails the next call
+    instead. Nothing else is implemented: the tick never batches."""
+
+    def __init__(self) -> None:
+        self.calls: list[CallParams] = []
+        self.error: Exception | None = None
+
+    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
+        assert output is TriageOutput
+        self.calls.append(params)
+        if self.error is not None:
+            raise self.error
+        text = params["messages"][0]["content"][0]["text"]  # type: ignore[index]
+        items = [
+            TriagedItem(
+                news_item_id=int(match[1]),
+                signals=[
+                    TriageSignal(
+                        espn_id=int(espn_id),
+                        kind="injury",
+                        severity="moderate",
+                        games_out=1,
+                        p_active_delta=-0.9,
+                        confidence=1.5,
+                        summary="Listed as doubtful for Sunday.",
+                    )
+                    for espn_id in re.findall(r"\b(\d+) \(", match[2])
+                ],
+            )
+            for match in re.finditer(r"^Item (\d+) \(.*\ncandidates: (.*)$", str(text), re.MULTILINE)
+        ]
+        usage = TokenUsage(input_tokens=1200, output_tokens=150)
+        return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, TriageOutput(items=items))
+
+
 @dataclass
 class DecisionCall:
     kind: str
@@ -239,6 +296,11 @@ class World:
         self.syncs: list[tuple[str, ...]] = []
         self.refreshes: list[LeagueContext] = []
         self.refresh_error: Exception | None = None
+        self.news_items: list[NewsItem] = list(NEWS_ITEMS)
+        self.news_polls: list[Sport] = []
+        self.news_error: Exception | None = None
+        self.claude = FakeClaude()
+        self.advisor_factory: AdvisorFactory = tick_module.advisor_for  # the real one: CONFIG has no key
 
     # collaborators
 
@@ -260,6 +322,48 @@ class World:
             raise self.refresh_error
         self.refreshes.append(ctx)
         return (f"{ctx.key}: inputs refreshed for period {ctx.period}",)
+
+    def poll_news(self, sport: Sport) -> NewsPoll:
+        """The recorded feeds (plus whatever a test appended to ``news_items``), as :func:`poll_news` shapes them."""
+        if self.news_error is not None:
+            raise self.news_error
+        self.news_polls.append(sport)
+        items = tuple(item for item in self.news_items if item.sport == sport)
+        feeds = tuple(
+            Fetched(tuple(item for item in items if item.source == source), NOW, source, dataset, sport)
+            for source, dataset in ((ESPN_NEWS, "news"), (ROTOWIRE, "rss"))
+        )
+        return NewsPoll(sport, feeds, dedupe(items))
+
+    def use_advisor(self, budget: float = 2.0) -> None:
+        """Hand the tick an advisor over the fake Claude instead of the keyless default."""
+        self.advisor_factory = lambda store, config: AdvisorClient(store, Llm(daily_budget_usd=budget), self.claude)
+
+    def roster(self, *espn_ids: int) -> None:
+        """Put these players on team 1's roster for the week, as a sync would, so the league's news is about them."""
+        names = {ALLGEIER: ("Tyler Allgeier", "RB", "ATL"), DANIELS: ("Jayden Daniels", "QB", "WSH")}
+        self.store.teams.upsert(TeamRow(league_id=self.league.row_id, team_id=TEAM, name="Fixture Team 1", as_of=NOW))
+        for espn_id in espn_ids:
+            name, position, pro_team = names[espn_id]
+            self.store.players.upsert(
+                PlayerRow(sport="nfl", espn_id=espn_id, full_name=name, position=position, pro_team=pro_team, as_of=NOW)
+            )
+        self.store.rosters.replace(
+            self.league.row_id,
+            WEEK,
+            TEAM,
+            [
+                RosterEntryRow(
+                    league_id=self.league.row_id,
+                    scoring_period_id=WEEK,
+                    team_id=TEAM,
+                    espn_id=espn_id,
+                    lineup_slot_id=BENCH,
+                    as_of=NOW,
+                )
+                for espn_id in espn_ids
+            ],
+        )
 
     def lineup_decision(self, store: Store, config: Config, league: LeagueRow, **kwargs: Any) -> Any:
         self.calls.append(DecisionCall("lineup", league, kwargs))
@@ -339,6 +443,8 @@ class World:
             "clients": self.clients,
             "syncer": self.syncer,
             "refresh": self.refresh,
+            "news": self.poll_news,
+            "advisor_factory": self.advisor_factory,
             "opener": self.opener,
             "channel": self.channel,
             "registry": self.registry,
@@ -362,6 +468,18 @@ def world(tmp_path: Path) -> Iterator[World]:
 def decisions(report: TickReport, key: str = "nfl") -> list[str]:
     league = next(lg for lg in report.leagues if lg.key == key)
     return [run.name for run in league.decisions]
+
+
+def keyed(config: Config, *, budget: float = 2.0) -> Config:
+    """``config`` with an Anthropic key in its secrets (never sent: the advisor is off or faked) and ``budget``."""
+    secrets = Secrets.model_validate({"ANTHROPIC_API_KEY": "sk-test-not-a-real-key"})
+    return config.model_copy(update={"secrets": secrets, "llm": Llm(daily_budget_usd=budget)})
+
+
+def stored_news(world: World) -> dict[str, int]:
+    """Every stored NFL item's external id -> row id."""
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+    return {row.external_id: row.row_id for row in world.store.news.published_since(since, sport="nfl")}
 
 
 # --- decisions run once per window, proposals are pushed --------------------------------------------------------------
@@ -637,6 +755,166 @@ def test_inputs_are_refreshed_on_a_schedule_and_a_failure_does_not_stop_the_tick
     assert len(world.refreshes) == 2
 
 
+# --- news: polled, stored, triaged (ROADMAP #58) ----------------------------------------------------------------------
+
+
+def test_news_is_polled_stored_and_triaged_on_its_own_cadence(world: World) -> None:
+    world.decision_payload = None
+    world.roster(ALLGEIER, DANIELS)
+    world.use_advisor()
+
+    report = world.tick(now=EARLY)
+    (league,) = report.leagues
+    assert league.skipped is None and world.news_polls == ["nfl"]
+    items = stored_news(world)
+    assert len(items) == 10 and world.store.news.untriaged() == []  # every item read is marked, relevant or not
+    assert len(world.claude.calls) == 1  # the two relevant items fit one chunk
+    notes = "\n".join(league.notes)
+    assert "nfl: nfl news: 10 items (espn_news 5 fresh, rotowire 5 fresh); news: 10 stored (" in notes
+    assert "news triage (nfl): 10 read, 2 relevant, 10 triaged, 2 signals, 0 refused, 1 call" in notes
+    assert any("team 2 has no roster in scoring period 4" in w for w in league.warnings)  # the opponent from mMatchup
+    (allgeier,) = world.store.news_signals.for_player("nfl", ALLGEIER)
+    (daniels,) = world.store.news_signals.for_player("nfl", DANIELS)
+    assert allgeier.news_item_id == items[PICKUPS_STORY]
+    daniels_item = world.store.news.get(daniels.news_item_id)
+    assert daniels_item is not None and daniels_item.source == ROTOWIRE  # matched by the name in its title
+    assert daniels_item.title.startswith("Jayden Daniels:")
+    for signal in (allgeier, daniels):  # bounded: the proposal -0.9 x 1.5 is stored as -0.3 x 1.0, cited by the item
+        assert signal.p_active_delta == -NEWS_BOUND and signal.confidence == 1.0
+        assert signal.source_url and signal.created_at == EARLY and signal.kind == "injury"
+    assert world.state().news == {"nfl": EARLY}
+    (usage,) = world.store.llm_usage.since(EARLY - timedelta(days=1))
+    assert usage.worker == "news_triage" and usage.league_id == world.league.row_id
+    assert len(world.refreshes) == 1  # the first tick refreshes the inputs anyway
+    assert any("news triage (nfl)" in line for line in report.lines())
+
+    world.tick(now=EARLY + timedelta(minutes=10))
+    assert world.news_polls == ["nfl"] and len(world.claude.calls) == 1  # not due: NEWS_EVERY is an hour for the NFL
+
+    world.news_items.append(
+        NewsItem(
+            source=ESPN_NEWS,
+            external_id="60000001",
+            sport="nfl",
+            title="Falcons' Tyler Allgeier (ankle) doubtful for Sunday",
+            published_at=datetime(2026, 10, 5, 23, 30, tzinfo=UTC),
+            body="Allgeier did not practice Friday.",
+            url="https://www.espn.com/nfl/story/_/id/60000001/falcons-tyler-allgeier-ankle-doubtful-sunday",
+            espn_ids=(ALLGEIER,),
+            player_names=("Tyler Allgeier",),
+        )
+    )
+    again = world.tick(now=EARLY + NEWS_EVERY["nfl"] + timedelta(minutes=1))
+    (league,) = again.leagues
+    assert world.news_polls == ["nfl", "nfl"] and len(stored_news(world)) == 11
+    assert any("news: 1 stored (0 about no known player), 10 already stored, 0 repeats" in n for n in league.notes)
+    assert len(world.claude.calls) == 2 and len(world.store.news_signals.for_player("nfl", ALLGEIER)) == 2
+    assert len(world.refreshes) == 2  # new signals: the availability rows are rewritten now, not at INPUTS_EVERY
+    assert world.state().news == {"nfl": EARLY + NEWS_EVERY["nfl"] + timedelta(minutes=1)}
+
+
+def test_a_tick_without_a_key_stores_the_news_untriaged_and_still_runs_every_decision(world: World) -> None:
+    world.decision_payload = None
+    world.roster(ALLGEIER, DANIELS)
+    opening = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)  # the period opening runs every registered decision
+
+    report = world.tick(now=opening)
+    (league,) = report.leagues
+    assert league.skipped is None and decisions(report) == ["nfl:lineup", "nfl:waivers"]
+    assert len(stored_news(world)) == 10 and len(world.store.news.untriaged()) == 10  # stored, waiting for a key
+    assert world.store.news_signals.for_player("nfl", ALLGEIER) == [] and world.claude.calls == []
+    (note,) = [note for note in league.notes if "not triaged" in note]
+    assert note == (
+        "nfl: 10 news items not triaged: ANTHROPIC_API_KEY is not set in .env, so the advisor is off (fm config check)"
+    )
+    assert world.state().news == {"nfl": opening}
+    assert any("not triaged: ANTHROPIC_API_KEY" in line for line in report.lines())
+
+    world.config = keyed(CONFIG, budget=0)  # a key, but a cap of 0 refuses every call: off, and says so
+    again = world.tick(now=opening + NEWS_EVERY["nfl"] + timedelta(minutes=1))
+    (note,) = [note for note in again.leagues[0].notes if "not triaged" in note]
+    assert note == "nfl: 10 news items not triaged: [llm] daily_budget_usd is 0 in config.toml, so the advisor is off"
+    assert world.claude.calls == [] and len(world.store.news.untriaged()) == 10
+
+
+def test_news_failures_are_warnings_and_never_skip_the_league(world: World) -> None:
+    world.decision_payload = None
+    world.roster(ALLGEIER)
+
+    world.news_error = RuntimeError("feeds down")
+    report = world.tick()
+    (league,) = report.leagues
+    assert league.skipped is None and decisions(report) == ["nfl:lineup"]
+    assert any(w == "nfl: news not polled: feeds down" for w in league.warnings)
+    assert "nfl" not in world.state().news and stored_news(world) == {}  # polled again next tick
+
+    world.news_error = None
+    world.use_advisor()
+    world.claude.error = AdvisorError("Claude API call failed: 503")
+    again = world.tick(now=NOW + timedelta(minutes=10))
+    (league,) = again.leagues
+    assert league.skipped is None and world.state().news == {"nfl": NOW + timedelta(minutes=10)}
+    assert any(w == "nfl: news triage stopped: API failure: Claude API call failed: 503" for w in league.warnings)
+    assert world.store.news_signals.for_player("nfl", ALLGEIER) == []
+    assert [item.external_id for item in world.store.news.untriaged()] == [PICKUPS_STORY]  # the relevant one waits
+    assert len(world.refreshes) == 1  # no new signal, no forced refresh
+
+    def broken(store: Store, config: Config) -> AdvisorClient | None:
+        raise RuntimeError("no SDK here")
+
+    world.advisor_factory = broken
+    third = world.tick(now=NOW + NEWS_EVERY["nfl"] + timedelta(minutes=11))
+    (league,) = third.leagues
+    assert league.skipped is None and decisions(third) == []  # the lock has passed; nothing else is due
+    assert any(n == "nfl: 1 news item not triaged: the advisor could not be built (no SDK here)" for n in league.notes)
+    assert third.ok
+
+
+def test_one_leagues_triage_reads_for_every_league_of_the_sport(world: World) -> None:
+    """The triage marks every item it reads, so league nfl's run asks about nfl2's players too: McConkey, on nfl2's
+    roster only, gets his signal although only nfl ticks."""
+    mcconkey = 4612826
+    world.config = Config.model_validate(
+        {
+            "league": [
+                {"key": "nfl", "sport": "nfl", "espn_league_id": LEAGUE_ID, "season": SEASON, "team_id": TEAM},
+                {"key": "nfl2", "sport": "nfl", "espn_league_id": 7654321, "season": SEASON, "team_id": 3},
+            ]
+        }
+    )
+    other = world.store.leagues.upsert(
+        LeagueRow(key="nfl2", sport="nfl", espn_league_id=7654321, season=SEASON, team_id=3, as_of=NOW)
+    )
+    world.store.teams.upsert(TeamRow(league_id=other.row_id, team_id=3, name="Other Team", as_of=NOW))
+    world.store.players.upsert(
+        PlayerRow(sport="nfl", espn_id=mcconkey, full_name="Ladd McConkey", position="WR", pro_team="LAC", as_of=NOW)
+    )
+    entry = RosterEntryRow(
+        league_id=other.row_id, scoring_period_id=WEEK, team_id=3, espn_id=mcconkey, lineup_slot_id=BENCH, as_of=NOW
+    )
+    world.store.rosters.replace(other.row_id, WEEK, 3, [entry])
+    world.roster(ALLGEIER)
+    world.use_advisor()
+    world.decision_payload = None
+
+    report = world.tick(now=EARLY, options=TickOptions(executor=FAST, leagues=("nfl",)))
+    assert [league.key for league in report.leagues] == ["nfl"]
+    (params,) = world.claude.calls
+    context = params["system"][1]["text"]
+    assert "- nfl2 (nfl): our team 3, no opponent given" in context and "Ladd McConkey, WR, LAC; roster" in context
+    assert "news triage (nfl): 10 read, 2 relevant, 10 triaged, 2 signals" in "\n".join(report.leagues[0].notes)
+    (signal,) = world.store.news_signals.for_player("nfl", mcconkey)
+    assert signal.p_active_delta == -NEWS_BOUND and world.store.news.untriaged() == []
+
+
+def test_the_news_step_is_skipped_without_a_poller(world: World) -> None:
+    world.decision_payload = None
+    report = world.tick(news=None)
+    (league,) = report.leagues
+    assert world.news_polls == [] and stored_news(world) == {} and world.state().news == {}
+    assert not any("news" in note for note in league.notes)
+
+
 def test_the_first_tick_after_a_gap_reports_the_windows_it_missed(world: World) -> None:
     world.decision_payload = None
     state = TickState(last_tick=THURSDAY)
@@ -738,6 +1016,7 @@ def test_state_round_trips_and_tolerates_a_broken_file(tmp_path: Path) -> None:
     assert TickState.load(path) == TickState()
     state = TickState(last_tick=NOW, runs={"nfl:pre_lock:x": NOW}, notified={3}, alerts={"session:missing": NOW})
     state.inputs["nfl"] = NOW
+    state.news["nfl"] = NOW - timedelta(minutes=5)
     state.session = {"status": "ok", "expires_at": None, "checked_at": NOW.isoformat(), "detail": "fine"}
     state.save(path)
     assert TickState.load(path) == state
