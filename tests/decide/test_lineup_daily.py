@@ -12,29 +12,36 @@ Two layers:
   ``fm.proposals.propose``, and the category swing weights from the opponent's roster.
 
 The pro schedule is a test double with the surface of ``fm.sports.base.ScheduleLike``: one 7:30 p.m. ET game per team
-on the days it plays (Tue Oct 20, 2026 is day 1).
+on the days it plays (Tue Oct 20, 2026 is day 1). Close calls (ROADMAP #60) use a scripted Claude whose web search
+"returned" the page it cites.
 """
 
 from __future__ import annotations
 
 import inspect
 import math
+import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
-from fm.config import Config, League, Policy
+from fm.advisor.client import AdvisorClient, CallParams, RawReply, TokenUsage, Transport
+from fm.advisor.close_call import CloseCallFinding, CloseCallOutput
+from fm.config import DEFAULT_MODEL, Config, League, Llm, Policy
 from fm.decide import lineup as _nfl_lineup  # noqa: F401  (registers the NFL decision)
 from fm.decide import registry as decide_registry
 from fm.decide.lineup_daily import (
+    CLOSE_CALL_LEAD,
     DAILY_LINEUP_CREATED_BY,
     DAILY_LINEUP_KIND,
     DailyLineupError,
     DayPlayer,
     PlayerDay,
+    close_call_day,
     daily_inputs,
     hold_week,
     matchup_window,
@@ -291,6 +298,111 @@ def test_keeping_starters_who_play_only_benches_zeros() -> None:
     assert rescue is not None and best is not None
     assert slots_on(rescue.day(1).slots, 1, 2, 3, 4) == (PG, BENCH, BENCH, SG)
     assert slots_on(best.day(1).slots, 1, 2, 3, 4) == (BENCH, PG, BENCH, SG)
+
+
+# --- close calls (ROADMAP #60) ----------------------------------------------------------------------------------------
+
+ESPN_URL = "https://www.espn.com/nba/story/_/id/46000002/injury-report"
+REDDIT_URL = "https://www.reddit.com/r/fantasybball/comments/x/report"
+TIE_COUNTS = {PG: 1, C: 1}
+
+
+class FakeSearch(Transport):
+    """Claude with web search, scripted: whenever ``favorite`` is among a call's options (or ``always``), it picks him
+    on one finding citing ``url``, which the search "returned"; otherwise nothing is decisive."""
+
+    def __init__(self, favorite: int | None, *, url: str = ESPN_URL, always: bool = False) -> None:
+        self.favorite = favorite
+        self.url = url
+        self.always = always
+        self.calls: list[CallParams] = []
+        self.options: list[list[int]] = []
+
+    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
+        assert output is CloseCallOutput
+        self.calls.append(params)
+        text = str(params["messages"][0]["content"][0]["text"])  # type: ignore[index]
+        options = [int(found) for found in re.findall(r"^- (\d+): ", text, re.MULTILINE)]
+        self.options.append(options)
+        if self.favorite is not None and (self.always or self.favorite in options):
+            finding = CloseCallFinding(
+                espn_id=self.favorite,
+                claim="He is probable and expected to start.",
+                source_url=self.url,
+                source_title="Injury report",
+            )
+            answer = CloseCallOutput(
+                pick_espn_id=self.favorite, confidence=0.8, rationale="The report clears him.", findings=[finding]
+            )
+        else:
+            answer = CloseCallOutput(pick_espn_id=None, confidence=0.3, rationale="Nothing decisive.", findings=[])
+        usage = TokenUsage(input_tokens=2000, output_tokens=300)
+        return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, answer, search_urls=(self.url,))
+
+
+def tie_day(bench_per_game: float = 9.5, *, locked: Iterable[int] = ()) -> list[DayPlayer]:
+    """A point guard worth 10 a game against a bench guard worth ``bench_per_game`` (``max_margin(10)`` is 2.0), and a
+    bench center who fills the open C slot; all tip off on day 1."""
+    return [
+        dp(1, PG, "PG", 10.0, [1]),
+        dp(2, BENCH, "PG", bench_per_game, [1], locked=locked),
+        dp(3, BENCH, "C", 5.0, [1]),
+    ]
+
+
+def ask_day(
+    store: Store, search: FakeSearch, players: list[DayPlayer], *, now: datetime | None = None, budget: float = 2.0
+):
+    plan = plan_week(players, TIE_COUNTS, [1])
+    assert plan is not None
+    before = plan.day(1)
+    client = AdvisorClient(store, Llm(daily_budget_usd=budget), search)
+    after, results = close_call_day(
+        before,
+        players,
+        TIE_COUNTS,
+        advisor=client,
+        league_label="Test League",
+        period_label="day 1",
+        now=now if now is not None else tip(1, -2),
+    )
+    return before, after, results
+
+
+def test_a_cited_pick_swaps_only_the_near_tied_bench_player_into_the_slot(store: Store) -> None:
+    players = tie_day()
+    search = FakeSearch(2)
+    before, after, results = ask_day(store, search, players)
+    assert before.slots == {1: PG, 2: BENCH, 3: C}  # the engine fills C and keeps its guard: 10 beats 9.5
+    assert after.slots == {1: BENCH, 2: PG, 3: C} and after.value == pytest.approx(14.5)
+    swaps = {(m.espn_id, m.from_slot_id, m.to_slot_id) for m in after.moves}
+    assert swaps == {(1, PG, BENCH), (2, BENCH, PG), (3, BENCH, C)}
+    assert after.open_slots == () and after.idle_starters == ()
+    (result,) = results
+    assert result.status == "pick" and result.choice == 2 and result.engine_pick == 1
+    assert result.call.question == "Who starts at PG on day 1?" and result.call.deadline == tip(1)
+    assert result.call.option_ids == (1, 2) and search.options == [[1, 2]]  # the center was never an option
+    assert "League: Test League (nba)" in search.calls[0]["system"][1]["text"]
+
+
+def test_a_pick_outside_the_tie_or_without_an_allowlisted_source_keeps_the_engines_day(store: Store) -> None:
+    players = tie_day()
+    before, after, results = ask_day(store, FakeSearch(3, always=True), players)  # the center is no option at PG
+    assert after is before and results[0].status == "rejected" and results[0].choice == 1
+    before, after, results = ask_day(store, FakeSearch(2, url=REDDIT_URL), players)
+    assert after is before and results[0].status == "rejected" and "no valid cited finding" in str(results[0].detail)
+
+
+def test_no_call_is_made_when_the_gap_the_lead_time_or_a_lock_rules_it_out(store: Store) -> None:
+    search = FakeSearch(2)
+    before, after, results = ask_day(store, search, tie_day(7.0))  # 3 a game behind: wider than max_margin(10)
+    assert after is before and results == () and search.calls == []
+    before, after, results = ask_day(store, search, tie_day(), now=tip(1) - CLOSE_CALL_LEAD - timedelta(minutes=1))
+    assert after is before and results == () and search.calls == []
+    before, after, results = ask_day(store, search, tie_day(locked=[1]))  # the rival's game has tipped off
+    assert after is before and results == () and search.calls == []
+    before, after, results = ask_day(store, search, tie_day(), budget=0.0)
+    assert after is before and [r.status for r in results] == ["blocked"] and search.calls == []
 
 
 def test_planner_refuses_what_it_cannot_plan() -> None:
@@ -580,6 +692,42 @@ def test_the_decision_proposes_the_target_days_drafts_once(store: Store) -> None
     ahead = plan_daily_lineup(store, league, schedule=schedule(), now=MORNING, period=DAY, days_ahead=2)
     assert {draft.scoring_period_id for draft in ahead.drafts} == {DAY}  # later days need no moves
     assert plan_daily_lineup(store, league, schedule=schedule(), now=MORNING, period=DAY, horizon=1).inputs.days == (3,)
+
+
+def test_an_advisors_pick_reaches_the_days_lineup_draft_with_its_sources(store: Store) -> None:
+    """Two hours before the tips, the third UTIL place is a near-tie between the bench forward the engine starts (7 a
+    game) and the bench guard (6): Claude's cited pick of the guard turns the engine's bench_inactive-only day into a
+    ``lineup`` draft that carries the call, while the ``bench_inactive`` draft stays the engine's."""
+    league = seed(store)
+    before_tip = FIRST_TIP - timedelta(hours=2)
+    engine = plan_daily_lineup(store, league, schedule=schedule(), now=before_tip, period=DAY)
+    assert engine.best.day(DAY).slots[112] == UTIL and engine.best.day(DAY).slots[113] == BENCH
+    assert [draft.kind for draft in engine.drafts] == [ProposalKind.BENCH_INACTIVE] and engine.close_calls == ()
+
+    search = FakeSearch(113)
+    client = AdvisorClient(store, Llm(), search)
+    decision = plan_daily_lineup(store, league, schedule=schedule(), now=before_tip, period=DAY, advisor=client)
+    today = decision.best.day(DAY)
+    assert today.slots[113] == UTIL and today.slots[112] == BENCH  # the one swap; everything else as the engine had it
+    assert {k: v for k, v in today.slots.items() if k not in (112, 113)} == {
+        k: v for k, v in engine.best.day(DAY).slots.items() if k not in (112, 113)
+    }
+    assert search.options == [[112, 113]] and len(decision.close_calls) == 1
+    assert decision.close_calls[0].call.question == "Who starts at UTIL on Thursday October 22 (day 3)?"
+    rescue, lineup = decision.drafts
+    assert rescue.kind is ProposalKind.BENCH_INACTIVE and "close_calls" not in rescue.engine_numbers
+    assert lineup.kind is ProposalKind.LINEUP
+    (numbers,) = lineup.engine_numbers["close_calls"]
+    assert (numbers["status"], numbers["choice"], numbers["engine_pick"]) == ("pick", 113, 112)
+    assert numbers["sources"][0]["url"] == ESPN_URL
+    sentence = " Close call: Claude starts Bea Bench over Bo Bench (80% confident, 1 cited source)."
+    assert lineup.rationale.endswith(sentence)
+    assert lineup.deadline == FIRST_TIP
+    stored = propose_daily_lineup(
+        store, config_for(real_points()), league, schedule=schedule(), now=before_tip, period=DAY, advisor=client
+    )
+    assert [row.kind for row in stored.proposals] == ["bench_inactive", "lineup"]
+    assert stored.proposals[1].engine_numbers["close_calls"][0]["choice"] == 113
 
 
 def test_a_policy_refusal_is_reported_not_raised(store: Store) -> None:

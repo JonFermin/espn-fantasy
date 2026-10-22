@@ -51,15 +51,23 @@ the week for the lineup as the last sync read it, which future days carry forwar
 as at most two proposals a day, as for the NFL: ``bench_inactive`` keeps every starter who plays in the lineup and
 ``lineup`` is the week's best day. Each move names the slot its player is in now, so the executor refuses a stale
 draft. A draft's deadline is the earliest lock among the players it moves. Nothing here writes to ESPN (CLAUDE.md).
+
+**Close calls** (ROADMAP #60). With an ``advisor``, :func:`close_call_day` puts the target day's near-ties to Claude as
+:func:`fm.decide.lineup.close_call_lineup` does for the NFL: a free starter who plays against the bench players who play
+and could take his slot, within :func:`fm.advisor.close_call.max_margin` and :data:`fm.decide.lineup.CLOSE_CALL_LEAD`
+of a tip. A pick swaps the two in that slot for that day only (a one-for-one swap spends a games-played limit exactly
+as the engine's plan did), the day is re-checked (locks, IR, eligibility, counts) and the engine's day is kept when
+the check fails. Only the day's ``lineup`` draft takes the picks; ``bench_inactive`` stays the engine's.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from itertools import combinations
 from statistics import NormalDist
@@ -71,7 +79,13 @@ from scipy.optimize import Bounds, LinearConstraint, milp
 
 from fm.config import Config
 from fm.decide import registry as _registry
-from fm.decide.lineup import active_slot_counts
+from fm.decide.lineup import (
+    CLOSE_CALL_LEAD,
+    CLOSE_CALLS_PER_RUN,
+    active_slot_counts,
+    close_call_note,
+    close_call_numbers,
+)
 from fm.espn.calendar import matchup_period_of, matchup_scoring_periods
 from fm.espn.ids import Game, IdMaps, ids_for
 from fm.espn.settings import LeagueSettings, LockType
@@ -101,7 +115,11 @@ from fm.sports.nba import NBA, NbaPlugin
 from fm.store import AvailabilityRow, LeagueRow, PlayerRow, ProposalRow, RosterEntryRow, Store
 
 if TYPE_CHECKING:
+    from fm.advisor.client import AdvisorClient
+    from fm.advisor.close_call import CloseCallResult
     from fm.sources.nba_injuries import OfficialInjuryReport
+
+logger = logging.getLogger(__name__)
 
 DAILY_LINEUP_KIND: Final = "lineup_daily"
 """The kind :func:`propose_daily_lineup` is registered under for NBA in :mod:`fm.decide.registry`."""
@@ -484,6 +502,120 @@ def hold_week(
             for period in dict.fromkeys(days)
         )
     )
+
+
+# --- close calls ------------------------------------------------------------------------------------------------------
+
+
+def _legal_day(setup: _Setup, period: int, slots: Mapping[int, int]) -> bool:
+    """The day's rules on a full slot map: a locked or IR player keeps his slot and nobody moves onto IR, a player
+    moved into an active slot is eligible for it, and no slot holds more than its count."""
+    used: Counter[int] = Counter()
+    for player in setup.players:
+        slot_id = slots[player.espn_id]
+        if slot_id != player.slot_id and (not setup.is_free(player, period) or slot_id == setup.ids.ir_slot):
+            return False
+        if setup.is_active(slot_id):
+            if slot_id != player.slot_id and slot_id not in player.eligible:
+                return False
+            used[slot_id] += 1
+    return all(count <= setup.counts.get(slot_id, 0) for slot_id, count in used.items())
+
+
+def close_call_day(
+    plan: DayPlan,
+    players: Iterable[DayPlayer],
+    slot_counts: Mapping[int, int],
+    *,
+    advisor: AdvisorClient,
+    league_label: str,
+    period_label: str,
+    now: datetime,
+    sport: Game | str = Game.FBA,
+    league_id: int | None = None,
+    lead: timedelta = CLOSE_CALL_LEAD,
+    max_calls: int = CLOSE_CALLS_PER_RUN,
+) -> tuple[DayPlan, tuple[CloseCallResult, ...]]:
+    """``plan`` with the advisor's picks applied to the day's near-ties, and every result in the order asked (see the
+    module docstring). The day comes back as it is when nothing is a near-tie within ``lead`` of a tip, when the
+    daily budget is spent, or when no answer is a usable pick; a pick the day cannot take comes back ``rejected`` with
+    the reason, as in :func:`fm.decide.lineup.close_call_lineup`. ``period_label`` names the day in the question."""
+    from fm.advisor.close_call import CloseCall, CloseCallOption, decide_close_call, max_margin, near_ties
+
+    _require_aware(now)
+    if max_calls < 1:
+        raise ValueError(f"max_calls must be positive, got {max_calls!r}")
+    setup = _setup(players, slot_counts, sport)
+    period = plan.period
+    by_id = {player.espn_id: player for player in setup.players}
+
+    def option(player: DayPlayer) -> CloseCallOption:
+        day = player.day(period)
+        return CloseCallOption(
+            espn_id=player.espn_id,
+            name=player.label,
+            score=day.value,
+            position=player.position,
+            p_active=day.p_active,
+            designation=day.designation,
+        )
+
+    def free_and_playing(player: DayPlayer) -> bool:
+        return setup.is_free(player, period) and player.day(period).plays
+
+    bench = [p for p in setup.players if plan.slots[p.espn_id] == setup.ids.bench_slot and free_and_playing(p)]
+    pending: list[tuple[float, int, CloseCall]] = []
+    for starter in setup.players:
+        slot_id = plan.slots[starter.espn_id]
+        if not setup.is_active(slot_id) or not free_and_playing(starter):
+            continue
+        rivals = [player for player in bench if slot_id in player.eligible]
+        if not rivals:
+            continue
+        best_score = starter.day(period).value
+        tied = near_ties([option(starter), *(option(rival) for rival in rivals)], max_margin(best_score))
+        if not tied or tied[0].espn_id != starter.espn_id:  # the engine's own choice must be the top option
+            continue
+        locks = [lock for entry in tied if (lock := by_id[entry.espn_id].day(period).lock_at) is not None]
+        if not locks or min(locks) - now > lead:
+            continue
+        call = CloseCall(
+            sport="nba" if Game.coerce(sport) is Game.FBA else "nfl",
+            league_label=league_label,
+            question=f"Who starts at {setup.ids.slot_label(slot_id)} on {period_label}?",
+            options=tied,
+            margin=max_margin(best_score),
+            roster_ids=by_id.keys(),
+            deadline=min(locks),
+            league_id=league_id,
+        )
+        pending.append((tied[0].score - tied[1].score, slot_id, call))
+    pending.sort(key=lambda entry: (entry[0], entry[1]))
+    slots = dict(plan.slots)
+    results: list[CloseCallResult] = []
+    for _, slot_id, call in pending[:max_calls]:
+        result = decide_close_call(advisor, call, now=now)
+        results.append(result)
+        if result.status == "blocked":
+            break  # the daily budget is spent: the other ties keep the engine's choice without a request
+        if result.status != "pick" or not result.overrides_engine:
+            continue
+        pick, starter_id = result.choice, result.engine_pick
+        if slots[starter_id] != slot_id or slots[pick] != setup.ids.bench_slot:
+            detail = "an earlier close call already moved one of the two; the engine's choice stands"
+            results[-1] = replace(result, status="rejected", detail=detail)
+            logger.info("close call %r: %s", call.question, detail)
+            continue
+        trial = {**slots, starter_id: setup.ids.bench_slot, pick: slot_id}
+        if not _legal_day(setup, period, trial):
+            detail = f"pick {pick} breaks the day's rules; the engine's choice stands"
+            results[-1] = replace(result, status="rejected", detail=detail)
+            logger.warning("close call %r: %s", call.question, detail)
+            continue
+        slots = trial
+    if slots == dict(plan.slots):
+        return plan, tuple(results)
+    return _day_plan(setup, period, slots), tuple(results)
 
 
 # --- late-swap pivots -------------------------------------------------------------------------------------------------
@@ -1060,6 +1192,8 @@ class DailyLineupDecision:
     rescue: WeekPlan | None
     drafts: tuple[DailyDraft, ...]
     warnings: tuple[str, ...] = ()
+    close_calls: tuple[CloseCallResult, ...] = ()
+    """What the advisor was asked about the target day's near-ties and answered (:func:`close_call_day`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1152,6 +1286,7 @@ def _draft(
     *,
     schedule: ScheduleLike,
     basis: str,
+    close_calls: tuple[CloseCallResult, ...] = (),
 ) -> DailyDraft:
     by_id = {player.espn_id: player for player in inputs.players}
     ids = ids_for(Game.FBA)
@@ -1176,6 +1311,8 @@ def _draft(
             "weights": dict(outlook.weights),
         },
     }
+    if close_calls:
+        numbers["close_calls"] = close_call_numbers(close_calls)
     moves_key = _digest(f"{m.espn_id}:{m.from_slot_id}>{m.to_slot_id}" for m in plan.moves)
     return DailyDraft(
         kind=kind,
@@ -1183,7 +1320,7 @@ def _draft(
         scoring_period_id=plan.period,
         deadline=_deadline(moved, plan.period, schedule, NBA),
         engine_numbers=numbers,
-        rationale=_rationale(kind, plan.period, plan, before, by_id),
+        rationale=_rationale(kind, plan.period, plan, before, by_id) + close_call_note(close_calls),
         dedupe_key=f"{kind.value}:{inputs.season}:{plan.period}:{moves_key}",
     )
 
@@ -1207,10 +1344,12 @@ def plan_daily_lineup(
     game_sd: Mapping[str, float] | float = DEFAULT_GAME_SD,
     margin_so_far: Mapping[str, float] | None = None,
     pivot_min_gain: float = PIVOT_MIN_GAIN,
+    advisor: AdvisorClient | None = None,
 ) -> DailyLineupDecision:
     """Plan our lineups for the rest of the matchup week from the store and draft the target day's proposals (and
     ``days_ahead`` more), writing nothing (the module docs give the rules). ``settings`` default to the synced ones and
-    ``period`` to the day current at ``now`` on the pro schedule; ``horizon`` caps the days planned. Raises
+    ``period`` to the day current at ``now`` on the pro schedule; ``horizon`` caps the days planned; with an
+    ``advisor`` the target day's near-ties go to Claude first (:func:`close_call_day`). Raises
     :class:`DailyLineupError` as :func:`daily_inputs` does, and when the league is not synced or the season is over."""
     _require_aware(now)
     synced = settings if settings is not None else stored_settings(store, league)
@@ -1240,12 +1379,21 @@ def plan_daily_lineup(
     if best is None:  # no constraint forces a plan to exist only with keep_starters
         raise DailyLineupError(f"league {league.key!r}: no legal lineup could be planned")
     first = inputs.days[0]
-    best = WeekPlan(
-        (
-            prefer_pivots(inputs.players, inputs.slot_counts, best.day(first), min_gain=pivot_min_gain),
-            *best.days[1:],
+    today = prefer_pivots(inputs.players, inputs.slot_counts, best.day(first), min_gain=pivot_min_gain)
+    close_calls: tuple[CloseCallResult, ...] = ()
+    if advisor is not None:
+        calendar_day = NBA.period_day(first, schedule)
+        today, close_calls = close_call_day(
+            today,
+            inputs.players,
+            inputs.slot_counts,
+            advisor=advisor,
+            league_label=league.name or league.key,
+            period_label=f"{calendar_day:%A %B %d} (day {first})" if calendar_day is not None else f"day {first}",
+            now=now,
+            league_id=league.row_id,
         )
-    )
+    best = WeekPlan((today, *best.days[1:]))
     rescue = plan_week(
         inputs.players, inputs.slot_counts, inputs.days, slot_limits=inputs.slot_limits, keep_starters=True
     )
@@ -1261,7 +1409,10 @@ def plan_daily_lineup(
             )
         best_day = best.day(day)
         if best_day.moves and (rescue_day is None or dict(best_day.slots) != dict(rescue_day.slots)):
-            drafts.append(_draft(ProposalKind.LINEUP, best_day, before, inputs, schedule=schedule, basis=basis))
+            calls = close_calls if day == first else ()
+            drafts.append(
+                _draft(ProposalKind.LINEUP, best_day, before, inputs, schedule=schedule, basis=basis, close_calls=calls)
+            )
     return DailyLineupDecision(
         league_id=league.row_id,
         inputs=inputs,
@@ -1270,6 +1421,7 @@ def plan_daily_lineup(
         rescue=rescue,
         drafts=tuple(drafts),
         warnings=inputs.warnings,
+        close_calls=close_calls,
     )
 
 
@@ -1293,10 +1445,12 @@ def propose_daily_lineup(
     game_sd: Mapping[str, float] | float = DEFAULT_GAME_SD,
     margin_so_far: Mapping[str, float] | None = None,
     pivot_min_gain: float = PIVOT_MIN_GAIN,
+    advisor: AdvisorClient | None = None,
 ) -> DailyLineupProposals:
     """The NBA ``lineup_daily`` decision: :func:`plan_daily_lineup`, then each draft through
     :func:`fm.proposals.propose` (policy, guardrails, dedupe). A draft policy refuses is reported in ``blocked``, not
-    raised; :class:`DailyLineupError` still is. Takes :func:`plan_daily_lineup`'s arguments plus the config."""
+    raised; :class:`DailyLineupError` still is. Takes :func:`plan_daily_lineup`'s arguments plus the config; the tick
+    passes its ``advisor`` when it has one."""
     decision = plan_daily_lineup(
         store,
         league,
@@ -1315,6 +1469,7 @@ def propose_daily_lineup(
         game_sd=game_sd,
         margin_so_far=margin_so_far,
         pivot_min_gain=pivot_min_gain,
+        advisor=advisor,
     )
     stored: list[ProposalRow] = []
     blocked: list[str] = []

@@ -62,20 +62,35 @@ row assessed without a schedule assumes everyone has a game, and one assessed wi
 a player whose team has no game in the period is a zero whatever his row says. The opponent's outlook
 (:func:`team_outlook`) assumes he starts his own expected-points lineup and uses projections for games already
 played; the season simulator (ROADMAP #32) can pass a better one.
+
+**Close calls** (DESIGN section 10, ROADMAP #60). With an ``advisor`` (the tick's
+:class:`fm.advisor.client.AdvisorClient`), :func:`close_call_lineup` puts the best lineup's near-ties to Claude: for
+each free starter who plays, the bench players who play and could take his slot, when the closest is within
+:func:`fm.advisor.close_call.max_margin` of him and one of them locks within :data:`CLOSE_CALL_LEAD`. Claude may only
+choose among those options (``fm.advisor.close_call`` enforces it, with a cited allowlisted source and enough
+confidence); a pick swaps the two players in that one slot and the lineup is re-checked by the same rules as the
+engine's (:func:`_check_legal`: no locked player moves, nobody fills a slot he cannot, no slot overfills), with the
+engine's lineup kept when the check fails. A blocked (budget), failed, rejected or undecided answer keeps the engine's
+choice, and so does a pick the lineup cannot take (reported ``rejected``). Only the ``lineup`` draft takes the picks:
+the ``bench_inactive`` draft, which may execute without approval, stays the engine's alone. Each result goes into the
+draft's ``engine_numbers["close_calls"]`` (:func:`fm.advisor.close_call.result_numbers`) and a pick into the rationale.
+At most :data:`CLOSE_CALLS_PER_RUN` ties are asked per run, closest first. The advisor's modules load only when one
+is given, so planning without one costs no SDK import.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from statistics import NormalDist
 from types import MappingProxyType
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -101,6 +116,12 @@ from fm.sports.base import (
 )
 from fm.store import AvailabilityRow, LeagueRow, PlayerRow, ProposalRow, Store
 
+if TYPE_CHECKING:
+    from fm.advisor.client import AdvisorClient
+    from fm.advisor.close_call import CloseCallResult
+
+logger = logging.getLogger(__name__)
+
 DECISION_KIND: Final = "lineup"
 """The kind :func:`propose_lineup` is registered under for NFL in :mod:`fm.decide.registry`."""
 CREATED_BY: Final = "decide.lineup"
@@ -108,6 +129,11 @@ CREATED_BY: Final = "decide.lineup"
 LOPSIDED_AT: Final = 0.75
 """P(win) of the expected-points lineup at or above which (or at or below one minus which) the matchup counts as
 lopsided and the objective becomes P(win). A model parameter, not a league setting."""
+CLOSE_CALL_LEAD: Final = timedelta(hours=6)
+"""How close a lock must be before a near-tie is put to the advisor: what breaks a tie is the day's reporting
+(inactives, warmups, a coach's word), which lands in the last hours; earlier the engine's numbers are as good."""
+CLOSE_CALLS_PER_RUN: Final = 3
+"""The most near-ties one run asks about, closest first: each is a web-search call against the daily budget."""
 
 _KEEP: Final = 1e-6
 """Tie-break bonus, in points, for each player left in his slot: lineups closer than this are equally good."""
@@ -543,6 +569,119 @@ def score_lineup(
     )
 
 
+# --- close calls ------------------------------------------------------------------------------------------------------
+
+
+def close_call_lineup(
+    plan: LineupPlan,
+    players: Iterable[LineupCandidate],
+    slot_counts: Mapping[int, int],
+    *,
+    advisor: AdvisorClient,
+    sport: Game | str,
+    league_label: str,
+    period_label: str,
+    now: datetime,
+    outlook: MatchupOutlook | None = None,
+    league_id: int | None = None,
+    lead: timedelta = CLOSE_CALL_LEAD,
+    max_calls: int = CLOSE_CALLS_PER_RUN,
+) -> tuple[LineupPlan, tuple[CloseCallResult, ...]]:
+    """``plan`` with the advisor's picks applied to its near-ties, and every result in the order asked (see the module
+    docstring). The plan comes back as it is when nothing is a near-tie within ``lead`` of a lock, when the daily
+    budget is spent, or when no answer is a usable pick. A pick the lineup cannot take (an earlier pick already moved
+    one of the two, or the swap breaks a rule) comes back ``rejected`` with the reason, so nothing downstream reads it
+    as applied. ``period_label`` names the period in the question (``week 4``, ``Thursday October 22``)."""
+    from fm.advisor.close_call import CloseCall, decide_close_call, max_margin, near_ties, option_from_candidate
+
+    _require_aware(now)
+    if max_calls < 1:
+        raise ValueError(f"max_calls must be positive, got {max_calls!r}")
+    problem = _problem(players, slot_counts, sport)
+    ids = ids_for(sport)
+    by_id = {player.espn_id: player for player in problem.players}
+    bench = [player for player in problem.free if plan.slots[player.espn_id] == problem.bench and player.plays]
+    pending: list[tuple[float, int, CloseCall]] = []
+    for starter in problem.free:  # a locked or IR starter's slot is not in question
+        slot_id = plan.slots[starter.espn_id]
+        if not problem.is_active(slot_id) or not starter.plays:
+            continue
+        rivals = [player for player in bench if slot_id in problem.eligible[player.espn_id]]
+        if not rivals:
+            continue
+        options = [option_from_candidate(starter), *(option_from_candidate(rival) for rival in rivals)]
+        tied = near_ties(options, max_margin(starter.expected))
+        if not tied or tied[0].espn_id != starter.espn_id:  # the engine's own choice must be the top option
+            continue
+        locks = [lock for option in tied if (lock := by_id[option.espn_id].lock_at) is not None]
+        if not locks or min(locks) - now > lead:
+            continue
+        call = CloseCall(
+            sport="nfl" if Game.coerce(sport) is Game.FFL else "nba",
+            league_label=league_label,
+            question=f"Who starts at {ids.slot_label(slot_id)} in {period_label}?",
+            options=tied,
+            margin=max_margin(starter.expected),
+            roster_ids=by_id.keys(),
+            deadline=min(locks),
+            league_id=league_id,
+        )
+        pending.append((tied[0].score - tied[1].score, slot_id, call))
+    pending.sort(key=lambda entry: (entry[0], entry[1]))
+    slots = dict(plan.slots)
+    results: list[CloseCallResult] = []
+    for _, slot_id, call in pending[:max_calls]:
+        result = decide_close_call(advisor, call, now=now)
+        results.append(result)
+        if result.status == "blocked":
+            break  # the daily budget is spent: the other ties keep the engine's choice without a request
+        if result.status != "pick" or not result.overrides_engine:
+            continue
+        pick, starter_id = result.choice, result.engine_pick
+        if slots[starter_id] != slot_id or slots[pick] != problem.bench:
+            detail = "an earlier close call already moved one of the two; the engine's choice stands"
+            results[-1] = replace(result, status="rejected", detail=detail)
+            logger.info("close call %r: %s", call.question, detail)
+            continue
+        trial = {**slots, starter_id: problem.bench, pick: slot_id}
+        try:
+            _check_legal(problem, trial)
+        except LineupError as exc:
+            detail = f"the pick breaks a rule ({exc}); the engine's choice stands"
+            results[-1] = replace(result, status="rejected", detail=detail)
+            logger.warning("close call %r: %s", call.question, detail)
+            continue
+        slots = trial
+    if slots == dict(plan.slots):
+        return plan, tuple(results)
+    swapped = _plan(problem, slots, objective=plan.objective, outlook=outlook, variance_weight=plan.variance_weight)
+    return swapped, tuple(results)
+
+
+def close_call_note(results: Iterable[CloseCallResult]) -> str:
+    """A sentence per pick that overrode the engine, to follow a draft's rationale: whom Claude starts over whom, how
+    confident, and on how many cited sources. Empty when every result left the engine's choice."""
+    notes: list[str] = []
+    for result in results:
+        if result.status != "pick" or not result.overrides_engine:
+            continue
+        names = {option.espn_id: option.name for option in result.call.options}
+        sources = f"{len(result.sources)} cited source" + ("" if len(result.sources) == 1 else "s")
+        notes.append(
+            f" Close call: Claude starts {names[result.choice]} over {names[result.engine_pick]} "
+            f"({result.confidence or 0.0:.0%} confident, {sources})."
+        )
+    return "".join(notes)
+
+
+def close_call_numbers(results: Iterable[CloseCallResult]) -> list[dict[str, Any]]:
+    """The results for a draft's ``engine_numbers["close_calls"]``: each question with what was asked and answered
+    (:func:`fm.advisor.close_call.result_numbers`)."""
+    from fm.advisor.close_call import result_numbers
+
+    return [{"question": result.call.question, **result_numbers(result)["close_call"]} for result in results]
+
+
 # --- reading a team's lineup from the store ---------------------------------------------------------------------------
 
 
@@ -739,6 +878,9 @@ class LineupDecision:
     outlook: MatchupOutlook | None
     drafts: tuple[LineupDraft, ...]
     warnings: tuple[str, ...] = ()
+    close_calls: tuple[CloseCallResult, ...] = ()
+    """What the advisor was asked about ``best``'s near-ties and answered (:func:`close_call_lineup`); empty without
+    an advisor or a near-tie."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,6 +965,7 @@ def _draft(
     schedule: ScheduleLike,
     ids: IdMaps,
     basis: str,
+    close_calls: tuple[CloseCallResult, ...] = (),
 ) -> LineupDraft:
     by_id = {player.espn_id: player for player in inputs.players}
     moved = {move.espn_id: by_id[move.espn_id] for move in plan.moves}
@@ -841,6 +984,8 @@ def _draft(
         "roster_as_of": inputs.roster_as_of.isoformat(),
         "moves": [_move_numbers(move, moved[move.espn_id], ids) for move in plan.moves],
     }
+    if close_calls:
+        numbers["close_calls"] = close_call_numbers(close_calls)
     moves_key = _digest(f"{move.espn_id}:{move.from_slot_id}>{move.to_slot_id}" for move in plan.moves)
     return LineupDraft(
         kind=kind,
@@ -848,7 +993,7 @@ def _draft(
         scoring_period_id=inputs.scoring_period_id,
         deadline=_deadline(moved.values(), schedule, inputs.scoring_period_id),
         engine_numbers=numbers,
-        rationale=_rationale(kind, plan, current, moved),
+        rationale=_rationale(kind, plan, current, moved) + close_call_note(close_calls),
         dedupe_key=f"{kind.value}:{inputs.season}:{inputs.scoring_period_id}:{moves_key}",
     )
 
@@ -866,13 +1011,15 @@ def plan_lineup(
     objective: Objective | None = None,
     weights: BlendWeights | None = None,
     lopsided_at: float = LOPSIDED_AT,
+    advisor: AdvisorClient | None = None,
 ) -> LineupDecision:
     """Plan our lineup for a scoring period from the store and draft its proposals, writing nothing.
 
     ``settings`` default to the synced ones and ``period`` to the one current at ``now`` on the pro schedule
     (:meth:`fm.sports.base.SportPlugin.scoring_period_at`). The P(win) objective needs the opponent: an ``outlook``, or
     an ``opponent_team_id`` whose stored roster gives one (:func:`team_outlook`; a missing roster is a warning and the
-    plan stays on expected points). Raises :class:`LineupError` when the league is not synced for the period, is not a
+    plan stays on expected points). With an ``advisor`` the best lineup's near-ties go to Claude first
+    (:func:`close_call_lineup`). Raises :class:`LineupError` when the league is not synced for the period, is not a
     points league, the season is over, or its lineup lock type is unknown.
     """
     _require_aware(now)
@@ -909,10 +1056,24 @@ def plan_lineup(
     rescue = bench_inactive_lineup(
         inputs.players, inputs.slot_counts, sport=sport, outlook=outlook, objective=best.objective
     )
+    close_calls: tuple[CloseCallResult, ...] = ()
+    if advisor is not None:
+        best, close_calls = close_call_lineup(
+            best,
+            inputs.players,
+            inputs.slot_counts,
+            advisor=advisor,
+            sport=sport,
+            league_label=league.name or league.key,
+            period_label=f"week {target}",
+            now=now,
+            outlook=outlook,
+            league_id=league.row_id,
+        )
     current = score_lineup(inputs.players, inputs.slot_counts, sport=sport, outlook=outlook)
     basis = _digest(sorted((player.espn_id, player.slot_id) for player in inputs.players))
 
-    def draft(kind: ProposalKind, plan: LineupPlan) -> LineupDraft:
+    def draft(kind: ProposalKind, plan: LineupPlan, calls: tuple[CloseCallResult, ...] = ()) -> LineupDraft:
         return _draft(
             kind,
             plan,
@@ -922,13 +1083,14 @@ def plan_lineup(
             schedule=schedule,
             ids=ids_for(sport),
             basis=basis,
+            close_calls=calls,
         )
 
     drafts: list[LineupDraft] = []
     if rescue.moves:
         drafts.append(draft(ProposalKind.BENCH_INACTIVE, rescue))
     if best.moves and dict(best.slots) != dict(rescue.slots):
-        drafts.append(draft(ProposalKind.LINEUP, best))
+        drafts.append(draft(ProposalKind.LINEUP, best, close_calls))
     return LineupDecision(
         league_id=league.row_id,
         inputs=inputs,
@@ -938,6 +1100,7 @@ def plan_lineup(
         outlook=outlook,
         drafts=tuple(drafts),
         warnings=tuple(warnings),
+        close_calls=close_calls,
     )
 
 
@@ -955,10 +1118,12 @@ def propose_lineup(
     objective: Objective | None = None,
     weights: BlendWeights | None = None,
     lopsided_at: float = LOPSIDED_AT,
+    advisor: AdvisorClient | None = None,
 ) -> LineupProposals:
     """The NFL ``lineup`` decision: :func:`plan_lineup`, then each draft through :func:`fm.proposals.propose` (policy,
     guardrails, dedupe). A draft policy refuses (its kind ``off``, ``fm pause``) is reported in ``blocked``, not raised;
-    :class:`LineupError` still is. Takes :func:`plan_lineup`'s arguments plus the config the policy reads."""
+    :class:`LineupError` still is. Takes :func:`plan_lineup`'s arguments plus the config the policy reads; the tick
+    passes its ``advisor`` when it has one."""
     decision = plan_lineup(
         store,
         league,
@@ -971,6 +1136,7 @@ def propose_lineup(
         objective=objective,
         weights=weights,
         lopsided_at=lopsided_at,
+        advisor=advisor,
     )
     stored: list[ProposalRow] = []
     blocked: list[str] = []

@@ -16,12 +16,17 @@ Three layers:
   Proposals go through ``fm.proposals.propose``.
 
 Blend weights are the tests' own (:data:`WEIGHTS`): the committed ``data/blend_weights.toml`` belongs to ROADMAP #39.
+
+Close calls (ROADMAP #60) use a scripted Claude (:class:`FakeSearch`) whose web search "returned" the page it cites:
+a pick between near-tied options swaps them, anything else keeps the engine's lineup, and no call is made when the gap
+or the lead time is too large.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -32,10 +37,15 @@ from typing import Any
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import BaseModel
 
-from fm.config import Config, League, Policy
+from fm.advisor.client import AdvisorClient, CallParams, RawReply, TokenUsage, Transport
+from fm.advisor.close_call import CloseCallFinding, CloseCallOutput, CloseCallResult
+from fm.config import DEFAULT_MODEL, Config, League, Llm, Policy
 from fm.decide import registry as decide_registry
 from fm.decide.lineup import (
+    CLOSE_CALL_LEAD,
+    CLOSE_CALLS_PER_RUN,
     CREATED_BY,
     DECISION_KIND,
     LOPSIDED_AT,
@@ -47,6 +57,9 @@ from fm.decide.lineup import (
     Objective,
     active_slot_counts,
     bench_inactive_lineup,
+    close_call_lineup,
+    close_call_note,
+    close_call_numbers,
     lineup_inputs,
     optimize_lineup,
     plan_lineup,
@@ -419,6 +432,155 @@ def test_the_bench_inactive_lineup_is_empty_without_a_zero_starter() -> None:
     players = [cand(1, WR, "WR", 5), cand(2, BENCH, "WR", 9)]
     assert bench_inactive_lineup(players, {WR: 1}, sport="nfl").moves == ()
     assert optimize(players, {WR: 1}).moves != ()
+
+
+# --- close calls (ROADMAP #60) ----------------------------------------------------------------------------------------
+
+KICKOFF = datetime(2026, 10, 4, 17, 0, tzinfo=UTC)
+TWO_HOURS_OUT = KICKOFF - timedelta(hours=2)
+TIE_COUNTS = {QB: 1, FLEX: 1}
+ESPN_URL = "https://www.espn.com/nfl/story/_/id/46000001/sunday-inactives"
+REDDIT_URL = "https://www.reddit.com/r/fantasyfootball/comments/x/inactives"
+
+
+class FakeSearch(Transport):
+    """Claude with web search, scripted: whenever ``favorite`` is among a call's options (or ``always``), it picks him
+    on one finding citing ``url``, which the search "returned"; otherwise nothing is decisive. Records every call and
+    the option ids each was asked about."""
+
+    def __init__(self, favorite: int | None, *, url: str = ESPN_URL, always: bool = False) -> None:
+        self.favorite = favorite
+        self.url = url
+        self.always = always
+        self.calls: list[CallParams] = []
+        self.options: list[list[int]] = []
+
+    def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
+        assert output is CloseCallOutput
+        self.calls.append(params)
+        text = str(params["messages"][0]["content"][0]["text"])  # type: ignore[index]
+        options = [int(found) for found in re.findall(r"^- (\d+): ", text, re.MULTILINE)]
+        self.options.append(options)
+        if self.favorite is not None and (self.always or self.favorite in options):
+            finding = CloseCallFinding(
+                espn_id=self.favorite,
+                claim="He is expected to start and see a full workload.",
+                source_url=self.url,
+                source_title="Sunday inactives",
+            )
+            answer = CloseCallOutput(
+                pick_espn_id=self.favorite,
+                confidence=0.8,
+                rationale="The beat writer expects a full workload.",
+                findings=[finding],
+            )
+        else:
+            answer = CloseCallOutput(pick_espn_id=None, confidence=0.3, rationale="Nothing decisive.", findings=[])
+        usage = TokenUsage(input_tokens=2000, output_tokens=300)
+        return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, answer, search_urls=(self.url,))
+
+
+def tie_roster(bench_points: float = 9.5, *, lock: datetime = KICKOFF, **bench_fields: Any) -> list[LineupCandidate]:
+    """A FLEX back worth 10 against a bench back worth ``bench_points`` (``max_margin(10)`` is 2.0) and a bench
+    receiver far behind him; the quarterback has no rival. Everyone kicks off at ``lock``."""
+    return [
+        cand(1, QB, "QB", 20, lock_at=lock),
+        cand(2, FLEX, "RB", 10.0, lock_at=lock),
+        cand(3, BENCH, "RB", bench_points, lock_at=lock, **bench_fields),
+        cand(4, BENCH, "WR", 5.0, lock_at=lock),
+    ]
+
+
+def ask(
+    store: Store,
+    search: FakeSearch,
+    players: Sequence[LineupCandidate],
+    *,
+    now: datetime = TWO_HOURS_OUT,
+    budget: float = 2.0,
+) -> tuple[LineupPlan, LineupPlan, tuple[CloseCallResult, ...]]:
+    """The engine's plan, the plan after the close calls, and the results."""
+    before = optimize(players, TIE_COUNTS)
+    client = AdvisorClient(store, Llm(daily_budget_usd=budget), search)
+    after, results = close_call_lineup(
+        before,
+        players,
+        TIE_COUNTS,
+        advisor=client,
+        sport="nfl",
+        league_label="Test League",
+        period_label="week 4",
+        now=now,
+    )
+    return before, after, results
+
+
+def test_a_cited_pick_swaps_only_the_near_tied_bench_player_into_the_slot(store: Store) -> None:
+    players = tie_roster()
+    search = FakeSearch(3)
+    before, after, results = ask(store, search, players)
+    assert before.moves == ()  # the engine keeps its starter: 10 beats 9.5
+    assert after.slots == {1: QB, 2: BENCH, 3: FLEX, 4: BENCH}
+    assert moved(after) == {2: (FLEX, BENCH), 3: (BENCH, FLEX)}  # nothing beyond the one swap
+    assert after.expected == pytest.approx(29.5) and after.objective is Objective.EXPECTED_POINTS
+    assert_legal(players, TIE_COUNTS, after)
+    (result,) = results
+    assert result.status == "pick" and result.choice == 3 and result.engine_pick == 2 and result.overrides_engine
+    assert result.call.question == "Who starts at RB/WR/TE in week 4?" and result.call.deadline == KICKOFF
+    assert result.call.option_ids == (2, 3) and result.call.margin == pytest.approx(2.0)
+    assert search.options == [[2, 3]]  # the receiver at 5 and the quarterback were never options
+    (params,) = search.calls
+    assert "espn.com" in params["tools"][0]["allowed_domains"]  # type: ignore[index]
+    assert "League: Test League (nfl)" in params["system"][1]["text"]
+    assert [source.url for source in result.sources] == [ESPN_URL]
+    assert close_call_note(results) == " Close call: Claude starts P3 over P2 (80% confident, 1 cited source)."
+    (numbers,) = close_call_numbers(results)
+    assert (numbers["question"], numbers["status"], numbers["choice"], numbers["engine_pick"]) == (
+        "Who starts at RB/WR/TE in week 4?",
+        "pick",
+        3,
+        2,
+    )
+    assert numbers["sources"][0]["url"] == ESPN_URL and numbers["options"] == {2: 10.0, 3: 9.5}
+    (usage,) = store.llm_usage.since(TWO_HOURS_OUT - timedelta(days=1))
+    assert usage.worker == "close_call"
+
+
+def test_a_pick_outside_the_tie_or_without_an_allowlisted_source_keeps_the_engines_lineup(store: Store) -> None:
+    players = tie_roster()
+    outside = FakeSearch(4, always=True)  # the receiver is on the roster but 5 points behind: not an option
+    before, after, results = ask(store, outside, players)
+    assert after is before and outside.options == [[2, 3]]
+    (result,) = results
+    assert result.status == "rejected" and result.choice == 2
+    assert "not one of the near-tied options" in str(result.detail)
+
+    uncited = FakeSearch(3, url=REDDIT_URL)  # a real pick, but its only source is off the allowlist
+    before, after, results = ask(store, uncited, players)
+    assert after is before and len(uncited.calls) == 1
+    (result,) = results
+    assert result.status == "rejected" and result.choice == 2 and "no valid cited finding" in str(result.detail)
+    assert close_call_note(results) == ""
+
+
+def test_no_call_is_made_when_the_gap_or_the_lead_time_is_too_large(store: Store) -> None:
+    search = FakeSearch(3)
+    before, after, results = ask(store, search, tie_roster(7.0))  # 3 points behind: wider than max_margin(10)
+    assert after is before and results == () and search.calls == []
+    before, after, results = ask(store, search, tie_roster(), now=KICKOFF - CLOSE_CALL_LEAD - timedelta(minutes=1))
+    assert after is before and results == () and search.calls == []
+    before, after, results = ask(store, search, tie_roster(locked=True))  # the rival's game has begun: he cannot move
+    assert after is before and results == () and search.calls == []
+    assert CLOSE_CALL_LEAD == timedelta(hours=6) and CLOSE_CALLS_PER_RUN >= 1
+
+
+def test_a_spent_budget_keeps_the_engines_lineup_without_a_request(store: Store) -> None:
+    search = FakeSearch(3)
+    before, after, results = ask(store, search, tie_roster(), budget=0.0)
+    assert after is before and [result.status for result in results] == ["blocked"] and search.calls == []
+    assert "daily Claude budget" in str(results[0].detail)
+    (numbers,) = close_call_numbers(results)
+    assert numbers["status"] == "blocked" and numbers["choice"] == 2
 
 
 # --- properties against a brute-force enumeration ---------------------------------------------------------------------
@@ -854,6 +1016,56 @@ def test_thursday_the_plan_starts_wilson_and_burden_over_rice_and_kelce(store: S
         ("Rashee Rice", "WR", "BE"),
     ]
     assert stored["moves"][1]["p_active"] == 0.7 and stored["moves"][1]["designation"] == "QUESTIONABLE"
+
+
+def test_sunday_noon_the_advisor_breaks_the_flex_tie_and_the_draft_carries_the_call(store: Store) -> None:
+    """An hour before the early kickoffs the real roster has three near-ties: FLEX (Wilson 13.35 over Kelce 11.79
+    and Hampton 10.74, locking at 1 p.m.), TE (Kittle over Kelce) and WR (Burden over Rice). Claude, asked closest tie
+    first, picks Kelce for the FLEX; his second pick of Kelce at TE finds him already moved and is set aside as
+    rejected, so Kittle stands; the WR call is undecided. On Thursday nothing locks within six hours: nothing is
+    asked."""
+    league = seed(store)
+    engine = plan_week(store, league, now=SUNDAY_NOON)
+    assert engine.best.slots[WILSON] == FLEX and engine.best.slots[KELCE] == BENCH and engine.close_calls == ()
+
+    search = FakeSearch(KELCE)
+    client = AdvisorClient(store, Llm(), search)
+    decision = plan_week(store, league, now=SUNDAY_NOON, advisor=client)
+    assert search.options == [[WILSON, KELCE, HAMPTON], [KITTLE, KELCE], [BURDEN, RICE]]
+    assert [result.status for result in decision.close_calls] == ["pick", "rejected", "no_change"]
+    assert "already moved" in str(decision.close_calls[1].detail) and decision.close_calls[1].pick == KELCE
+    assert [result.call.deadline for result in decision.close_calls] == [SUNDAY_1PM, SUNDAY_LATE, SUNDAY_1PM]
+    assert decision.best.slots[KELCE] == FLEX and decision.best.slots[WILSON] == BENCH  # the one swap
+    assert (decision.best.slots[KITTLE], decision.best.slots[BURDEN], decision.best.slots[RICE]) == (TE, WR, BENCH)
+    assert {k: v for k, v in decision.best.slots.items() if k not in (KELCE, WILSON)} == {
+        k: v for k, v in engine.best.slots.items() if k not in (KELCE, WILSON)
+    }
+    assert_legal(decision.inputs.players, dict(decision.inputs.slot_counts), decision.best)
+    (draft,) = decision.drafts
+    assert draft.kind is ProposalKind.LINEUP
+    assert draft_moves(decision, 0) == {RICE: (WR, BENCH), BURDEN: (BENCH, WR)}  # Kelce keeps the FLEX he holds now
+    calls = draft.engine_numbers["close_calls"]
+    assert [(call["status"], call["pick"], call["choice"], call["engine_pick"]) for call in calls] == [
+        ("pick", KELCE, KELCE, WILSON),
+        ("rejected", KELCE, KITTLE, KITTLE),  # what Claude said, and that the engine's choice stood
+        ("no_change", None, BURDEN, BURDEN),
+    ]
+    assert calls[0]["question"] == "Who starts at RB/WR/TE in week 4?" and calls[0]["sources"][0]["url"] == ESPN_URL
+    assert draft.rationale.endswith(
+        " Close call: Claude starts Travis Kelce over Michael Wilson (80% confident, 1 cited source)."
+    )
+    assert json.loads(json.dumps(draft.engine_numbers))["close_calls"][0]["options"]  # storable as JSON as it is
+    assert len(store.llm_usage.since(SUNDAY_NOON - timedelta(days=1))) == 3
+
+    stored = propose_lineup(
+        store, config_for(), league, schedule=real_schedule(), now=SUNDAY_NOON, weights=WEIGHTS, advisor=client
+    )
+    (row,) = stored.proposals
+    assert row.kind == "lineup" and row.engine_numbers["close_calls"][0]["choice"] == KELCE
+    assert len(search.calls) == 6  # the proposal run planned again and asked again
+
+    thursday = plan_week(store, league, now=THURSDAY, advisor=client)
+    assert len(search.calls) == 6 and thursday.close_calls == () and thursday.best.slots == engine.best.slots
 
 
 def test_the_monday_capture_moves_nobody(store: Store) -> None:

@@ -46,9 +46,12 @@ which does, in this order:
 
 Decision modules register at import (:mod:`fm.decide.registry` has no discovery helper), so this module imports
 :mod:`fm.decide.lineup` and :mod:`fm.decide.waivers`. A decision is called as ``fn(store, config, league_row,
-schedule=..., now=..., opponent_team_id=...)`` with only the keywords its signature accepts; its result's
-``proposals``, ``blocked`` and ``warnings`` are read when present. The lineup decision's win-probability switch needs
-``opponent_team_id``, read from ``EspnClient.matchups`` for the current matchup period.
+schedule=..., now=..., opponent_team_id=..., client=..., advisor=...)`` with only the keywords its signature accepts;
+its result's ``proposals``, ``blocked`` and ``warnings`` are read when present. The lineup decision's win-probability
+switch needs ``opponent_team_id``, read from ``EspnClient.matchups`` for the current matchup period. ``advisor`` is
+the tick's Claude client, or ``None`` without one (:mod:`fm.jobs.advice`): the lineup decisions put their near-ties
+to it within six hours of a lock (:func:`fm.decide.lineup.close_call_lineup`, ROADMAP #60). It is built only for a
+decision whose signature takes it, so a tick without such a decision never imports the SDK for it.
 
 ``fm bot`` records decisions and nothing more; :func:`execute_on_approval` is the ``on_result`` hook for
 :func:`fm.notify.listen` that executes an approval at once when its deadline is within :data:`NEAR_DEADLINE`, instead
@@ -1013,6 +1016,8 @@ class _Tick:
             kwargs["opponent_team_id"] = self._opponent(ctx)
         if ctx.client is not None:
             kwargs["client"] = ctx.client
+        if _accepts(registration.fn, "advisor"):  # built on demand: the SDK import is heavy (fm.jobs.advice)
+            kwargs["advisor"] = self._advisor()
         try:
             result = registration.fn(ctx.store, ctx.config, ctx.row, **_accepted(registration.fn, kwargs))
         except _CRITICAL_ERRORS:
@@ -1314,13 +1319,26 @@ def execute_on_approval(
 # --- small helpers ----------------------------------------------------------------------------------------------------
 
 
+def _parameters(fn: Callable[..., Any]) -> Mapping[str, inspect.Parameter] | None:
+    """``fn``'s parameters, or ``None`` when its signature cannot be read (treated as accepting anything)."""
+    try:
+        return inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return None
+
+
+def _accepts(fn: Callable[..., Any], name: str) -> bool:
+    """Whether ``fn`` takes the keyword ``name`` (or ``**kwargs``)."""
+    parameters = _parameters(fn)
+    if parameters is None:
+        return True
+    return name in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
 def _accepted(fn: Callable[..., Any], kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """The keywords of ``kwargs`` that ``fn`` accepts (all of them when it takes ``**kwargs``)."""
-    try:
-        parameters = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return dict(kwargs)
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+    parameters = _parameters(fn)
+    if parameters is None or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return dict(kwargs)
     return {name: value for name, value in kwargs.items() if name in parameters}
 
