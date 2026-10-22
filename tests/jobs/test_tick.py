@@ -6,8 +6,8 @@ roster through a fake transport, decisions are recording fakes on a private regi
 ``mRoster`` swap on a private flow registry, and the phone is a fake channel. The session is a saved cookie or a
 ``NotLoggedInError``. The news feeds are the recorded captures in ``tests/fixtures/sources/news`` (ROADMAP #58:
 Tyler Allgeier, on team 1's bench, is tagged in ESPN's pickups story) handed over by a fake poller, and Claude is a
-fake transport that answers every triage with an out-of-bounds signal per candidate. Nothing opens a browser or a
-socket; nothing is scheduled.
+fake transport that answers every triage with an out-of-bounds signal per candidate and every explanation (#59) with
+one fixed rationale. Nothing opens a browser or a socket; nothing is scheduled.
 """
 
 from __future__ import annotations
@@ -29,7 +29,9 @@ from pydantic import BaseModel
 from typer.testing import CliRunner
 
 from fm.advisor.client import AdvisorClient, AdvisorError, CallParams, RawReply, TokenUsage, Transport
+from fm.advisor.explain import EXPLAIN_WORKER, ExplainOutput
 from fm.advisor.news_triage import TriagedItem, TriageOutput, TriageSignal
+from fm.advisor.prompts import prompt_text
 from fm.browser.fakes import FakeEspnApi, FakeOpener, FakeTransport, fake_runtime
 from fm.browser.flows import Flow, FlowContext, FlowRegistry, Mode, Preconditions, Verification, WriteRequest
 from fm.browser.session import BrowserError
@@ -64,8 +66,10 @@ from fm.model.availability import NEWS_BOUND
 from fm.model.ids import GSIS
 from fm.notify import DecisionResult, Message, NotifyError, ProposalNotice, Reply
 from fm.proposals import (
+    AddDropPayload,
     LineupMove,
     LineupPayload,
+    Payload,
     ProposalKind,
     approve,
     begin_execution,
@@ -105,6 +109,13 @@ NEWS_ITEMS: tuple[NewsItem, ...] = (
 )
 PICKUPS_STORY = "50108832"
 """ESPN's free-agent pickups article, the one tagging Allgeier."""
+ADD_DROP = AddDropPayload(add_espn_id=DANIELS, drop_espn_id=HUBBARD)
+ADD_DROP_RATIONALE = "Add Jayden Daniels, drop Chuba Hubbard: +2.4 points."
+BENCH_RATIONALE = "Bench Chuba Hubbard (OUT); start Tyler Allgeier: 11.0 expected points (+11.0)."
+CLAUDE_RATIONALE = (
+    "Daniels takes over a starting job this week while Hubbard is out. The engine projects 2.4 more points from the "
+    "swap. Nothing locks before Sunday's early games."
+)
 SWAP = LineupPayload(
     moves=(
         LineupMove(espn_id=HUBBARD, from_slot_id=FLEX, to_slot_id=BENCH),
@@ -220,18 +231,23 @@ class FakeChannel:
 
 class FakeClaude(Transport):
     """Answers every triage chunk with one injury signal per (item, candidate) it was asked about, proposed outside
-    the bounds (delta -0.9, confidence 1.5) so what the tick stores shows the clamping; ``error`` fails the next call
-    instead. Nothing else is implemented: the tick never batches."""
+    the bounds (delta -0.9, confidence 1.5) so what the tick stores shows the clamping, and every explanation with
+    :data:`CLAUDE_RATIONALE`; ``error`` fails the next call instead. Nothing else is implemented: the tick never
+    batches."""
 
     def __init__(self) -> None:
         self.calls: list[CallParams] = []
         self.error: Exception | None = None
 
     def parse(self, params: CallParams, output: type[BaseModel], *, fallback: bool = False) -> RawReply:
-        assert output is TriageOutput
         self.calls.append(params)
         if self.error is not None:
             raise self.error
+        usage = TokenUsage(input_tokens=1200, output_tokens=150)
+        if output is ExplainOutput:
+            explained = ExplainOutput(rationale=CLAUDE_RATIONALE)
+            return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, explained)
+        assert output is TriageOutput
         text = params["messages"][0]["content"][0]["text"]  # type: ignore[index]
         items = [
             TriagedItem(
@@ -251,8 +267,15 @@ class FakeClaude(Transport):
             )
             for match in re.finditer(r"^Item (\d+) \(.*\ncandidates: (.*)$", str(text), re.MULTILINE)
         ]
-        usage = TokenUsage(input_tokens=1200, output_tokens=150)
         return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, TriageOutput(items=items))
+
+    def asked(self, worker: str) -> list[str]:
+        """The user text of every call made as ``worker`` (told apart by the worker's system prompt)."""
+        return [
+            str(params["messages"][0]["content"][0]["text"])  # type: ignore[index]
+            for params in self.calls
+            if params["system"][0]["text"] == prompt_text(worker)
+        ]
 
 
 @dataclass
@@ -288,6 +311,8 @@ class World:
         self.channel = FakeChannel()
         self.calls: list[DecisionCall] = []
         self.decision_payload: LineupPayload | None = SWAP
+        self.drafts: list[tuple[ProposalKind, Payload, str]] = []
+        """(kind, payload, engine rationale) the lineup decision proposes besides ``decision_payload``."""
         self.decision_error: Exception | None = None
         self.registry = DecisionRegistry()
         self.registry.register("nfl", "lineup", self.lineup_decision)
@@ -341,7 +366,11 @@ class World:
 
     def roster(self, *espn_ids: int) -> None:
         """Put these players on team 1's roster for the week, as a sync would, so the league's news is about them."""
-        names = {ALLGEIER: ("Tyler Allgeier", "RB", "ATL"), DANIELS: ("Jayden Daniels", "QB", "WSH")}
+        names = {
+            ALLGEIER: ("Tyler Allgeier", "RB", "ATL"),
+            DANIELS: ("Jayden Daniels", "QB", "WSH"),
+            HUBBARD: ("Chuba Hubbard", "RB", "CAR"),
+        }
         self.store.teams.upsert(TeamRow(league_id=self.league.row_id, team_id=TEAM, name="Fixture Team 1", as_of=NOW))
         for espn_id in espn_ids:
             name, position, pro_team = names[espn_id]
@@ -369,22 +398,29 @@ class World:
         self.calls.append(DecisionCall("lineup", league, kwargs))
         if self.decision_error is not None:
             raise self.decision_error
-        if self.decision_payload is None:
+        drafts = list(self.drafts)
+        if self.decision_payload is not None:
+            drafts.insert(0, (ProposalKind.LINEUP, self.decision_payload, ""))
+        if not drafts:
             return SimpleNamespace(proposals=(), blocked=(), warnings=())
-        row = propose(
-            store,
-            config,
-            league,
-            ProposalKind.LINEUP,
-            self.decision_payload,
-            created_by="decide.fake",
-            scoring_period_id=WEEK,
-            engine_numbers={"basis": "roster-read-1"},
-            deadline=LOCK,
-            dedupe_key="lineup:fake",
-            now=kwargs["now"],
-        )
-        return SimpleNamespace(proposals=(row,), blocked=(), warnings=("fake lineup warning",))
+        rows = [
+            propose(
+                store,
+                config,
+                league,
+                kind,
+                payload,
+                created_by="decide.fake",
+                scoring_period_id=WEEK,
+                engine_numbers={"basis": "roster-read-1", "gain": 2.4},
+                rationale=rationale or None,
+                deadline=LOCK,
+                dedupe_key=f"{kind.value}:{payload.summary()}",
+                now=kwargs["now"],
+            )
+            for kind, payload, rationale in drafts
+        ]
+        return SimpleNamespace(proposals=tuple(rows), blocked=(), warnings=("fake lineup warning",))
 
     def waivers_decision(self, store: Store, config: Config, league: LeagueRow, *, now: datetime, **kwargs: Any) -> Any:
         self.calls.append(DecisionCall("waivers", league, {"now": now, **kwargs}))
@@ -915,6 +951,112 @@ def test_the_news_step_is_skipped_without_a_poller(world: World) -> None:
     assert not any("news" in note for note in league.notes)
 
 
+# --- rationales: Claude explains the run's new proposals before the push (ROADMAP #59) --------------------------------
+
+
+def test_a_new_add_drop_is_pushed_with_claudes_rationale_and_a_bench_keeps_its_template(world: World) -> None:
+    world.decision_payload = None
+    world.roster(ALLGEIER, HUBBARD, DANIELS)
+    world.use_advisor()
+    world.drafts = [
+        (ProposalKind.ADD_DROP, ADD_DROP, ADD_DROP_RATIONALE),
+        (ProposalKind.BENCH_INACTIVE, SWAP, BENCH_RATIONALE),
+    ]
+    opening = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)  # Wednesday: the period opening proposes both
+
+    report = world.tick(now=opening, news=None)
+    (league,) = report.leagues
+    (lineup_run, _waivers) = league.decisions
+    add_drop_id, bench_id = lineup_run.proposals
+    (asked,) = world.claude.asked(EXPLAIN_WORKER)  # one call: the add/drop; the bench_inactive is trivial
+    assert len(world.claude.calls) == 1
+    assert "Proposal: free-agent add/drop (add_drop)" in asked and "League: nfl (nfl, 2026)" in asked
+    assert "Names: 4241416 = Chuba Hubbard, 4373626 = Tyler Allgeier, 4426348 = Jayden Daniels" in asked  # both rows'
+    assert f"Engine rationale: {ADD_DROP_RATIONALE}" in asked
+    explained = get_proposal(world.store, add_drop_id)
+    assert explained.rationale == CLAUDE_RATIONALE
+    assert (explained.status, explained.policy, explained.deadline, explained.created_by) == (
+        "proposed",
+        "approve",
+        LOCK,
+        "decide.fake",
+    )  # only the rationale changed
+    assert explained.engine_numbers == {"basis": "roster-read-1", "gain": 2.4}
+    assert explained.payload == {"add_espn_id": DANIELS, "drop_espn_id": HUBBARD}
+    assert get_proposal(world.store, bench_id).rationale == BENCH_RATIONALE
+    pushed = {notice.proposal_id: notice.message.body for notice in world.channel.notices}
+    assert set(pushed) == {add_drop_id, bench_id} and league.notified == (add_drop_id, bench_id)
+    assert CLAUDE_RATIONALE in pushed[add_drop_id] and ADD_DROP_RATIONALE not in pushed[add_drop_id]
+    assert BENCH_RATIONALE in pushed[bench_id] and CLAUDE_RATIONALE not in pushed[bench_id]
+    assert "nfl: rationales: 1 by Claude, 1 templated, 0 fallen back to the template" in league.notes
+    assert world.state().explained == {add_drop_id, bench_id}
+    (usage,) = world.store.llm_usage.since(opening - timedelta(days=1))
+    assert usage.worker == EXPLAIN_WORKER and usage.league_id == world.league.row_id
+
+    # Sunday's pre-lock window runs the lineup decision again; propose() hands back the same open rows: not re-asked.
+    again = world.tick(now=NOW, news=None)
+    (league,) = again.leagues
+    (run,) = league.decisions
+    assert run.proposals == (add_drop_id, bench_id) and len(world.claude.calls) == 1
+    assert get_proposal(world.store, add_drop_id).rationale == CLAUDE_RATIONALE
+    assert league.notified == () and not any("rationales" in note for note in league.notes)
+    assert world.state().explained == {add_drop_id, bench_id}
+
+
+def test_a_budget_capped_tick_pushes_the_templates_without_a_call(world: World) -> None:
+    world.decision_payload = None
+    world.roster(ALLGEIER, HUBBARD, DANIELS)
+    world.use_advisor(budget=0.0)  # the cap is reached before any call: every worker is refused
+    world.drafts = [(ProposalKind.ADD_DROP, ADD_DROP, ADD_DROP_RATIONALE)]
+
+    report = world.tick(news=None)
+    (league,) = report.leagues
+    (run,) = league.decisions
+    (add_drop_id,) = run.proposals
+    assert world.claude.calls == [] and get_proposal(world.store, add_drop_id).rationale == ADD_DROP_RATIONALE
+    (notice,) = world.channel.notices
+    assert notice.proposal_id == add_drop_id and ADD_DROP_RATIONALE in notice.message.body
+    assert CLAUDE_RATIONALE not in notice.message.body
+    kept = f"nfl: proposal #{add_drop_id} keeps the template rationale (blocked: "
+    assert any(w.startswith(kept) and "daily Claude budget" in w for w in league.warnings)
+    assert "nfl: rationales: 0 by Claude, 0 templated, 1 fallen back to the template" in league.notes
+    assert world.state().explained == {add_drop_id} and report.ok
+
+
+def test_without_an_advisor_the_templates_are_pushed_with_the_reason_noted(world: World) -> None:
+    world.decision_payload = None
+    world.roster(ALLGEIER, HUBBARD, DANIELS)
+    world.drafts = [(ProposalKind.ADD_DROP, ADD_DROP, ADD_DROP_RATIONALE)]  # CONFIG has no key: advisor_for gives None
+    opening = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+
+    report = world.tick(now=opening, news=None)
+    (league,) = report.leagues
+    (add_drop_id,) = league.notified
+    assert world.claude.calls == [] and get_proposal(world.store, add_drop_id).rationale == ADD_DROP_RATIONALE
+    assert ADD_DROP_RATIONALE in world.channel.notices[0].message.body
+    assert any(
+        n == "nfl: 1 proposal keeps the template rationale: ANTHROPIC_API_KEY is not set in .env, so the advisor is "
+        "off (fm config check)"
+        for n in league.notes
+    )
+    assert world.state().explained == {add_drop_id}
+
+    # Sunday: an advisor whose call fails. The settled add/drop is not asked again; the new one keeps its template.
+    world.claude.error = AdvisorError("Claude API call failed: 503")
+    world.use_advisor()
+    other = AddDropPayload(add_espn_id=ALLGEIER, drop_espn_id=HUBBARD)
+    world.drafts.append((ProposalKind.ADD_DROP, other, "Add Tyler Allgeier, drop Chuba Hubbard: +1.0 points."))
+    again = world.tick(now=NOW, news=None)
+    (league,) = again.leagues
+    (run,) = league.decisions
+    assert run.proposals[0] == add_drop_id and len(run.proposals) == 2
+    new_id = run.proposals[1]
+    assert len(world.claude.calls) == 1 and world.claude.asked(EXPLAIN_WORKER)[0].count("Proposal:") == 1
+    assert get_proposal(world.store, new_id).rationale == "Add Tyler Allgeier, drop Chuba Hubbard: +1.0 points."
+    assert any(f"nfl: proposal #{new_id} keeps the template rationale (failed: " in w for w in league.warnings)
+    assert league.notified == (new_id,) and world.state().explained == {add_drop_id, new_id}
+
+
 def test_the_first_tick_after_a_gap_reports_the_windows_it_missed(world: World) -> None:
     world.decision_payload = None
     state = TickState(last_tick=THURSDAY)
@@ -1017,6 +1159,7 @@ def test_state_round_trips_and_tolerates_a_broken_file(tmp_path: Path) -> None:
     state = TickState(last_tick=NOW, runs={"nfl:pre_lock:x": NOW}, notified={3}, alerts={"session:missing": NOW})
     state.inputs["nfl"] = NOW
     state.news["nfl"] = NOW - timedelta(minutes=5)
+    state.explained = {3, 8}
     state.session = {"status": "ok", "expires_at": None, "checked_at": NOW.isoformat(), "detail": "fine"}
     state.save(path)
     assert TickState.load(path) == state

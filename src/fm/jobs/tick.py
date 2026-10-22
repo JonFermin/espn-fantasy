@@ -25,7 +25,11 @@ which does, in this order:
    (:func:`refresh_inputs`: nflverse practice reports for the NFL, the official injury report and the DARKO blend for
    the NBA, a few times a day, and at once when the triage stored new signals, since the stored availability rows are
    where the decisions read them); run each registered decision whose window is due, **once** per window (the run is
-   recorded in the tick's state file); push every new proposal to the phone with Approve / Reject buttons
+   recorded in the tick's state file); have the advisor explain the run's new ``proposed`` rows
+   (:func:`fm.advisor.explain.explain_proposals`: Claude's two to four sentences replace the engine's template as the
+   stored ``rationale``, each proposal explained once, recorded in the state file; a trivial move such as
+   ``bench_inactive`` keeps its template without a call, and so does everything when there is no advisor, the daily
+   budget is spent or the call fails); push every new proposal to the phone with Approve / Reject buttons
    (:func:`fm.notify.notify_proposal`). News and advisor failures are warnings, never a skipped league.
 4. **Auto-approve** at T-15 (:func:`fm.proposals.auto_approve_due`, which fires only inside :data:`AUTO_LEAD` and
    never while paused), then **execute** every approved proposal whose deadline has not passed, soonest deadline
@@ -34,9 +38,9 @@ which does, in this order:
    alternatives against one roster read (the same ``engine_numbers["basis"]``), so once one is verified the other is
    rejected (:func:`reject_alternatives`) rather than left to auto-approve at T-15 and fail. Failures are alerted
    with a link to the team page.
-5. **Record** the tick (``tick-state.json`` under the config dir: last run, windows run, proposals notified, alerts
-   sent, inputs refreshed, news polled, and the session verdict of step 2 as ``session: {status, expires_at,
-   checked_at, detail}``),
+5. **Record** the tick (``tick-state.json`` under the config dir: last run, windows run, proposals explained and
+   notified, alerts sent, inputs refreshed, news polled, and the session verdict of step 2 as ``session: {status,
+   expires_at, checked_at, detail}``),
    so the next tick knows what it already did and what closed in between, and ``fm.health`` can report the session
    without launching a second browser on the profile.
 
@@ -50,7 +54,7 @@ schedule=..., now=..., opponent_team_id=...)`` with only the keywords its signat
 :func:`fm.notify.listen` that executes an approval at once when its deadline is within :data:`NEAR_DEADLINE`, instead
 of waiting for the next tick. Every collaborator (session loader, ESPN client factory, sync, inputs refresh, news
 poller, advisor factory, runtime opener, phone channel, decision and flow registries, clock) is injectable, so tests
-run the whole tick offline. The advisor and its triage worker are imported only when a tick builds an advisor
+run the whole tick offline. The advisor and its workers are imported only when a tick builds an advisor
 (:mod:`fm.jobs.advice`), so this module stays as light to import as the SDK-free tick was.
 """
 
@@ -110,7 +114,7 @@ from fm.model.ids import Crosswalk, CrosswalkError
 from fm.model.projections import BlendWeights
 from fm.model.relevance import Relevance, ingest_news, opponent_from, relevance_for
 from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, notify_proposal, send_alert
-from fm.notify.messages import local_time, moves_text, proposal_name
+from fm.notify.messages import local_time, moves_text, player_names, proposal_name
 from fm.proposals import (
     ProposalError,
     auto_approve_due,
@@ -118,7 +122,7 @@ from fm.proposals import (
     pause_state,
     reject,
 )
-from fm.proposals.policy import as_utc, stored_settings
+from fm.proposals.policy import as_utc, parse_payload, stored_settings
 from fm.sources.base import SourceError
 from fm.sources.nba_injuries import NbaInjuriesSource
 from fm.sources.news import NewsPoll, poll_news
@@ -214,6 +218,9 @@ class TickState:
     """Window key -> when it ran (:attr:`fm.jobs.deadlines.RunWindow.key`)."""
     notified: set[int] = field(default_factory=set[int])
     """Proposal ids pushed to the phone."""
+    explained: set[int] = field(default_factory=set[int])
+    """Proposal ids whose rationale the tick has settled (Claude's, or the template it fell back to): each proposal
+    is explained once, however often a later decision run returns it again."""
     alerts: dict[str, datetime] = field(default_factory=dict[str, datetime])
     """Alert key -> when it was last sent, for the ones that repeat."""
     inputs: dict[str, datetime] = field(default_factory=dict[str, datetime])
@@ -239,6 +246,7 @@ class TickState:
                 last_tick=_stamp(data.get("last_tick")),
                 runs=_stamps(data.get("runs", {})),
                 notified={int(v) for v in data.get("notified", [])},
+                explained={int(v) for v in data.get("explained", [])},
                 alerts=_stamps(data.get("alerts", {})),
                 inputs=_stamps(data.get("inputs", {})),
                 news=_stamps(data.get("news", {})),
@@ -253,6 +261,7 @@ class TickState:
             "last_tick": None if self.last_tick is None else self.last_tick.isoformat(),
             "runs": {k: v.isoformat() for k, v in sorted(self.runs.items())},
             "notified": sorted(self.notified),
+            "explained": sorted(self.explained),
             "alerts": {k: v.isoformat() for k, v in sorted(self.alerts.items())},
             "inputs": {k: v.isoformat() for k, v in sorted(self.inputs.items())},
             "news": {k: v.isoformat() for k, v in sorted(self.news.items())},
@@ -741,6 +750,7 @@ class _Tick:
         executions, would_execute = self._execute(paused=paused is not None)
 
         self.state.notified &= {row.row_id for row in self.store.proposals.find(statuses=("proposed",))}
+        self.state.explained &= {row.row_id for row in self.store.proposals.open()}
         self.state.last_tick = self.now
         self.state.prune(self.now)
         self.state.save(self.state_file)
@@ -835,6 +845,7 @@ class _Tick:
             fresh_signals = self._refresh_news(ctx, notes, warnings)
             notes.extend(self._refresh_inputs(ctx, warnings, force=fresh_signals))
             decisions = [run for window in due for run in self._run_window(ctx, window, warnings)]
+            notes.extend(self._explain(ctx, decisions, warnings))
             notified = self._notify_new(ctx, warnings)
         return LeagueTick(
             key=key,
@@ -1013,6 +1024,75 @@ class _Tick:
         blocked = tuple(_strings(getattr(result, "blocked", ())))
         warnings = tuple(_strings(getattr(result, "warnings", ())))
         return DecisionRun(registration.name, window.key, proposals=proposals, blocked=blocked, warnings=warnings)
+
+    # --- rationales
+
+    def _explain(self, ctx: LeagueContext, decisions: Sequence[DecisionRun], warnings: list[str]) -> list[str]:
+        """Settle the rationale of each ``proposed`` row this run produced, before the push: Claude's text is stored
+        as the row's ``rationale`` (nothing else on the row changes), the template stays for a trivial move and
+        whenever Claude cannot be used. A proposal is explained once (:attr:`TickState.explained`): a later window
+        whose decision returns the same open proposal does not ask again."""
+        rows: dict[int, ProposalRow] = {}
+        for run in decisions:
+            for proposal_id in run.proposals:
+                if proposal_id in self.state.explained or proposal_id in rows:
+                    continue
+                row = self.store.proposals.get(proposal_id)
+                if row is not None and row.status == "proposed":
+                    rows[proposal_id] = row
+        if not rows:
+            return []
+        self.state.explained.update(rows)  # one attempt per proposal, whatever comes of it
+        keep = f"{len(rows)} proposal keeps" if len(rows) == 1 else f"{len(rows)} proposals keep"
+        advisor = self._advisor()
+        if advisor is None:
+            return [f"{ctx.key}: {keep} the template rationale: {self.advisor_note}"]
+        from fm.advisor.explain import explain_proposals  # loaded with the advisor, never by a tick without one
+
+        names = self._names(ctx, rows.values())
+        try:
+            explanations = explain_proposals(
+                advisor, rows.values(), names=names, league_label=_league_label(ctx), now=self.now
+            )
+        except _CRITICAL_ERRORS:
+            raise
+        except Exception as exc:  # the rows keep the engine's rationale and are pushed as they are
+            logger.exception("tick: explaining %s proposals failed", ctx.key)
+            warnings.append(f"{ctx.key}: {keep} the template rationale: {exc}")
+            return []
+        counts = {"claude": 0, "template": 0, "fallback": 0}
+        for row, explanation in zip(rows.values(), explanations, strict=True):
+            counts[explanation.source] += 1
+            if explanation.used_claude:
+                if not self._store_rationale(row.row_id, explanation.text):
+                    warnings.append(f"{ctx.key}: proposal #{row.row_id} was decided before its rationale was stored")
+            elif explanation.source == "fallback":
+                detail = explanation.detail
+                warnings.append(f"{ctx.key}: proposal #{row.row_id} keeps the template rationale ({detail})")
+        return [
+            f"{ctx.key}: rationales: {counts['claude']} by Claude, {counts['template']} templated, "
+            f"{counts['fallback']} fallen back to the template"
+        ]
+
+    def _names(self, ctx: LeagueContext, rows: Iterable[ProposalRow]) -> dict[int, str]:
+        """ESPN id -> name for every player the rows' payloads name that the store knows (a payload that does not
+        parse names nobody)."""
+        names: dict[int, str] = {}
+        for row in rows:
+            try:
+                names.update(player_names(self.store, ctx.sport, parse_payload(row)))
+            except (ProposalError, ValueError):
+                logger.info("tick: proposal #%d: payload does not parse; explained without names", row.row_id)
+        return names
+
+    def _store_rationale(self, proposal_id: int, text: str) -> bool:
+        """Write Claude's rationale on the proposal as it is stored now, so a decision taken since the run (the
+        dashboard approving it) is kept; ``False`` when it is no longer ``proposed`` and left alone."""
+        current = self.store.proposals.get(proposal_id)
+        if current is None or current.status != "proposed":
+            return False
+        self.store.proposals.update(current.model_copy(update={"rationale": text}))
+        return True
 
     def _opponent(self, ctx: LeagueContext) -> int | None:
         """Our opponent this matchup period, from ``mMatchup``; ``None`` without a session, on a bye, or when the read
@@ -1269,6 +1349,12 @@ def _strings(value: object) -> list[str]:
 
 def _summary(store: Store, row: ProposalRow) -> str:
     return moves_text(store, store.leagues.get(row.league_id), row)
+
+
+def _league_label(ctx: LeagueContext) -> str:
+    """How the advisor's prompts name the league: ``My League (nfl, 2026)``, or the key when ESPN's name is unknown."""
+    name = ctx.row.name or ctx.key
+    return f"{name} ({ctx.sport}, {ctx.row.season})"
 
 
 def _result_detail(result: ExecutionResult) -> str:
