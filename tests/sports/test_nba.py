@@ -239,6 +239,8 @@ def test_stat_schema_is_espns_nba_vocabulary() -> None:
     assert schema.label("FG%") == "Field Goal Percentage"
     assert schema.from_espn({"0": 27, "6": 11.5, "17": 3, "42": 1}) == {"PTS": 27.0, "REB": 11.5, "3PM": 3.0, "GP": 1.0}
     assert schema.to_espn({"AST": 9.0}) == {3: 9.0}
+    # A/TO with no turnovers: ESPN sends Infinity, which is dropped rather than stored as invalid JSON
+    assert schema.from_espn({"3": 6, "11": 0, "35": float("inf"), "19": float("nan")}) == {"AST": 6.0, "TO": 0.0}
     assert NBA.stat_schema is schema and schema == StatSchema.for_game("nba") != NFL.stat_schema
 
 

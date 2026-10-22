@@ -31,6 +31,7 @@ shared file. Decision modules register per sport in :mod:`fm.decide.registry`.
 from __future__ import annotations
 
 import importlib
+import math
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -270,6 +271,9 @@ class StatSchema:
     def from_espn(self, raw: Mapping[Any, Any]) -> dict[str, float]:
         """An ESPN stats dict (ids as ints or strings) as an abbreviation-keyed stat line; ``None`` values are dropped.
 
+        Non-finite values are dropped too: ESPN sends ``Infinity`` for an undefined ratio (``A/TO`` with no turnovers),
+        which no league can score and which would not store as JSON.
+
         A non-numeric id or value raises ``ValueError``: a stat line that lost a stat silently would score wrong.
         """
         line: dict[str, float] = {}
@@ -281,6 +285,8 @@ class StatSchema:
                 continue
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise ValueError(f"{self.game.value}: stat {stat_id} has a non-numeric value {value!r}")
+            if not math.isfinite(value):
+                continue
             line[self.abbr(stat_id)] = float(value)
         return line
 
