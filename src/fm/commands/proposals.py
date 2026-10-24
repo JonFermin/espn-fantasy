@@ -1,8 +1,9 @@
 """``fm proposals list|approve|reject`` and the ``fm pause`` / ``fm resume`` kill switch (DESIGN sections 11, 12).
 
 The CLI is the first approval channel; the phone channels (ROADMAP #18) call the same ``fm.proposals`` functions.
-Listing sweeps expired proposals first so what is shown as open really is. No command here needs ``config.toml``:
-decisions act on proposals that already cleared policy, and the list works against an empty state database.
+Listing sweeps expired proposals first so what is shown as open really is, and shows a trade offer's pitch to paste
+under its line (:func:`fm.render.proposals.stored_pitch`). No command here needs ``config.toml``: decisions act on
+proposals that already cleared policy, and the list works against an empty state database.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from fm.proposals import (
     reject,
     resume,
 )
+from fm.render.proposals import stored_pitch
 from fm.store import OPEN_PROPOSAL_STATUSES, ProposalRow, Store
 
 app = typer.Typer(help="Review and decide proposals.", no_args_is_help=True)
@@ -56,6 +58,9 @@ def list_(
             return
         for row in rows:
             typer.echo(_line(row, keys.get(row.league_id, f"league {row.league_id}")))
+            pitch = stored_pitch(row)
+            if pitch is not None:
+                typer.echo(f"      pitch ({pitch.source}): {pitch.text}")
 
 
 @app.command("approve")

@@ -13,7 +13,9 @@ endpoint                                               serves
                                                        deadline of each kind and the open proposals; the session
                                                        check, the health counts and the kill switch
 ``GET /api/proposals[?all=1&league=]``                 :func:`fm.views.list_proposals`, each with its moves in player
-                                                       names (:func:`fm.notify.messages.moves_text`)
+                                                       names (:func:`fm.notify.messages.moves_text`) and, for a trade
+                                                       offer, the pitch to paste
+                                                       (:func:`fm.render.proposals.stored_pitch`)
 ``POST /api/proposals/{id}/approve``, ``.../reject``   :func:`fm.proposals.approve` / :func:`fm.proposals.reject` with
                                                        ``decided_by="dashboard"``
 ``POST /api/pause`` (``{"reason"}``), ``/api/resume``  the kill switch
@@ -101,6 +103,7 @@ from fm.presets import PRESET_DESCRIPTIONS, PRESET_NAMES
 from fm.proposals import TRANSITIONS, PauseState, PolicyError, ProposalError, approve, kind_spec, pause, reject, resume
 from fm.proposals.pause import pause_state
 from fm.proposals.policy import stored_settings
+from fm.render.proposals import stored_pitch
 from fm.store import LeagueRow, Store
 from fm.web.login import APP_ID, LOGIN_PARAM, LOGIN_PATH, LOGIN_TTL, PING_PATH, LoginLinks
 
@@ -551,14 +554,17 @@ def _proposals(league: str | None, include_closed: bool) -> _Json:
 
 def _with_moves(store: Store, item: _Json) -> _Json:
     """A :func:`fm.views.proposal_dict` plus what the page shows and offers: the kind's label, the moves in player
-    names and slot labels, and whether it can still be approved or rejected."""
+    names and slot labels, a trade offer's pitch to paste (``{"text", "source", "detail"}``, else ``None``), and
+    whether it can still be approved or rejected."""
     row = store.proposals.get(int(item["id"]))
     league = store.leagues.get(row.league_id) if row is not None else None
     exits = TRANSITIONS.get(item["status"], frozenset())
+    pitch = stored_pitch(row) if row is not None else None
     return {
         **item,
         "label": _kind_label(str(item["kind"])),
         "moves": moves_text(store, league, row) if row is not None else item["summary"],
+        "pitch": pitch.as_json() if pitch is not None else None,
         "can_approve": "approved" in exits,
         "can_reject": "rejected" in exits,
     }

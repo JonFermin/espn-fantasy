@@ -6,14 +6,16 @@ roster through a fake transport, decisions are recording fakes on a private regi
 ``mRoster`` swap on a private flow registry, and the phone is a fake channel. The session is a saved cookie or a
 ``NotLoggedInError``. The news feeds are the recorded captures in ``tests/fixtures/sources/news`` (ROADMAP #58:
 Tyler Allgeier, on team 1's bench, is tagged in ESPN's pickups story) handed over by a fake poller, and Claude is a
-fake transport that answers every triage with an out-of-bounds signal per candidate and every explanation (#59) with
-one fixed rationale. Nothing opens a browser or a socket; nothing is scheduled.
+fake transport that answers every triage with an out-of-bounds signal per candidate, every explanation (#59) with
+one fixed rationale and every trade pitch (#61) with one fixed message. Nothing opens a browser or a socket; nothing
+is scheduled.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -31,6 +33,7 @@ from typer.testing import CliRunner
 from fm.advisor.client import AdvisorClient, AdvisorError, CallParams, RawReply, TokenUsage, Transport
 from fm.advisor.explain import EXPLAIN_WORKER, ExplainOutput
 from fm.advisor.news_triage import TriagedItem, TriageOutput, TriageSignal
+from fm.advisor.pitch import PITCH_WORKER, PitchOutput
 from fm.advisor.prompts import prompt_text
 from fm.browser.fakes import FakeEspnApi, FakeOpener, FakeTransport, fake_runtime
 from fm.browser.flows import Flow, FlowContext, FlowRegistry, Mode, Preconditions, Verification, WriteRequest
@@ -53,6 +56,7 @@ from fm.jobs.tick import (
     NEWS_EVERY,
     AdvisorFactory,
     LeagueContext,
+    LeagueTick,
     SessionVerdict,
     TickOptions,
     TickReport,
@@ -71,6 +75,7 @@ from fm.proposals import (
     LineupPayload,
     Payload,
     ProposalKind,
+    TradePayload,
     approve,
     begin_execution,
     get_proposal,
@@ -115,6 +120,16 @@ BENCH_RATIONALE = "Bench Chuba Hubbard (OUT); start Tyler Allgeier: 11.0 expecte
 CLAUDE_RATIONALE = (
     "Daniels takes over a starting job this week while Hubbard is out. The engine projects 2.4 more points from the "
     "swap. Nothing locks before Sunday's early games."
+)
+TRADE = TradePayload(other_team_id=2, give_espn_ids=(HUBBARD,), get_espn_ids=(GIBBS,))
+TRADE_RATIONALE = "Give Chuba Hubbard to Rival Squad for Jahmyr Gibbs. Our rest-of-season lineup value +2.4 points."
+CLAUDE_PITCH = (
+    "Hey Rival Squad, I'd send you Chuba Hubbard for Jahmyr Gibbs. Hubbard gives you a weekly starter at running "
+    "back where you are thin. Happy to talk it through if you would tweak it."
+)
+TEMPLATE_PITCH = (
+    "Hey Rival Squad, would you be open to a trade? I'd send you Chuba Hubbard for Jahmyr Gibbs. If it is close but "
+    "not quite right, let me know what would work for you and I am happy to talk it through. - Fixture Team 1"
 )
 SWAP = LineupPayload(
     moves=(
@@ -247,6 +262,9 @@ class FakeClaude(Transport):
         if output is ExplainOutput:
             explained = ExplainOutput(rationale=CLAUDE_RATIONALE)
             return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, explained)
+        if output is PitchOutput:
+            pitched = PitchOutput(message=CLAUDE_PITCH)
+            return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, pitched)
         assert output is TriageOutput
         text = params["messages"][0]["content"][0]["text"]  # type: ignore[index]
         items = [
@@ -370,8 +388,10 @@ class World:
             ALLGEIER: ("Tyler Allgeier", "RB", "ATL"),
             DANIELS: ("Jayden Daniels", "QB", "WSH"),
             HUBBARD: ("Chuba Hubbard", "RB", "CAR"),
+            GIBBS: ("Jahmyr Gibbs", "RB", "DET"),
         }
         self.store.teams.upsert(TeamRow(league_id=self.league.row_id, team_id=TEAM, name="Fixture Team 1", as_of=NOW))
+        self.store.teams.upsert(TeamRow(league_id=self.league.row_id, team_id=2, name="Rival Squad", as_of=NOW))
         for espn_id in espn_ids:
             name, position, pro_team = names[espn_id]
             self.store.players.upsert(
@@ -941,6 +961,76 @@ def test_one_leagues_triage_reads_for_every_league_of_the_sport(world: World) ->
     assert "news triage (nfl): 10 read, 2 relevant, 10 triaged, 2 signals" in "\n".join(report.leagues[0].notes)
     (signal,) = world.store.news_signals.for_player("nfl", mcconkey)
     assert signal.p_active_delta == -NEWS_BOUND and world.store.news.untriaged() == []
+
+
+# --- trade pitches: every new trade_propose carries a message to paste (ROADMAP #61) --------------------------------
+
+
+def trade_offer(world: World, *, now: datetime) -> tuple[LeagueTick, int]:
+    """One tick whose lineup decision also drafts the trade offer; the league's tick and the offer's id."""
+    world.decision_payload = None
+    world.roster(ALLGEIER, HUBBARD, GIBBS)
+    world.drafts = [(ProposalKind.TRADE_PROPOSE, TRADE, TRADE_RATIONALE)]
+    report = world.tick(now=now, news=None)
+    (league,) = report.leagues
+    (trade_id,) = league.notified
+    return league, trade_id
+
+
+def test_a_new_trade_offer_is_pushed_with_claudes_pitch(world: World) -> None:
+    world.use_advisor()
+    league, trade_id = trade_offer(world, now=datetime(2026, 9, 30, 12, 0, tzinfo=UTC))
+    row = get_proposal(world.store, trade_id)
+    assert row.engine_numbers["pitch"] == {"text": CLAUDE_PITCH, "source": "claude", "detail": None}
+    assert row.engine_numbers["basis"] == "roster-read-1" and row.engine_numbers["gain"] == 2.4  # the rest untouched
+    assert row.payload == {"other_team_id": 2, "give_espn_ids": [HUBBARD], "get_espn_ids": [GIBBS]}
+    assert (row.kind, row.policy, row.status) == ("trade_propose", "approve", "proposed")
+    assert row.rationale == CLAUDE_RATIONALE  # explained in the same pass, before the push
+    (asked,) = world.claude.asked(PITCH_WORKER)
+    assert "From: Fixture Team 1" in asked and "To: Rival Squad" in asked
+    assert "We send them: Chuba Hubbard" in asked and "They send us: Jahmyr Gibbs" in asked
+    assert "Fact about their side" not in asked  # the fake decision's numbers say nothing about them
+    assert "League: nfl (nfl, 2026)" in asked
+    (notice,) = world.channel.notices
+    body = notice.message.body.splitlines()
+    assert "✉️ Pitch to paste into ESPN (claude):" in body and CLAUDE_PITCH in body
+    assert body.index(CLAUDE_PITCH) == body.index("✉️ Pitch to paste into ESPN (claude):") + 1
+    assert "nfl: pitches: 1 by Claude, 0 templated" in league.notes
+    assert world.state().explained == {trade_id}
+
+    again = world.tick(now=NOW, news=None)  # Sunday's window returns the same open offer: nothing is drafted again
+    assert len(world.claude.asked(PITCH_WORKER)) == 1 and again.leagues[0].notified == ()
+    assert get_proposal(world.store, trade_id).engine_numbers["pitch"]["text"] == CLAUDE_PITCH
+
+
+def test_without_an_advisor_the_template_pitch_is_stored_and_pushed(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("fm.advisor.pitch", "fm.advisor.explain"):  # a keyless tick must not need the advisor at all
+        monkeypatch.setitem(sys.modules, name, None)
+    league, trade_id = trade_offer(world, now=datetime(2026, 9, 30, 12, 0, tzinfo=UTC))
+    row = get_proposal(world.store, trade_id)
+    assert row.engine_numbers["pitch"] == {
+        "text": TEMPLATE_PITCH,
+        "source": "template",
+        "detail": "ANTHROPIC_API_KEY is not set in .env, so the advisor is off (fm config check)",
+    }
+    assert row.rationale == TRADE_RATIONALE and world.claude.calls == []
+    (notice,) = world.channel.notices
+    assert "✉️ Pitch to paste into ESPN (template):" in notice.message.body.splitlines()
+    assert TEMPLATE_PITCH in notice.message.body.splitlines()
+    assert "nfl: pitches: 0 by Claude, 1 templated" in league.notes
+
+
+def test_a_spent_budget_leaves_the_template_pitch_with_the_reason(world: World) -> None:
+    world.use_advisor(budget=0.0)
+    league, trade_id = trade_offer(world, now=datetime(2026, 9, 30, 12, 0, tzinfo=UTC))
+    pitch = get_proposal(world.store, trade_id).engine_numbers["pitch"]
+    assert pitch["text"] == TEMPLATE_PITCH and pitch["source"] == "template"
+    assert str(pitch["detail"]).startswith("blocked: ") and "daily Claude budget" in str(pitch["detail"])
+    assert world.claude.calls == []
+    assert any(f"proposal #{trade_id} keeps the template pitch (blocked: " in w for w in league.warnings)
+    assert "nfl: pitches: 0 by Claude, 1 templated" in league.notes
 
 
 def test_the_news_step_is_skipped_without_a_poller(world: World) -> None:

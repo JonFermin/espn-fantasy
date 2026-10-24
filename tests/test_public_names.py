@@ -79,6 +79,7 @@ MODULES = (
     "fm.decide.offers",
     "fm.jobs.tick",
     "fm.jobs.advice",
+    "fm.render.proposals",
     "fm.jobs.deadlines",
     "fm.jobs.scheduler_base",
     "fm.jobs.scheduler_windows",

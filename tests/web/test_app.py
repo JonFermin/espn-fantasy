@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 
 import fm.web.app as web_app
 from fm.config import load_config
-from fm.proposals import AddDropPayload, pause_state, propose
+from fm.proposals import AddDropPayload, TradePayload, pause_state, propose
 from fm.store import Store
 
 AS_OF = "2026-10-04T15:00Z"  # Sunday 11 a.m. ET of week 4, when the fixture home was synced (tests/test_views.py)
@@ -91,6 +91,25 @@ def store_add_drop(home: Path, *, add: int, rationale: str) -> int:
             AddDropPayload(add_espn_id=add),
             created_by="test",
             rationale=rationale,
+            now=NOW,
+        )
+        assert made.row_id is not None
+        return made.row_id
+
+
+def store_trade(home: Path, *, pitch: dict[str, Any]) -> int:
+    """A proposed trade offer in the fixture league carrying the pitch the tick would have stored (ROADMAP #61)."""
+    with Store.open(home / "state.db") as store:
+        row = store.leagues.by_key("nfl")
+        assert row is not None
+        made = propose(
+            store,
+            load_config(),
+            row,
+            "trade_propose",
+            TradePayload(other_team_id=2, give_espn_ids=(DOWDLE,), get_espn_ids=(BARKLEY,)),
+            created_by="test",
+            engine_numbers={"pitch": pitch, "score": 0.3},
             now=NOW,
         )
         assert made.row_id is not None
@@ -244,6 +263,17 @@ def test_the_proposal_list_says_what_each_proposal_still_allows(client: TestClie
     assert by_id[second]["label"] and "Barkley" in by_id[second]["moves"] and by_id[second]["rationale"] == "second"
     assert refused(client.get("/api/proposals?all=maybe"), 400)
     assert "no league" in refused(client.get("/api/proposals?league=nba"), 400)
+
+
+def test_a_trade_offer_lists_its_pitch_for_pasting(client: TestClient, home: Path) -> None:
+    text = "Hey, would you be open to a trade? I'd send you Dowdle for Barkley."
+    pitch: dict[str, Any] = {"text": text, "source": "template", "detail": None}
+    offer = store_trade(home, pitch=pitch)
+    bare = store_add_drop(home, add=DOWDLE, rationale="a bench upgrade")
+    by_id = {item["id"]: item for item in ok(client.get("/api/proposals"))["proposals"]}
+    assert by_id[offer]["pitch"] == pitch and by_id[offer]["kind"] == "trade_propose"
+    assert by_id[bare]["pitch"] is None
+    assert "Barkley" in by_id[offer]["moves"]
 
 
 # --- the kill switch --------------------------------------------------------------------------------------------------

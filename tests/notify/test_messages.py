@@ -38,6 +38,7 @@ from fm.proposals import (
     WaiverPayload,
     propose,
 )
+from fm.render.proposals import StoredPitch, stored_pitch
 from fm.store import LeagueRow, PlayerRow, Store, TeamRow
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -161,6 +162,20 @@ class TestProposalMessage:
             "Give: Bench Tight End",
             "Get: Waiver Runner",
         ]
+        assert "Pitch" not in proposal_message(store, nfl, row, now=NOW).body  # nothing stored, nothing shown
+
+    def test_a_trade_offers_pitch_follows_the_terms(self, store: Store, config: Config, nfl: LeagueRow) -> None:
+        payload = TradePayload(other_team_id=3, give_espn_ids=(13,), get_espn_ids=(12,))
+        text = "Hey Sample Rivals, would you take Bench Tight End for Waiver Runner? He starts for you every week."
+        numbers = {"pitch": {"text": text, "source": "claude", "detail": None}, "score": 0.4}
+        row = propose(
+            store, config, nfl, ProposalKind.TRADE_PROPOSE, payload, created_by="t", engine_numbers=numbers, now=NOW
+        )
+        lines = proposal_message(store, nfl, row, now=NOW).body.splitlines()
+        assert lines[3:5] == ["✉️ Pitch to paste into ESPN (claude):", text] and lines[-1].startswith("⏰")
+        assert stored_pitch(row) == StoredPitch(text, "claude")
+        malformed = row.model_copy(update={"engine_numbers": {"pitch": {"text": "   ", "source": "claude"}}})
+        assert stored_pitch(malformed) is None and "Pitch" not in proposal_message(store, nfl, malformed, now=NOW).body
 
 
 class TestAlertHelpers:

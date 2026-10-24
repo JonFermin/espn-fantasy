@@ -29,7 +29,10 @@ which does, in this order:
    (:func:`fm.advisor.explain.explain_proposals`: Claude's two to four sentences replace the engine's template as the
    stored ``rationale``, each proposal explained once, recorded in the state file; a trivial move such as
    ``bench_inactive`` keeps its template without a call, and so does everything when there is no advisor, the daily
-   budget is spent or the call fails); push every new proposal to the phone with Approve / Reject buttons
+   budget is spent or the call fails) and, in the same pass, draft the pitch for each new ``trade_propose``
+   (:func:`fm.advisor.pitch.draft_pitch`, stored as ``engine_numbers["pitch"]`` with its ``source``: Claude's with an
+   advisor, the template without one, since the template costs nothing; the phone, the dashboard and ``fm proposals``
+   show it for the owner to paste into ESPN); push every new proposal to the phone with Approve / Reject buttons
    (:func:`fm.notify.notify_proposal`). News and advisor failures are warnings, never a skipped league.
 4. **Auto-approve** at T-15 (:func:`fm.proposals.auto_approve_due`, which fires only inside :data:`AUTO_LEAD` and
    never while paused), then **execute** every approved proposal whose deadline has not passed, soonest deadline
@@ -119,13 +122,17 @@ from fm.model.relevance import Relevance, ingest_news, opponent_from, relevance_
 from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, notify_proposal, send_alert
 from fm.notify.messages import local_time, moves_text, player_names, proposal_name
 from fm.proposals import (
+    PolicyError,
     ProposalError,
+    ProposalKind,
+    TradePayload,
     auto_approve_due,
     expire_due,
     pause_state,
     reject,
 )
 from fm.proposals.policy import as_utc, parse_payload, stored_settings
+from fm.render.proposals import StoredPitch, pitch_facts, plain_pitch, with_pitch
 from fm.sources.base import SourceError
 from fm.sources.nba_injuries import NbaInjuriesSource
 from fm.sources.news import NewsPoll, poll_news
@@ -1033,10 +1040,10 @@ class _Tick:
     # --- rationales
 
     def _explain(self, ctx: LeagueContext, decisions: Sequence[DecisionRun], warnings: list[str]) -> list[str]:
-        """Settle the rationale of each ``proposed`` row this run produced, before the push: Claude's text is stored
-        as the row's ``rationale`` (nothing else on the row changes), the template stays for a trivial move and
-        whenever Claude cannot be used. A proposal is explained once (:attr:`TickState.explained`): a later window
-        whose decision returns the same open proposal does not ask again."""
+        """Settle each ``proposed`` row this run produced, before the push: its rationale (:meth:`_rationales`) and,
+        for a trade offer, its pitch (:meth:`_pitches`). Only ``rationale`` and ``engine_numbers["pitch"]`` change on a
+        row. A proposal is settled once (:attr:`TickState.explained`): a later window whose decision returns the same
+        open proposal does not ask again."""
         rows: dict[int, ProposalRow] = {}
         for run in decisions:
             for proposal_id in run.proposals:
@@ -1048,17 +1055,24 @@ class _Tick:
         if not rows:
             return []
         self.state.explained.update(rows)  # one attempt per proposal, whatever comes of it
-        keep = f"{len(rows)} proposal keeps" if len(rows) == 1 else f"{len(rows)} proposals keep"
         advisor = self._advisor()
+        notes = self._rationales(ctx, advisor, list(rows.values()), warnings)
+        notes.extend(self._pitches(ctx, advisor, list(rows.values()), warnings))
+        return notes
+
+    def _rationales(
+        self, ctx: LeagueContext, advisor: AdvisorClient | None, rows: Sequence[ProposalRow], warnings: list[str]
+    ) -> list[str]:
+        """Claude's rationale stored on each row (:func:`fm.advisor.explain.explain_proposals`); the template stays
+        for a trivial move and whenever Claude cannot be used."""
+        keep = f"{len(rows)} proposal keeps" if len(rows) == 1 else f"{len(rows)} proposals keep"
         if advisor is None:
             return [f"{ctx.key}: {keep} the template rationale: {self.advisor_note}"]
         from fm.advisor.explain import explain_proposals  # loaded with the advisor, never by a tick without one
 
-        names = self._names(ctx, rows.values())
+        names = self._names(ctx, rows)
         try:
-            explanations = explain_proposals(
-                advisor, rows.values(), names=names, league_label=_league_label(ctx), now=self.now
-            )
+            explanations = explain_proposals(advisor, rows, names=names, league_label=_league_label(ctx), now=self.now)
         except _CRITICAL_ERRORS:
             raise
         except Exception as exc:  # the rows keep the engine's rationale and are pushed as they are
@@ -1066,7 +1080,7 @@ class _Tick:
             warnings.append(f"{ctx.key}: {keep} the template rationale: {exc}")
             return []
         counts = {"claude": 0, "template": 0, "fallback": 0}
-        for row, explanation in zip(rows.values(), explanations, strict=True):
+        for row, explanation in zip(rows, explanations, strict=True):
             counts[explanation.source] += 1
             if explanation.used_claude:
                 if not self._store_rationale(row.row_id, explanation.text):
@@ -1097,6 +1111,74 @@ class _Tick:
         if current is None or current.status != "proposed":
             return False
         self.store.proposals.update(current.model_copy(update={"rationale": text}))
+        return True
+
+    def _pitches(
+        self, ctx: LeagueContext, advisor: AdvisorClient | None, rows: Sequence[ProposalRow], warnings: list[str]
+    ) -> list[str]:
+        """Store the pitch on each new trade offer among ``rows`` (:mod:`fm.render.proposals`): Claude's draft with an
+        advisor (:func:`fm.advisor.pitch.draft_pitch`, the template when Claude cannot be used, with the reason), the
+        template without one (:func:`fm.render.proposals.plain_pitch`, so a tick without an advisor never loads
+        ``fm.advisor`` or the SDK). Names, team names and the facts about the other side come from the store and the
+        offer's own numbers. A trade offer never goes out without a pitch unless its payload does not read."""
+        trades = [row for row in rows if row.kind == ProposalKind.TRADE_PROPOSE.value]
+        if not trades:
+            return []
+        counts = {"claude": 0, "template": 0}
+        for row in trades:
+            try:
+                payload = parse_payload(row)
+            except (PolicyError, ValueError) as exc:
+                warnings.append(f"{ctx.key}: proposal #{row.row_id} gets no pitch: unreadable trade payload: {exc}")
+                continue
+            if not isinstance(payload, TradePayload):
+                warnings.append(f"{ctx.key}: proposal #{row.row_id} gets no pitch: not a trade offer")
+                continue
+            names = player_names(self.store, ctx.sport, payload)
+            theirs = self.store.teams.get(ctx.row.row_id, payload.other_team_id)
+            ours = self.store.teams.get(ctx.row.row_id, ctx.row.team_id)
+            their_name = theirs.name if theirs is not None else None
+            our_name = ours.name if ours is not None else None
+            template = plain_pitch(payload, names=names, their_name=their_name, our_name=our_name)
+            pitch = StoredPitch(template, "template", self.advisor_note)
+            if advisor is not None:
+                from fm.advisor.pitch import draft_pitch  # loaded with the advisor, never by a tick without one
+
+                try:
+                    drafted = draft_pitch(
+                        advisor,
+                        row,
+                        names=names,
+                        their_name=their_name,
+                        our_name=our_name,
+                        league_label=_league_label(ctx),
+                        facts=pitch_facts(row.engine_numbers),
+                        now=self.now,
+                    )
+                except _CRITICAL_ERRORS:
+                    raise
+                except Exception as exc:  # draft_pitch never raises for the API; anything else keeps the template
+                    logger.exception("tick: drafting the pitch for proposal #%d failed", row.row_id)
+                    pitch = StoredPitch(template, "template", f"could not be drafted: {exc}")
+                else:
+                    pitch = StoredPitch(drafted.text, "claude" if drafted.used_claude else "template", drafted.detail)
+                    if not drafted.used_claude:
+                        why = drafted.detail
+                        warnings.append(f"{ctx.key}: proposal #{row.row_id} keeps the template pitch ({why})")
+            if self._store_pitch(row.row_id, pitch):
+                counts[pitch.source] += 1
+            else:
+                warnings.append(f"{ctx.key}: proposal #{row.row_id} was decided before its pitch was stored")
+        return [f"{ctx.key}: pitches: {counts['claude']} by Claude, {counts['template']} templated"]
+
+    def _store_pitch(self, proposal_id: int, pitch: StoredPitch) -> bool:
+        """Set ``engine_numbers["pitch"]`` on the proposal as it is stored now (nothing else on the row changes, the
+        payload and the policy least of all); ``False`` when it is no longer ``proposed`` and left alone."""
+        current = self.store.proposals.get(proposal_id)
+        if current is None or current.status != "proposed":
+            return False
+        numbers = with_pitch(current.engine_numbers, pitch)
+        self.store.proposals.update(current.model_copy(update={"engine_numbers": numbers}))
         return True
 
     def _opponent(self, ctx: LeagueContext) -> int | None:
@@ -1418,6 +1500,7 @@ __all__ = [
     "check_session",
     "execute_on_approval",
     "execute_proposal",
+    "pitch_facts",
     "refresh_inputs",
     "refresh_nba_inputs",
     "refresh_nfl_inputs",

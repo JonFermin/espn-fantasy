@@ -441,6 +441,10 @@
       h("p", { text: proposal.moves }),
     );
     if (proposal.rationale) card.append(h("p", { class: "muted", text: proposal.rationale }));
+    if (proposal.pitch) {
+      const label = `Pitch to paste into ESPN (${proposal.pitch.source}): `;
+      card.append(h("p", { class: "small" }, h("strong", { text: label }), proposal.pitch.text));
+    }
     const facts = h("dl", { class: "kv small" });
     facts.append(dt("Deadline"), dd(proposal.deadline ? `${when(proposal.deadline)} (${relative(proposal.deadline)})` : "none"));
     facts.append(dt("Policy"), dd(policyText(proposal)));

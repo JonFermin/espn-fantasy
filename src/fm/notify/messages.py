@@ -2,10 +2,12 @@
 
 :func:`proposal_message` describes a proposal so it can be decided from a lock screen, and nothing more: the move as
 one line per action in player names and slot labels (an ESPN id only for a player the store has not seen), the
-rationale (which already states the numbers that matter), and the deadline in local time with what happens if nobody
-answers. The full ``engine_numbers`` stay in the store for ``fm`` and the audit. :func:`alert` is for something that
-needs attention now and can carry a deep link to the manual fix (DESIGN principle 6); :func:`report` is the quiet,
-longer push the weekly report sends.
+rationale (which already states the numbers that matter), for a trade offer the pitch to paste to the other manager
+(:func:`fm.render.proposals.stored_pitch`, ROADMAP #61; a few hundred characters, well inside one push, and the
+channels split a long body anyway), and the deadline in local time with what happens if nobody answers. The full
+``engine_numbers`` stay in the store for ``fm`` and the audit. :func:`alert` is for something that needs attention now
+and can carry a deep link to the manual fix (DESIGN principle 6); :func:`report` is the quiet, longer push the weekly
+report sends.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from fm.proposals import (
     parse_payload,
 )
 from fm.proposals.policy import as_utc
+from fm.render.proposals import stored_pitch
 from fm.store import LeagueRow, ProposalRow, Sport, Store
 
 SPORT_ICONS: Mapping[str, str] = {"nfl": "🏈", "nba": "🏀"}
@@ -43,6 +46,10 @@ def proposal_message(
     lines = _move_lines(store, league, parse_payload(row))
     if row.rationale and row.rationale.strip():
         lines.append(row.rationale.strip())
+    pitch = stored_pitch(row)
+    if pitch is not None:
+        lines.append(f"✉️ Pitch to paste into ESPN ({pitch.source}):")
+        lines.append(pitch.text)
     lines.append(_timing(row, at, tz))
     icon = SPORT_ICONS.get(league.sport, "")
     label = kind_spec(row.kind).label

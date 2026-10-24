@@ -29,6 +29,7 @@ from fm.advisor.client import AdvisorClient, AdvisorError, BudgetExceededError, 
 from fm.advisor.prompts import prompt_text
 from fm.proposals.payloads import TradePayload
 from fm.proposals.policy import PolicyError, ProposalKind, parse_payload
+from fm.render.proposals import plain_pitch
 from fm.store import ProposalRow, utc_now
 
 logger = logging.getLogger(__name__)
@@ -102,14 +103,9 @@ def template_pitch(
     their_name: str | None = None,
     our_name: str | None = None,
 ) -> str:
-    """The pitch without Claude: the offer, the terms exactly, and an invitation to counter."""
-    greeting = f"Hey {their_name}," if their_name else "Hey,"
-    text = (
-        f"{greeting} would you be open to a trade? I'd send you {_list(payload.give_espn_ids, names)} "
-        f"for {_list(payload.get_espn_ids, names)}. If it is close but not quite right, let me know what would work "
-        "for you and I am happy to talk it through."
-    )
-    return f"{text} - {our_name}" if our_name else text
+    """The pitch without Claude: the offer, the terms exactly, and an invitation to counter
+    (:func:`fm.render.proposals.plain_pitch`, which the tick stores without loading the advisor)."""
+    return plain_pitch(payload, names=names, their_name=their_name, our_name=our_name)
 
 
 def _clip(text: str, limit: int = PITCH_MAX_CHARS) -> str:

@@ -9,6 +9,7 @@ not rich tables, so the same lines read in a terminal, in a log and in a notific
 - :mod:`fm.render.status`: one block per league (sync state, team record, FAAB, open proposals).
 - :mod:`fm.render.lineup`: the recommended lineup, its expected points and win probability, the drafts and their moves.
 - :mod:`fm.render.waivers`: the moves proposed, the ranked (add, drop) pairs, replacement levels and warnings.
+- :mod:`fm.render.proposals`: a trade offer's stored pitch, read back for the push, the dashboard and ``fm proposals``.
 """
 
 from __future__ import annotations

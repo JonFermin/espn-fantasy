@@ -22,6 +22,7 @@ from fm.proposals import (
     LineupMove,
     LineupPayload,
     ProposalKind,
+    TradePayload,
     approve,
     begin_execution,
     get_proposal,
@@ -115,6 +116,24 @@ def test_list_shows_open_proposals_with_league_kind_status_and_summary(config: C
     assert run("proposals", "list", "--league", "nba").strip().startswith(f"#{third}")
     assert run("proposals", "list", "-l", "nfl").count("\n") == 2
     assert "no league 'mlb' in the store; known: nba, nfl" in run("proposals", "list", "--league", "mlb", expect=1)
+
+
+def test_list_shows_a_trade_offers_pitch_under_its_line(config: Config) -> None:
+    text = "Hey, would you be open to a trade? I'd send you player 7 for player 8."
+    with Store.open() as store:
+        nfl = store.leagues.upsert(league_row(config, "nfl"))
+        payload = TradePayload(other_team_id=3, give_espn_ids=(7,), get_espn_ids=(8,))
+        numbers = {"pitch": {"text": text, "source": "template", "detail": None}}
+        offer = propose(
+            store, config, nfl, ProposalKind.TRADE_PROPOSE, payload, created_by="t", engine_numbers=numbers, now=NOW
+        )
+        swap = AddDropPayload(add_espn_id=7, drop_espn_id=8)
+        bare = propose(store, config, nfl, ProposalKind.ADD_DROP, swap, created_by="t", now=NOW)
+    lines = run("proposals", "list").strip().splitlines()
+    assert len(lines) == 3
+    assert lines[0].startswith(f"#{offer.row_id}") and "trade_propose" in lines[0]
+    assert lines[1] == f"      pitch (template): {text}"  # the pitch to paste, under the offer it belongs to
+    assert lines[2].startswith(f"#{bare.row_id}") and "pitch" not in lines[2]
 
 
 def test_approve_and_reject_change_status_and_record_who_decided(config: Config) -> None:
