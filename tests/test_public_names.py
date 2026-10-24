@@ -103,6 +103,7 @@ MODULES = (
     "fm.decide.streaming",
     "fm.decide.weekly",
     "fm.decide.trades",
+    "fm.decide.strategy",
     "fm.model.baseline_nba",
     "fm.mcp_server",
     "fm.espn.discover",

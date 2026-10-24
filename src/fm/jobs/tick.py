@@ -25,7 +25,17 @@ which does, in this order:
    (:func:`refresh_inputs`: nflverse practice reports for the NFL, the official injury report and the DARKO blend for
    the NBA, a few times a day, and at once when the triage stored new signals, since the stored availability rows are
    where the decisions read them); run each registered decision whose window is due, **once** per window (the run is
-   recorded in the tick's state file); have the advisor explain the run's new ``proposed`` rows
+   recorded in the tick's state file); in the **weekly window** (:func:`fm.jobs.deadlines.weekly_window`: from the
+   matchup period's Monday 09:00 ET until the period turns, once per matchup period, ROADMAP #62) run the weekly
+   strategist and write the weekly report: the engine's inputs (:func:`fm.jobs.report.strategy_inputs`, the category
+   plan, our season odds and the trade finder's deals, gathered by the injectable ``strategy`` collaborator) go to
+   :func:`fm.advisor.strategist.run_strategist`, whose note is Claude's over the template and whose targets become
+   approve-only ``trade_propose`` rows under ``[league.trade_finder]``'s ``max_offers`` and the weekly cap (none while
+   the finder is off; the template note and the same drafts straight from :mod:`fm.decide.strategy` without an
+   advisor), then the league's report (:func:`fm.jobs.report.write_league_report`, the strategy as its last section)
+   is written under the cache's ``reports`` and pushed to the phone; the window is recorded whatever came of either,
+   so a failure is a warning and an alert, never a retry that asks Claude again; have the advisor explain the run's
+   new ``proposed`` rows (the strategist's targets among them)
    (:func:`fm.advisor.explain.explain_proposals`: Claude's two to four sentences replace the engine's template as the
    stored ``rationale``, each proposal explained once, recorded in the state file; a trivial move such as
    ``bench_inactive`` keeps its template without a call, and so does everything when there is no advisor, the daily
@@ -59,9 +69,9 @@ decision whose signature takes it, so a tick without such a decision never impor
 ``fm bot`` records decisions and nothing more; :func:`execute_on_approval` is the ``on_result`` hook for
 :func:`fm.notify.listen` that executes an approval at once when its deadline is within :data:`NEAR_DEADLINE`, instead
 of waiting for the next tick. Every collaborator (session loader, ESPN client factory, sync, inputs refresh, news
-poller, advisor factory, runtime opener, phone channel, decision and flow registries, clock) is injectable, so tests
-run the whole tick offline. The advisor and its workers are imported only when a tick builds an advisor
-(:mod:`fm.jobs.advice`), so this module stays as light to import as the SDK-free tick was.
+poller, advisor factory, strategy gatherer, runtime opener, phone channel, decision and flow registries, clock) is
+injectable, so tests run the whole tick offline. The advisor and its workers are imported only when a tick builds an
+advisor (:mod:`fm.jobs.advice`), so this module stays as light to import as the SDK-free tick was.
 """
 
 from __future__ import annotations
@@ -71,7 +81,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -90,9 +100,12 @@ from fm.browser.session import BrowserError
 from fm.config import Config, League, Sport
 from fm.decide import registry as decide_registry
 from fm.decide.registry import DecisionRegistry, Registration
+from fm.decide.strategy import StrategyInputs, StrategyResult, propose_targets, template_report
+from fm.decide.trades import DRAFT_LIFETIME
 from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus, load_session
 from fm.espn.calendar import CalendarError, matchup_period_of
 from fm.espn.client import EspnClient, EspnClientError
+from fm.espn.models import MatchupsView
 from fm.espn.settings import LeagueSettings
 from fm.executor import (
     ExecutionResult,
@@ -109,17 +122,19 @@ from fm.jobs.deadlines import (
     LINEUP_DECISIONS,
     Deadline,
     RunWindow,
+    WindowKind,
     due_windows,
     missed_windows,
     run_windows,
     upcoming,
 )
+from fm.jobs.report import render_strategy, strategy_inputs, write_league_report
 from fm.jobs.sync import SyncError, SyncReport, sync
 from fm.model.availability import assess_stored, practice_from_nflverse
 from fm.model.ids import Crosswalk, CrosswalkError
 from fm.model.projections import BlendWeights
 from fm.model.relevance import Relevance, ingest_news, opponent_from, relevance_for
-from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, notify_proposal, send_alert
+from fm.notify import DecisionResult, Message, NotifyChannel, NotifyError, notify_proposal, send_alert, send_report
 from fm.notify.messages import local_time, moves_text, player_names, proposal_name
 from fm.proposals import (
     PolicyError,
@@ -166,6 +181,8 @@ RUNS_KEPT = timedelta(days=14)
 _CRITICAL_ERRORS = (KeyboardInterrupt, SystemExit, MemoryError)
 OPPONENT_DECISIONS = LINEUP_DECISIONS | {"streaming"}
 """Decisions that weigh this week's opponent (lineups, and category-league streamers' swing)."""
+WEEKLY_STRATEGIST = "weekly_strategist"
+"""The name the weekly window's run goes under in a league's ``decisions`` (the advisor's worker name)."""
 
 
 class SessionVerdict(StrEnum):
@@ -398,8 +415,32 @@ class AdvisorFactory(Protocol):
     def __call__(self, store: Store, config: Config) -> AdvisorClient | None: ...
 
 
+class StrategyGatherer(Protocol):
+    """Builds the weekly strategist's inputs for a league (:func:`gather_strategy` live: the category plan, our season
+    odds and the trade finder's deals from the stored state; fixed ideas in tests). ``matchups`` is the league's
+    ``mMatchup`` read when the tick has one."""
+
+    def __call__(self, ctx: LeagueContext, matchups: MatchupsView | None) -> StrategyInputs: ...
+
+
 def _default_clients(league: League, session: EspnSession | None) -> EspnClient:
     return EspnClient.for_league(league, session)
+
+
+def gather_strategy(ctx: LeagueContext, matchups: MatchupsView | None) -> StrategyInputs:
+    """The live :class:`StrategyGatherer`: :func:`fm.jobs.report.strategy_inputs` over the league as the tick sees it
+    (its stored state, the pro schedule, the ``mMatchup`` read and ``[league.trade_finder]``)."""
+    return strategy_inputs(
+        ctx.store,
+        ctx.config,
+        ctx.row,
+        now=ctx.now,
+        finder=ctx.league.trade_finder,
+        label=_league_label(ctx),
+        schedule=ctx.schedule,
+        matchups=matchups,
+        period=ctx.period,
+    )
 
 
 # --- inputs -----------------------------------------------------------------------------------------------------------
@@ -631,6 +672,7 @@ def tick(
     refresh: InputsRefresher | None = refresh_inputs,
     news: NewsPoller | None = poll_news,
     advisor_factory: AdvisorFactory = advisor_for,
+    strategy: StrategyGatherer = gather_strategy,
     opener: RuntimeOpener | None = None,
     channel: NotifyChannel | None = None,
     registry: DecisionRegistry | None = None,
@@ -640,9 +682,10 @@ def tick(
 ) -> TickReport:
     """Run one tick (the module docs give the steps). Every collaborator defaults to the live one: the browser
     profile's session, ``EspnClient.for_league``, :func:`fm.jobs.sync.sync`, :func:`refresh_inputs`,
-    :func:`fm.sources.news.poll_news`, :func:`fm.jobs.advice.advisor_for`, :func:`fm.executor.live_opener`, the
-    process-wide decision and flow registries. ``channel`` ``None`` sends nothing to the phone; ``news`` ``None``
-    polls no feed. ``now`` pins the clock (tests); otherwise ``clock`` is read at the start and for each execution."""
+    :func:`fm.sources.news.poll_news`, :func:`fm.jobs.advice.advisor_for`, :func:`gather_strategy`,
+    :func:`fm.executor.live_opener`, the process-wide decision and flow registries. ``channel`` ``None`` sends nothing
+    to the phone; ``news`` ``None`` polls no feed. ``now`` pins the clock (tests); otherwise ``clock`` is read at the
+    start and for each execution."""
     at = as_utc(now) if now is not None else clock()
     run = _Tick(
         store,
@@ -655,6 +698,7 @@ def tick(
         refresh=refresh,
         news=news,
         advisor_factory=advisor_factory,
+        strategy=strategy,
         opener=opener,
         channel=channel,
         registry=registry if registry is not None else decide_registry.registry,
@@ -679,6 +723,7 @@ class _Tick:
         refresh: InputsRefresher | None,
         news: NewsPoller | None,
         advisor_factory: AdvisorFactory,
+        strategy: StrategyGatherer,
         opener: RuntimeOpener | None,
         channel: NotifyChannel | None,
         registry: DecisionRegistry,
@@ -699,6 +744,7 @@ class _Tick:
         self.advisor: AdvisorClient | None = None
         self.advisor_note: str | None = None  # why there is none, once _advisor has tried to build one
         self.advisor_tried = False
+        self.strategy = strategy
         self.opener = opener
         self.channel = channel
         self.registry = registry
@@ -709,6 +755,7 @@ class _Tick:
         self.alerts: list[str] = []
         self.warnings: list[str] = []
         self.schedules: dict[Sport, ScheduleLike] = {}
+        self.matchups: dict[str, MatchupsView | None] = {}
         self.opponents: dict[str, int | None] = {}
         self.session = SessionCheck(SessionVerdict.MISSING, "not checked")
 
@@ -842,9 +889,25 @@ class _Tick:
                 horizon=self.options.horizon,
             )
             warnings.extend(found_warnings)
-            windows = run_windows(key, row.sport, deadlines, schedule=schedule, now=self.now)
+            windows = run_windows(
+                key,
+                row.sport,
+                deadlines,
+                schedule=schedule,
+                now=self.now,
+                settings=settings,
+                since=self.state.last_tick,
+            )
             missed = missed_windows(windows, now=self.now, last_tick=self.state.last_tick, ran=self.state.runs)
             for window in missed:
+                if window.kind is WindowKind.WEEKLY:
+                    self._alert(
+                        f"Missed: {key.upper()} weekly report",
+                        "The weekly strategist and report did not run before the matchup turned at "
+                        f"{local_time(window.closes_at)} (PC asleep?). Run fm report by hand.",
+                        link=ctx.team_url(),
+                    )
+                    continue
                 self._alert(
                     f"Missed: {key.upper()} {window.kind.value.replace('_', ' ')} check",
                     f"Nothing ran before the {window.deadline.kind.value.replace('_', ' ')} at "
@@ -854,7 +917,12 @@ class _Tick:
             due = due_windows(windows, now=self.now, ran=self.state.runs)
             fresh_signals = self._refresh_news(ctx, notes, warnings)
             notes.extend(self._refresh_inputs(ctx, warnings, force=fresh_signals))
-            decisions = [run for window in due for run in self._run_window(ctx, window, warnings)]
+            decisions: list[DecisionRun] = []
+            for window in due:
+                if window.kind is WindowKind.WEEKLY:
+                    decisions.extend(self._weekly(ctx, window, notes, warnings))
+                else:
+                    decisions.extend(self._run_window(ctx, window, warnings))
             notes.extend(self._explain(ctx, decisions, warnings))
             notified = self._notify_new(ctx, warnings)
         return LeagueTick(
@@ -1193,12 +1261,8 @@ class _Tick:
         return opponent
 
     def _read_opponent(self, ctx: LeagueContext) -> int | None:
-        if ctx.client is None:
-            return None
-        try:
-            matchups = ctx.client.matchups().data
-        except EspnClientError as exc:
-            self.warnings.append(f"{ctx.key}: no opponent (matchups unreadable: {exc}); planning for expected points")
+        matchups = self._matchups(ctx)
+        if matchups is None:
             return None
         try:
             matchup_period = matchup_period_of(ctx.settings, ctx.period)  # the calendar resolves NBA weekly matchups
@@ -1206,6 +1270,165 @@ class _Tick:
             self.warnings.append(f"{ctx.key}: no opponent (matchup week unknown: {exc}); planning for expected points")
             return None
         return opponent_from(matchups, ctx.row.team_id, matchup_period)
+
+    def _matchups(self, ctx: LeagueContext) -> MatchupsView | None:
+        """The league's ``mMatchup`` read, once per league per tick (the opponent, the strategist and the report share
+        it); ``None`` without a session, or when the read fails (warned once)."""
+        if ctx.key in self.matchups:
+            return self.matchups[ctx.key]
+        if ctx.client is None:
+            return None
+        try:
+            view: MatchupsView | None = ctx.client.matchups().data
+        except EspnClientError as exc:
+            self.warnings.append(
+                f"{ctx.key}: no opponent (matchups unreadable: {exc}); planning for expected points, no title odds"
+            )
+            view = None
+        self.matchups[ctx.key] = view
+        return view
+
+    # --- the weekly window
+
+    def _weekly(
+        self, ctx: LeagueContext, window: RunWindow, notes: list[str], warnings: list[str]
+    ) -> list[DecisionRun]:
+        """The weekly window (ROADMAP #62): the strategist (:meth:`_strategist`), then the report (:meth:`_report`).
+        The window is recorded as run whatever came of either, one attempt per matchup period, since a retry would
+        ask Claude again: a failure is a warning and an alert, never a retry or a skipped league."""
+        matchups = self._matchups(ctx)
+        run, strategy = self._strategist(ctx, window, matchups, notes, warnings)
+        notes.extend(self._report(ctx, matchups, strategy, warnings))
+        self.state.runs[window.key] = self.now
+        return [run]
+
+    def _strategist(
+        self,
+        ctx: LeagueContext,
+        window: RunWindow,
+        matchups: MatchupsView | None,
+        notes: list[str],
+        warnings: list[str],
+    ) -> tuple[DecisionRun, tuple[StrategyInputs, StrategyResult] | None]:
+        """Run the weekly strategist: the engine's inputs (:attr:`strategy`), then Claude's note over the template
+        (:func:`fm.advisor.strategist.run_strategist`) or the template alone without an advisor, and the targets
+        drafted as approve-only ``trade_propose`` rows (:func:`fm.decide.strategy.propose_targets`) under
+        ``[league.trade_finder]``'s ``max_offers`` and the weekly cap, expiring unanswered after
+        :data:`fm.decide.trades.DRAFT_LIFETIME` like the trade finder's. With the finder off there are no targets,
+        whatever the inputs hold. The new rows are the run's ``proposals``, so the explain pass (:meth:`_explain`)
+        words and pitches them before the push. Returns the run and, when it ran, the inputs and result for the
+        report."""
+        finder = ctx.league.trade_finder
+        try:
+            inputs = self.strategy(ctx, matchups)
+            if not finder.enabled and inputs.ideas:
+                off = "the trade finder is off ([league.trade_finder] enabled = false): no targets"
+                inputs = replace(inputs, ideas=(), warnings=(*inputs.warnings, off))
+            advisor = self._advisor()
+            deadline = self.now + DRAFT_LIFETIME
+            if advisor is None:
+                report = replace(template_report(inputs), detail=self.advisor_note)
+                drafts = propose_targets(
+                    ctx.store,
+                    ctx.config,
+                    ctx.row,
+                    report.targets,
+                    max_offers=finder.max_offers,
+                    now=self.now,
+                    deadline=deadline,
+                )
+                result = StrategyResult(report, tuple(drafts))
+            else:
+                from fm.advisor.strategist import run_strategist  # loaded with the advisor, never by a tick without one
+
+                result = run_strategist(
+                    advisor,
+                    ctx.store,
+                    ctx.config,
+                    ctx.row,
+                    inputs,
+                    max_offers=finder.max_offers,
+                    now=self.now,
+                    deadline=deadline,
+                )
+        except _CRITICAL_ERRORS:
+            raise
+        except Exception as exc:  # the report is still written; the targets wait for next week
+            logger.exception("tick: the weekly strategist failed for %s", ctx.key)
+            self._alert(
+                "Weekly strategist failed",
+                f"{window.describe()}: {exc}. The report is still written; the targets wait for next week.",
+                key=f"decision:{WEEKLY_STRATEGIST}",
+                link=ctx.team_url(),
+            )
+            return DecisionRun(WEEKLY_STRATEGIST, window.key, error=f"{type(exc).__name__}: {exc}"), None
+        report = result.report
+        if report.source == "fallback":
+            warnings.append(f"{ctx.key}: the weekly note keeps the template ({report.detail})")
+        warnings.extend(f"{WEEKLY_STRATEGIST}: {warning}" for warning in inputs.warnings)
+        who = "Claude's note" if report.used_claude else "template note"
+        existing = sum(1 for outcome in result.proposals if outcome.existing)
+        notes.append(
+            f"{ctx.key}: weekly strategy: {who}; {len(result.proposals)} targets, {len(result.drafted)} drafted, "
+            f"{existing} already open"
+        )
+        run = DecisionRun(
+            WEEKLY_STRATEGIST,
+            window.key,
+            proposals=tuple(row.row_id for row in result.drafted),
+            blocked=tuple(outcome.blocked for outcome in result.proposals if outcome.blocked is not None),
+        )
+        return run, (inputs, result)
+
+    def _report(
+        self,
+        ctx: LeagueContext,
+        matchups: MatchupsView | None,
+        strategy: tuple[StrategyInputs, StrategyResult] | None,
+        warnings: list[str],
+    ) -> list[str]:
+        """Write the league's weekly report (:func:`fm.jobs.report.write_league_report`) with the strategy as its last
+        section and the strategist's warnings among its notes, then push it to the phone (:func:`fm.notify.send_report`,
+        a quiet push). A report that cannot be built or written is a warning and an alert (``fm report`` writes it by
+        hand); a push that fails is a warning."""
+        sections: list[str] = []
+        notes: list[str] = []
+        if strategy is not None:
+            inputs, result = strategy
+            sections.append(render_strategy(inputs, result))
+            notes.extend(f"{ctx.key}: strategy: {warning}" for warning in inputs.warnings)
+        try:
+            written = write_league_report(
+                ctx.store,
+                ctx.config,
+                ctx.row,
+                now=self.now,
+                schedule=ctx.schedule,
+                matchups=matchups,
+                sections=sections,
+                notes=notes,
+            )
+        except _CRITICAL_ERRORS:
+            raise
+        except Exception as exc:  # the file is the report of record; without it the owner is told to run fm report
+            logger.exception("tick: the weekly report for %s failed", ctx.key)
+            warnings.append(f"{ctx.key}: weekly report not written: {exc}")
+            self._alert(
+                "Weekly report failed",
+                f"{ctx.key}: {exc}. Run fm report by hand.",
+                key="report:weekly",
+                link=ctx.team_url(),
+            )
+            return []
+        line = f"{ctx.key}: weekly report written to {written.path}"
+        if self.channel is None:
+            return [line]
+        try:
+            send_report(self.channel, written.title, written.body)
+        except NotifyError as exc:
+            warnings.append(f"{ctx.key}: weekly report not pushed: {exc}")
+            return [line]
+        return [f"{line}; pushed to the phone"]
 
     def _notify_new(self, ctx: LeagueContext, warnings: list[str]) -> tuple[int, ...]:
         if self.channel is None:
@@ -1483,6 +1706,7 @@ __all__ = [
     "RUNS_KEPT",
     "STATE_FILE",
     "SYNC_MAX_AGE",
+    "WEEKLY_STRATEGIST",
     "AdvisorFactory",
     "ClientFactory",
     "DecisionRun",
@@ -1493,6 +1717,7 @@ __all__ = [
     "NewsPoller",
     "SessionCheck",
     "SessionVerdict",
+    "StrategyGatherer",
     "Syncer",
     "TickOptions",
     "TickReport",
@@ -1500,6 +1725,7 @@ __all__ = [
     "check_session",
     "execute_on_approval",
     "execute_proposal",
+    "gather_strategy",
     "pitch_facts",
     "refresh_inputs",
     "refresh_nba_inputs",

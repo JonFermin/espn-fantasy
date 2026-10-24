@@ -7,8 +7,9 @@ roster through a fake transport, decisions are recording fakes on a private regi
 ``NotLoggedInError``. The news feeds are the recorded captures in ``tests/fixtures/sources/news`` (ROADMAP #58:
 Tyler Allgeier, on team 1's bench, is tagged in ESPN's pickups story) handed over by a fake poller, and Claude is a
 fake transport that answers every triage with an out-of-bounds signal per candidate, every explanation (#59) with
-one fixed rationale and every trade pitch (#61) with one fixed message. Nothing opens a browser or a socket; nothing
-is scheduled.
+one fixed rationale, every trade pitch (#61) with one fixed message and the weekly strategist (#62) with one fixed
+note. The strategist's engine inputs come from a gatherer the tests hand fixed trade ideas to, since the fixture store
+holds no projections to search. Nothing opens a browser or a socket; nothing is scheduled.
 """
 
 from __future__ import annotations
@@ -30,34 +31,42 @@ import typer
 from pydantic import BaseModel
 from typer.testing import CliRunner
 
+from fm import paths
 from fm.advisor.client import AdvisorClient, AdvisorError, CallParams, RawReply, TokenUsage, Transport
 from fm.advisor.explain import EXPLAIN_WORKER, ExplainOutput
 from fm.advisor.news_triage import TriagedItem, TriageOutput, TriageSignal
 from fm.advisor.pitch import PITCH_WORKER, PitchOutput
 from fm.advisor.prompts import prompt_text
+from fm.advisor.strategist import STRATEGIST_WORKER, StrategyOutput, TargetNote
 from fm.browser.fakes import FakeEspnApi, FakeOpener, FakeTransport, fake_runtime
 from fm.browser.flows import Flow, FlowContext, FlowRegistry, Mode, Preconditions, Verification, WriteRequest
 from fm.browser.session import BrowserError
 from fm.commands import schedule as schedule_cmd
 from fm.config import DEFAULT_MODEL, Config, League, Llm, Secrets, Sport
 from fm.decide.registry import DecisionRegistry
+from fm.decide.strategy import StrategyIdea, StrategyInputs
+from fm.decide.trades import DRAFT_LIFETIME, Acceptance, SideImpact, TradeEvaluation, TradeLegality, TradeSpec
 from fm.espn.auth import EspnSession, NotLoggedInError
 from fm.espn.calendar import CalendarError
 from fm.espn.client import EspnClient
+from fm.espn.models import MatchupsView
 from fm.espn.settings import load_league_settings
 from fm.executor import STALE_EXECUTION, ExecutorOptions
 from fm.jobs import tick as tick_module
 from fm.jobs.deadlines import WindowKind
+from fm.jobs.report import REPORTS_DIRNAME
 from fm.jobs.sync import SyncReport
 from fm.jobs.tick import (
     ALERT_REPEAT,
     DECIDED_BY_TICK,
     INPUTS_EVERY,
     NEWS_EVERY,
+    WEEKLY_STRATEGIST,
     AdvisorFactory,
     LeagueContext,
     LeagueTick,
     SessionVerdict,
+    StrategyGatherer,
     TickOptions,
     TickReport,
     TickState,
@@ -131,6 +140,17 @@ TEMPLATE_PITCH = (
     "Hey Rival Squad, would you be open to a trade? I'd send you Chuba Hubbard for Jahmyr Gibbs. If it is close but "
     "not quite right, let me know what would work for you and I am happy to talk it through. - Fixture Team 1"
 )
+MONDAY = datetime(2026, 10, 5, 14, 0, tzinfo=UTC)
+"""Monday of week 4 at 10:00 ET: an hour into the weekly window, which runs from Monday 09:00 ET until the period
+turns on Tuesday at 03:00 ET (ROADMAP #62)."""
+WEEKLY_KEY = "nfl:weekly:2026-10-05T13:00Z"
+CLAUDE_STRATEGY = (
+    "The week hinges on Monday night. Hubbard is expendable with Allgeier starting, so moving him for Gibbs "
+    "strengthens the backfield for the stretch."
+)
+CLAUDE_PRIORITY = "Land Gibbs before the bye weeks thin the backfield."
+CLAUDE_TARGET_NOTE = "Gibbs lifts the floor at running back every week."
+NO_KEY = "ANTHROPIC_API_KEY is not set in .env, so the advisor is off (fm config check)"
 SWAP = LineupPayload(
     moves=(
         LineupMove(espn_id=HUBBARD, from_slot_id=FLEX, to_slot_id=BENCH),
@@ -156,6 +176,22 @@ CONFIG = Config.model_validate(
         ]
     }
 )
+FINDER_CONFIG = Config.model_validate(
+    {
+        "league": [
+            {
+                "key": "nfl",
+                "sport": "nfl",
+                "espn_league_id": LEAGUE_ID,
+                "season": SEASON,
+                "team_id": TEAM,
+                "policy": {"bench_inactive": "auto", "lineup": "approve"},
+                "trade_finder": {"enabled": True, "max_offers": 2},
+            }
+        ]
+    }
+)
+"""``CONFIG`` with the trade finder on, so the weekly strategist may draft two offers a run (the weekly cap is 3)."""
 
 runner = CliRunner()
 
@@ -246,9 +282,10 @@ class FakeChannel:
 
 class FakeClaude(Transport):
     """Answers every triage chunk with one injury signal per (item, candidate) it was asked about, proposed outside
-    the bounds (delta -0.9, confidence 1.5) so what the tick stores shows the clamping, and every explanation with
-    :data:`CLAUDE_RATIONALE`; ``error`` fails the next call instead. Nothing else is implemented: the tick never
-    batches."""
+    the bounds (delta -0.9, confidence 1.5) so what the tick stores shows the clamping, every explanation with
+    :data:`CLAUDE_RATIONALE`, every pitch with :data:`CLAUDE_PITCH` and the weekly strategist with
+    :data:`CLAUDE_STRATEGY` (one priority, one note on the first idea); ``error`` fails the next call instead. Nothing
+    else is implemented: the tick never batches."""
 
     def __init__(self) -> None:
         self.calls: list[CallParams] = []
@@ -265,6 +302,10 @@ class FakeClaude(Transport):
         if output is PitchOutput:
             pitched = PitchOutput(message=CLAUDE_PITCH)
             return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, pitched)
+        if output is StrategyOutput:
+            note = TargetNote(idea=1, note=CLAUDE_TARGET_NOTE)
+            planned = StrategyOutput(summary=CLAUDE_STRATEGY, priorities=[CLAUDE_PRIORITY], target_notes=[note])
+            return RawReply(f"msg_{len(self.calls)}", DEFAULT_MODEL, "end_turn", usage, planned)
         assert output is TriageOutput
         text = params["messages"][0]["content"][0]["text"]  # type: ignore[index]
         items = [
@@ -344,6 +385,9 @@ class World:
         self.news_error: Exception | None = None
         self.claude = FakeClaude()
         self.advisor_factory: AdvisorFactory = tick_module.advisor_for  # the real one: CONFIG has no key
+        self.strategy: StrategyGatherer = tick_module.gather_strategy  # the real one: searches the fixture store
+        self.gathered: list[MatchupsView | None] = []
+        """The ``mMatchup`` read each fixed gatherer call (:meth:`plan_ideas`) was handed."""
 
     # collaborators
 
@@ -381,6 +425,25 @@ class World:
     def use_advisor(self, budget: float = 2.0) -> None:
         """Hand the tick an advisor over the fake Claude instead of the keyless default."""
         self.advisor_factory = lambda store, config: AdvisorClient(store, Llm(daily_budget_usd=budget), self.claude)
+
+    def plan_ideas(self, *ideas: StrategyIdea) -> None:
+        """Hand the weekly strategist these engine ideas (no plan, no odds: the fixture league scores points and
+        holds no projections to search) instead of the live gatherer's search of the store."""
+
+        def gather(ctx: LeagueContext, matchups: MatchupsView | None) -> StrategyInputs:
+            self.gathered.append(matchups)
+            names = {
+                ALLGEIER: "Tyler Allgeier",
+                DANIELS: "Jayden Daniels",
+                HUBBARD: "Chuba Hubbard",
+                GIBBS: "Jahmyr Gibbs",
+            }
+            teams = {TEAM: "Fixture Team 1", 2: "Rival Squad", 3: "Third Team", 4: "Fourth Team"}
+            return StrategyInputs(
+                "nfl (nfl, 2026)", ideas=ideas, names=names, team_names=teams, league_id=ctx.row.row_id
+            )
+
+        self.strategy = gather
 
     def roster(self, *espn_ids: int) -> None:
         """Put these players on team 1's roster for the week, as a sync would, so the league's news is about them."""
@@ -501,6 +564,7 @@ class World:
             "refresh": self.refresh,
             "news": self.poll_news,
             "advisor_factory": self.advisor_factory,
+            "strategy": self.strategy,
             "opener": self.opener,
             "channel": self.channel,
             "registry": self.registry,
@@ -536,6 +600,26 @@ def stored_news(world: World) -> dict[str, int]:
     """Every stored NFL item's external id -> row id."""
     since = datetime(2026, 1, 1, tzinfo=UTC)
     return {row.external_id: row.row_id for row in world.store.news.published_since(since, sport="nfl")}
+
+
+def trade_idea(team: int = 2, give: int = HUBBARD, get: int = GIBBS, score: float = 0.03) -> StrategyIdea:
+    """An engine trade idea as the trade finder values one: legal, helps us, needs no drop; ``score`` ranks it."""
+    spec = TradeSpec(team, (give,), (get,))
+    ours = SideImpact(TEAM, "Fixture Team 1", spec.give, spec.get, 100.0, 102.4)
+    theirs = SideImpact(team, f"team {team}", spec.get, spec.give, 90.0, 92.0)
+    chance = Acceptance(0.7, 120.0, 100.0, 0.1, 0.5)
+    evaluation = TradeEvaluation(
+        spec, ours, theirs, TradeLegality((), (), ()), chance, "accept", "good", score, "ros", "points"
+    )
+    rationale = (
+        TRADE_RATIONALE if (team, give, get) == (2, HUBBARD, GIBBS) else f"Give {give} to team {team} for {get}."
+    )
+    return StrategyIdea(evaluation, f"nfl:{spec.key}", {"score": score}, rationale, WEEK)
+
+
+def weekly_report_files() -> list[Path]:
+    """The weekly reports the tick wrote under this test's cache dir."""
+    return sorted((paths.cache_dir() / REPORTS_DIRNAME).glob("weekly-*.md"))
 
 
 # --- decisions run once per window, proposals are pushed --------------------------------------------------------------
@@ -1031,6 +1115,163 @@ def test_a_spent_budget_leaves_the_template_pitch_with_the_reason(world: World) 
     assert world.claude.calls == []
     assert any(f"proposal #{trade_id} keeps the template pitch (blocked: " in w for w in league.warnings)
     assert "nfl: pitches: 0 by Claude, 1 templated" in league.notes
+
+
+# --- the weekly window: the strategist and the report, once per matchup period (ROADMAP #62) --------------------------
+
+
+def test_a_monday_tick_runs_the_strategist_once_per_matchup_period_and_drafts_approve_only_targets(
+    world: World,
+) -> None:
+    world.use_advisor()
+    world.config = FINDER_CONFIG  # two offers a run
+    world.roster(ALLGEIER, HUBBARD, GIBBS)
+    world.plan_ideas(trade_idea(), trade_idea(3, ALLGEIER, DANIELS, 0.02), trade_idea(4, HUBBARD, DANIELS, 0.01))
+    report = world.tick(now=MONDAY, news=None)
+    (league,) = report.leagues
+    assert [(w.kind, w.key) for w in league.due] == [(WindowKind.WEEKLY, WEEKLY_KEY)]  # nothing else is due yet
+    assert decisions(report) == [WEEKLY_STRATEGIST] and report.ok
+    (run,) = league.decisions
+    assert run.window == WEEKLY_KEY and run.blocked == ("already at 2 offers for now",)  # max_offers held
+    first, second = run.proposals
+    row = get_proposal(world.store, first)
+    assert (row.kind, row.policy, row.status) == ("trade_propose", "approve", "proposed")
+    assert row.created_by == "advisor.strategist" and row.dedupe_key == trade_idea().key
+    assert row.payload == {"other_team_id": 2, "give_espn_ids": [HUBBARD], "get_espn_ids": [GIBBS]}
+    assert row.deadline == MONDAY + DRAFT_LIFETIME and row.scoring_period_id == WEEK
+    assert row.rationale == CLAUDE_RATIONALE  # explained in the same pass as any new proposal...
+    assert row.engine_numbers["pitch"]["text"] == CLAUDE_PITCH  # ...and pitched...
+    assert league.notified == (first, second)  # ...before the push
+    assert get_proposal(world.store, second).payload["other_team_id"] == 3  # the best two by score
+    (view,) = world.gathered  # the gatherer sees the league's mMatchup read, shared with the opponent lookup
+    assert view is not None and view.status is not None and view.status.current_matchup_period == WEEK
+    (asked,) = world.claude.asked(STRATEGIST_WORKER)
+    assert "League: nfl (nfl, 2026)" in asked and "Matchup plan: none" in asked and "Season odds: none" in asked
+    assert "1. give Chuba Hubbard to Rival Squad for Jahmyr Gibbs: our rest-of-season value +2.4 points" in asked
+    assert "nfl: weekly strategy: Claude's note; 3 targets, 2 drafted, 0 already open" in league.notes
+    (path,) = weekly_report_files()
+    assert path.name == "weekly-2026-10-05-nfl.md"
+    markdown = path.read_text(encoding="utf-8")
+    assert markdown.startswith("# Weekly report 2026-10-05") and "### Weekly strategy" in markdown
+    assert CLAUDE_STRATEGY in markdown and f"- {CLAUDE_PRIORITY}" in markdown
+    assert f"drafted as proposal #{first}, awaiting approval. {CLAUDE_TARGET_NOTE}" in markdown
+    assert f"drafted as proposal #{second}, awaiting approval." in markdown
+    assert "not drafted (already at 2 offers for now)." in markdown
+    assert f"nfl: weekly report written to {path}; pushed to the phone" in league.notes
+    (pushed,) = [m for m in world.channel.sent if m.title == "Weekly report 2026-10-05 (nfl)"]
+    assert pushed.priority == "low" and "### Weekly strategy" in pushed.body and not pushed.body.startswith("# ")
+    assert world.state().runs[WEEKLY_KEY] == MONDAY
+
+    again = world.tick(now=MONDAY + timedelta(hours=1), news=None)  # the same matchup period: it ran already
+    (later,) = again.leagues
+    assert later.due == () and later.decisions == () and later.notified == ()
+    assert len(world.claude.asked(STRATEGIST_WORKER)) == 1 and len(weekly_report_files()) == 1
+    assert len(world.store.proposals.open(world.league.row_id)) == 2
+
+
+def test_without_an_advisor_the_weekly_writes_the_template_note_and_still_drafts_the_targets(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("fm.advisor.strategist", "fm.advisor.pitch", "fm.advisor.explain"):  # a keyless tick needs none
+        monkeypatch.setitem(sys.modules, name, None)
+    world.config = FINDER_CONFIG
+    world.roster(ALLGEIER, HUBBARD, GIBBS)
+    world.plan_ideas(trade_idea())
+    report = world.tick(now=MONDAY, news=None)
+    (league,) = report.leagues
+    (run,) = league.decisions
+    (trade_id,) = run.proposals
+    row = get_proposal(world.store, trade_id)
+    assert (row.kind, row.policy, row.status, row.created_by) == (
+        "trade_propose",
+        "approve",
+        "proposed",
+        "advisor.strategist",
+    )
+    assert row.rationale == TRADE_RATIONALE and row.engine_numbers["pitch"]["source"] == "template"
+    assert world.claude.calls == [] and league.notified == (trade_id,)
+    assert "nfl: weekly strategy: template note; 1 targets, 1 drafted, 0 already open" in league.notes
+    (path,) = weekly_report_files()
+    markdown = path.read_text(encoding="utf-8")
+    assert f"Template note ({NO_KEY})." in markdown
+    assert "Nothing to plan this week: no category matchup and no season odds." in markdown
+    assert "- Trade target: give Chuba Hubbard to Rival Squad for Jahmyr Gibbs" in markdown
+    assert f"drafted as proposal #{trade_id}, awaiting approval." in markdown
+
+
+def test_a_disabled_trade_finder_drafts_no_targets_but_the_report_is_still_written(world: World) -> None:
+    world.use_advisor()
+    world.roster(ALLGEIER, HUBBARD, GIBBS)
+    world.plan_ideas(trade_idea())  # offered by the gatherer, dropped by the tick: CONFIG leaves the finder off
+    report = world.tick(now=MONDAY, news=None)
+    (league,) = report.leagues
+    (run,) = league.decisions
+    assert run.error is None and run.proposals == () and run.blocked == () and league.notified == ()
+    assert world.store.proposals.open(world.league.row_id) == []
+    assert world.claude.asked(STRATEGIST_WORKER) == []  # no plan, no odds, no targets: nothing to ask
+    off = "the trade finder is off ([league.trade_finder] enabled = false): no targets"
+    assert f"{WEEKLY_STRATEGIST}: {off}" in league.warnings
+    assert "nfl: weekly strategy: template note; 0 targets, 0 drafted, 0 already open" in league.notes
+    (path,) = weekly_report_files()
+    markdown = path.read_text(encoding="utf-8")
+    assert "Trade targets:\n\nNone." in markdown and f"- nfl: strategy: {off}" in markdown
+
+
+def test_the_live_gatherer_degrades_to_the_template_when_the_league_cannot_be_valued(world: World) -> None:
+    world.use_advisor()
+    report = world.tick(now=MONDAY, news=None)  # the real gatherer over a store with no roster snapshot
+    (league,) = report.leagues
+    (run,) = league.decisions
+    assert run.name == WEEKLY_STRATEGIST and run.error is None and run.proposals == ()
+    assert world.claude.asked(STRATEGIST_WORKER) == []  # nothing to say, no call
+    assert any(w.startswith(f"{WEEKLY_STRATEGIST}: no trade context (") for w in league.warnings)
+    (path,) = weekly_report_files()
+    assert "Nothing to plan this week" in path.read_text(encoding="utf-8")
+
+
+def test_a_failing_strategist_is_alerted_the_report_still_written_and_the_week_not_retried(world: World) -> None:
+    def broken(ctx: LeagueContext, matchups: MatchupsView | None) -> StrategyInputs:
+        raise RuntimeError("no projections")
+
+    world.strategy = broken
+    report = world.tick(now=MONDAY, news=None)
+    (league,) = report.leagues
+    (run,) = league.decisions
+    assert (run.name, run.error) == (WEEKLY_STRATEGIST, "RuntimeError: no projections") and not report.ok
+    assert league.skipped is None and world.channel.alerts() == ["Weekly strategist failed"]
+    (path,) = weekly_report_files()
+    assert "### Weekly strategy" not in path.read_text(encoding="utf-8")
+    assert any(note.startswith(f"nfl: weekly report written to {path}") for note in league.notes)
+    again = world.tick(now=MONDAY + timedelta(minutes=10), news=None)
+    assert again.leagues[0].due == () and again.leagues[0].decisions == ()  # one attempt per matchup period
+    assert world.channel.alerts() == ["Weekly strategist failed"]
+
+
+def test_a_failing_report_is_a_warning_and_an_alert_never_a_skipped_league(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tick_module, "write_league_report", refuse)
+    world.plan_ideas()
+    report = world.tick(now=MONDAY, news=None)
+    (league,) = report.leagues
+    assert league.skipped is None and report.ok and decisions(report) == [WEEKLY_STRATEGIST]
+    assert "nfl: weekly report not written: disk full" in league.warnings
+    assert world.channel.alerts() == ["Weekly report failed"] and weekly_report_files() == []
+    assert world.state().runs[WEEKLY_KEY] == MONDAY
+
+
+def test_a_weekly_window_that_closed_while_asleep_is_reported_missed(world: World) -> None:
+    world.decision_payload = None
+    TickState(last_tick=MONDAY - timedelta(hours=2)).save(world.state_file)  # Monday 08:00 ET: not open yet
+    report = world.tick(now=datetime(2026, 10, 6, 8, 0, tzinfo=UTC), news=None)  # Tuesday 04:00 ET: week 5
+    (league,) = report.leagues
+    assert league.period == 5
+    assert [w.key for w in league.missed if w.kind is WindowKind.WEEKLY] == [WEEKLY_KEY]
+    assert "Missed: NFL weekly report" in world.channel.alerts()
+    assert all(w.kind is not WindowKind.WEEKLY for w in league.due)  # week 5's Monday morning has not come
 
 
 def test_the_news_step_is_skipped_without_a_poller(world: World) -> None:

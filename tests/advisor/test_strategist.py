@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel
 
 import fm.advisor.strategist as strategist_module
+import fm.decide.strategy as strategy_module  # the engine's side, where engine_plan looks plan_weekly up (ROADMAP #62)
 from fm.advisor.client import AdvisorClient, AdvisorError, CallParams, RawReply, TokenUsage, Transport
 from fm.advisor.prompts import prompt_text
 from fm.advisor.strategist import (
@@ -189,7 +190,7 @@ def test_engine_plan_hands_the_simulations_category_odds_to_plan_weekly(
         seen.update(kwargs)
         return Decision()
 
-    monkeypatch.setattr(strategist_module, "plan_weekly", fake)
+    monkeypatch.setattr(strategy_module, "plan_weekly", fake)
     from fm.model.simulate import SeasonOdds
 
     odds = cast(Any, SeasonOdds(3, cast(Any, None), 100, 1, {1: ODDS}))
@@ -203,7 +204,7 @@ def test_a_league_without_category_matchups_is_a_warning_not_an_error(
     def refuse(*args: Any, **kwargs: Any) -> None:
         raise WeeklyPlanError("scoring type has no weekly category matchups to plan")
 
-    monkeypatch.setattr(strategist_module, "plan_weekly", refuse)
+    monkeypatch.setattr(strategy_module, "plan_weekly", refuse)
     found = engine_plan(store, league_row(store), schedule=cast(Any, object()), now=NOW)
     assert found.plan is None and "no weekly category matchups" in found.warnings[0]
 

@@ -14,25 +14,57 @@ capture the matchup and odds sections say so). :func:`render_markdown` turns the
 - **Upcoming deadlines:** :func:`fm.jobs.deadlines.upcoming` over the league's settings, never a hardcoded time.
 
 Claude is not called: the lines are templated from engine numbers and the rationale already stored with each proposal.
+
+**The weekly job (ROADMAP #62).** The tick writes each league's report in its weekly window (Monday morning,
+:func:`fm.jobs.deadlines.weekly_window`) through :func:`write_league_report`, which does for one league what
+``fm report`` does for all of them: the trend against last week's odds, the report card, any extra ``sections``, the
+file under ``reports`` (named for the league, so two leagues' Mondays never overwrite each other) and the odds
+remembered for next week. The weekly strategy is one such section: :func:`strategy_inputs` gathers what the strategist
+reads (:class:`fm.decide.strategy.StrategyInputs`: the week's category plan, our season odds and the trade finder's
+deals, all the engine's, none of it stored) and :func:`render_strategy` writes the note and the targets' fates out.
+Nothing here asks Claude or drafts a proposal: the tick does both (:mod:`fm.jobs.tick`) and hands the result in.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from contextlib import ExitStack
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
 from fm import paths
-from fm.config import Config
-from fm.decide.trades import TradeContext, TradeError, load_trade_context
+from fm.config import Config, TradeFinder
+from fm.decide.strategy import (
+    StrategyIdea,
+    StrategyInputs,
+    StrategyProposal,
+    StrategyResult,
+    engine_plan,
+    idea_from,
+    idea_line,
+)
+from fm.decide.trades import (
+    DEFAULT_OPTIONS,
+    MarketLike,
+    SearchOptions,
+    TradeContext,
+    TradeError,
+    clears_thresholds,
+    find_trades,
+    load_trade_context,
+)
+from fm.decide.weekly import WeeklyPlanError, check_category_league
+from fm.espn.calendar import CalendarError, matchup_period_of
 from fm.espn.models import Matchup, MatchupsView
 from fm.espn.settings import LeagueSettings
 from fm.jobs.deadlines import upcoming
+from fm.model.relevance import opponent_from
 from fm.model.simulate import (
     CategoryOutlook,
+    SeasonOdds,
     SimulationError,
     TeamOdds,
     TeamOutlook,
@@ -40,9 +72,11 @@ from fm.model.simulate import (
     simulate_season,
 )
 from fm.notify.messages import describe_payload
+from fm.proposals import ProposalKind
 from fm.proposals.policy import parse_payload, stored_settings
 from fm.render import percent
 from fm.render import stamp as _stamp
+from fm.sources.market import MarketSource
 from fm.sports.base import ScheduleLike
 from fm.store import ExecutionRow, LeagueRow, ProposalRow, Store
 
@@ -231,7 +265,8 @@ def _matchup_outlook(ctx: TradeContext, notes: list[str], runs: int) -> MatchupO
     )
 
 
-def _season_odds(ctx: TradeContext, notes: list[str], runs: int, now: datetime) -> OddsSnapshot | None:
+def _season(ctx: TradeContext, notes: list[str], runs: int) -> SeasonOdds | None:
+    """The season simulated over the league's schedule, with our team in it; ``None`` (and a note) when it cannot be."""
     if ctx.matchups is None:
         return None
     if not ctx.model.simulates:
@@ -248,12 +283,17 @@ def _season_odds(ctx: TradeContext, notes: list[str], runs: int, now: datetime) 
         season = simulate_season(
             ctx.settings, ctx.matchups, outlooks, seed=SEED, runs=runs, current_matchup_period=ctx.matchup_period
         )
-        mine = season.team(ctx.team_id)
+        season.team(ctx.team_id)
     except (SimulationError, KeyError) as exc:
         notes.append(f"{ctx.league.key}: the season cannot be simulated: {exc}")
         return None
     notes.extend(f"{ctx.league.key}: {warning}" for warning in season.warnings)
-    return OddsSnapshot.from_odds(mine, now)
+    return season
+
+
+def _season_odds(ctx: TradeContext, notes: list[str], runs: int, now: datetime) -> OddsSnapshot | None:
+    season = _season(ctx, notes, runs)
+    return None if season is None else OddsSnapshot.from_odds(season.team(ctx.team_id), now)
 
 
 def moves_made(store: Store, league: LeagueRow, *, since: datetime, until: datetime) -> tuple[MoveLine, ...]:
@@ -387,6 +427,12 @@ def report_title(reports: Sequence[LeagueReport], as_of: datetime) -> str:
     return f"Weekly report {as_of.astimezone(UTC):%Y-%m-%d} ({keys})"
 
 
+def report_body(markdown: str) -> str:
+    """The markdown for the phone push: everything after the title line, which the push's own title carries."""
+    body = markdown.split("\n", 2)[2] if markdown.startswith("# ") else markdown
+    return body.strip()
+
+
 # --- files ------------------------------------------------------------------------------------------------------------
 
 
@@ -398,14 +444,247 @@ def reports_dir() -> Path:
     return path
 
 
-def report_path(as_of: datetime, directory: Path | None = None) -> Path:
-    return (directory or reports_dir()) / f"weekly-{as_of.astimezone(UTC):%Y-%m-%d}.md"
+def report_path(as_of: datetime, directory: Path | None = None, *, league: str | None = None) -> Path:
+    """``weekly-YYYY-MM-DD.md`` for a report of every league (``fm report``), ``weekly-YYYY-MM-DD-<league>.md`` for
+    one league's (the tick's weekly job), under ``directory`` or :func:`reports_dir`."""
+    suffix = f"-{league}" if league else ""
+    return (directory or reports_dir()) / f"weekly-{as_of.astimezone(UTC):%Y-%m-%d}{suffix}.md"
 
 
 def write_report(markdown: str, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8", newline="\n")
     return path
+
+
+def odds_key(league: LeagueRow) -> str:
+    """The odds history of one league season (``nfl-2026``): a new season never trends against the last one."""
+    return f"{league.key}-{league.season}"
+
+
+@dataclass(frozen=True, slots=True)
+class WrittenReport:
+    """One league's weekly report as :func:`write_league_report` left it: the report, its markdown, where it went and
+    what the phone push says."""
+
+    report: LeagueReport
+    markdown: str
+    path: Path
+    as_of: datetime
+
+    @property
+    def title(self) -> str:
+        return report_title([self.report], self.as_of)
+
+    @property
+    def body(self) -> str:
+        return report_body(self.markdown)
+
+
+def write_league_report(
+    store: Store,
+    config: Config,
+    league: LeagueRow,
+    *,
+    now: datetime,
+    schedule: ScheduleLike | None = None,
+    matchups: MatchupsView | None = None,
+    sections: Sequence[str] = (),
+    notes: Sequence[str] = (),
+    window: timedelta = timedelta(days=DEFAULT_WINDOW_DAYS),
+    directory: Path | None = None,
+) -> WrittenReport:
+    """Build, remember and write one league's report, as ``fm report`` does for each league: the four sections with the
+    trend against last week's odds (:func:`previous_odds`), the report card
+    (:func:`fm.eval.report_card.attach_report_card`), then ``sections`` (extra markdown blocks, the weekly strategy)
+    appended, rendered with ``notes`` and written to :func:`report_path` for the league under ``directory``
+    (:func:`reports_dir` by default, where the odds history lives too). The odds are remembered for next week's trend.
+    Missing inputs degrade to notes, as :func:`build_league_report` does; only a file that cannot be written raises."""
+    from fm.eval.report_card import attach_report_card  # the report card builds on this module's LeagueReport
+
+    where = directory if directory is not None else reports_dir()
+    key = odds_key(league)
+    built = build_league_report(
+        store,
+        config,
+        league,
+        now=now,
+        schedule=schedule,
+        matchups=matchups,
+        previous=previous_odds(where, key, before=now),
+        window=window,
+    )
+    built = attach_report_card(built, store, league, now=now, schedule=schedule)
+    if sections:
+        built = replace(built, sections=(*built.sections, *sections))
+    if built.odds is not None:
+        remember_odds(where, key, built.odds)
+    markdown = render_markdown([built], as_of=now, notes=notes)
+    path = write_report(markdown, report_path(now, where, league=league.key))
+    return WrittenReport(built, markdown, path, now)
+
+
+# --- the weekly strategy ----------------------------------------------------------------------------------------------
+
+
+def strategy_inputs(
+    store: Store,
+    config: Config,
+    league: LeagueRow,
+    *,
+    now: datetime,
+    finder: TradeFinder,
+    label: str,
+    schedule: ScheduleLike | None = None,
+    matchups: MatchupsView | None = None,
+    period: int | None = None,
+    market: MarketLike | None = None,
+    options: SearchOptions = DEFAULT_OPTIONS,
+    runs: int = REPORT_RUNS,
+) -> StrategyInputs:
+    """Everything the weekly strategist reads for ``league``, all of it the engine's and none of it stored.
+
+    The trade context (:func:`fm.decide.trades.load_trade_context`, over the market ``finder`` would use, FantasyCalc
+    and ESPN's pool by default) gives the team names, our season odds (the same simulation as the report's playoff
+    odds) and, with the trade finder on, the deals :func:`fm.decide.trades.find_trades` ranks that clear its thresholds
+    (:func:`fm.decide.trades.clears_thresholds`) and were not rejected before, as :func:`fm.decide.strategy.idea_from`;
+    with it off there are no ideas, and the strategist says so. The week's category plan
+    (:func:`fm.decide.strategy.engine_plan`) is planned against this week's opponent from ``matchups`` in a category
+    league; a points league has no categories to plan and gets no warning for it. ``period`` is the scoring period
+    current at ``now`` (the schedule's when omitted). Every input that cannot be read is a warning the template and
+    Claude both see, never an error: a league that cannot be valued has no odds and no ideas but still gets its note.
+    """
+    warnings: list[str] = []
+    settings = stored_settings(store, league)
+    ctx: TradeContext | None = None
+    try:
+        with ExitStack() as stack:
+            if not finder.enabled:
+                market = None  # no deals wanted, so no P(accept) to price: the market is not read at all
+            elif market is None:
+                market = stack.enter_context(MarketSource())
+            ctx = load_trade_context(
+                store, league, now=now, config=config, schedule=schedule, matchups=matchups, market=market
+            )
+        warnings.extend(ctx.warnings)  # stale rosters, no market, no mMatchup: what the ideas were judged without
+    except TradeError as exc:
+        warnings.append(f"no trade context ({exc}): no season odds and no trade ideas")
+    odds = _season(ctx, warnings, runs) if ctx is not None else None
+    our_odds = odds.team(league.team_id) if odds is not None else None
+    plan = None
+    if settings is None:
+        warnings.append("league settings are not synced; no category plan")
+    elif schedule is None:
+        warnings.append("no pro schedule; no category plan")
+    else:
+        try:
+            check_category_league(settings)
+        except WeeklyPlanError:
+            pass  # a points league has no categories to plan: the template says so without a warning
+        else:
+            opponent = _opponent_of(settings, matchups, league, period, schedule, warnings)
+            found = engine_plan(
+                store, league, schedule=schedule, now=now, odds=odds, settings=settings, opponent_team_id=opponent
+            )
+            plan = found.plan
+            warnings.extend(found.warnings)
+    ideas: tuple[StrategyIdea, ...] = ()
+    if ctx is None:
+        pass
+    elif not finder.enabled:
+        warnings.append("the trade finder is off ([league.trade_finder] enabled = false): no trade ideas")
+    else:
+        search = find_trades(ctx, options=replace(options, min_accept=max(options.min_accept, finder.min_accept)))
+        warnings.extend(search.warnings)
+        rejected = {
+            proposal.dedupe_key
+            for proposal in store.proposals.find(
+                league_id=league.row_id, statuses=("rejected",), kinds=[ProposalKind.TRADE_PROPOSE.value]
+            )
+            if proposal.dedupe_key
+        }
+        ideas = tuple(
+            idea_from(ctx, found)
+            for found in search.results
+            if clears_thresholds(found, finder) and f"{league.key}:{found.spec.key}" not in rejected
+        )
+    names = {
+        espn_id: ctx.name(espn_id)
+        for idea in ideas
+        for espn_id in (*idea.evaluation.spec.give, *idea.evaluation.spec.get)
+        if ctx is not None
+    }
+    return StrategyInputs(
+        label,
+        plan,
+        our_odds,
+        ideas,
+        names,
+        dict(ctx.team_names) if ctx is not None else {},
+        tuple(dict.fromkeys(warnings)),
+        league.row_id,
+    )
+
+
+def _opponent_of(
+    settings: LeagueSettings,
+    matchups: MatchupsView | None,
+    league: LeagueRow,
+    period: int | None,
+    schedule: ScheduleLike,
+    warnings: list[str],
+) -> int | None:
+    """Our opponent this matchup period from ``matchups`` (as the tick reads it for the lineups); ``None`` without the
+    read or when the matchup week cannot be placed on the calendar, which the plan then reports."""
+    if matchups is None:
+        return None
+    current = period if period is not None else settings.current_scoring_period
+    if current is None:
+        return None
+    try:
+        return opponent_from(matchups, league.team_id, matchup_period_of(settings, current))
+    except CalendarError as exc:
+        warnings.append(f"matchup week unknown ({exc}): the plan has no opponent")
+        return None
+
+
+def render_strategy(inputs: StrategyInputs, result: StrategyResult) -> str:
+    """The weekly strategy as a ``### Weekly strategy`` block for :attr:`LeagueReport.sections`: the note (Claude's or
+    the template's, and which), the plan's contests and punts, and each target with what became of it. The note's
+    warnings belong in the report's notes, not here."""
+    report = result.report
+    lines = ["### Weekly strategy", "", report.summary, ""]
+    if report.source == "claude":
+        lines.append("Note by Claude; the numbers and the targets are the engine's.")
+    elif report.source == "fallback":
+        lines.append(f"Template note; Claude could not be used ({report.detail}).")
+    else:
+        lines.append("Template note" + (f" ({report.detail})." if report.detail else "."))
+    if report.priorities:
+        lines += ["", "Priorities:", ""] + [f"- {priority}" for priority in report.priorities]
+    if report.contest or report.punts:
+        lines += [
+            "",
+            f"Contest {', '.join(report.contest) or 'nothing'}; punt {', '.join(report.punts) or 'nothing'}.",
+        ]
+    lines += ["", "Trade targets:", ""]
+    if not result.proposals:
+        lines.append("None.")
+    for outcome in result.proposals:
+        text = f"- {idea_line(inputs, outcome.idea)}: {_fate(outcome)}."
+        note = report.target_notes.get(outcome.idea.key)
+        lines.append(f"{text} {note}" if note else text)
+    return "\n".join(lines)
+
+
+def _fate(outcome: StrategyProposal) -> str:
+    if outcome.dry:
+        return "would be drafted" if outcome.blocked is None else f"would be refused ({outcome.blocked})"
+    if outcome.proposal is not None and outcome.existing:
+        return f"already open as proposal #{outcome.proposal.row_id}"
+    if outcome.proposal is not None:
+        return f"drafted as proposal #{outcome.proposal.row_id}, awaiting approval"
+    return f"not drafted ({outcome.blocked})"
 
 
 TREND_MIN_AGE: Final = timedelta(days=6)

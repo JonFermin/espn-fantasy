@@ -17,6 +17,13 @@ Nothing here is a weekday or a clock time: every instant comes from the league's
   runs the waiver decision. A window is **due** between its opening and its deadline until it has run once (the tick
   records each run), and **missed** when it closed since the previous tick without running: the PC was asleep or the
   tick did not fire, and the first tick after reports it (DESIGN section 13).
+- The **weekly window** (:func:`weekly_window`, ``WindowKind.WEEKLY``) is the matchup period's Monday morning: it
+  opens at the last :data:`WEEKLY_AT` (Monday 09:00 ET) before the matchup period turns and closes at that turn, so the
+  weekly strategist and report (DESIGN sections 9.5 and 10) run once per matchup period and a tick that was asleep on
+  Monday morning still runs them later that week. The matchup's scoring periods come from the league's own calendar
+  (:func:`fm.espn.calendar.matchup_scoring_periods`), never from a weekday rule; a matchup period with no Monday
+  morning inside it (an NFL week that ends on Sunday) opens its window when the period opens. It runs no registered
+  decision: the tick handles it itself.
 
 The tick (:mod:`fm.jobs.tick`) asks :func:`upcoming` for the deadlines between its previous run and its horizon and
 :func:`run_windows` for the windows, then :func:`due_windows` and :func:`missed_windows` against its recorded runs.
@@ -33,6 +40,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from fm.config import Sport
+from fm.espn.calendar import matchup_scoring_periods
 from fm.espn.settings import AcquisitionSettings, LeagueSettings, LockType
 from fm.model.availability import RESOLUTION_LEAD
 from fm.sports.base import (
@@ -57,6 +65,10 @@ FIRST_PERIOD_LEAD: Final = timedelta(days=7)
 """How long before the schedule's first game the first period counts as open (there is no earlier turn)."""
 WEEKDAYS: Final[tuple[str, ...]] = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
 """ESPN's ``waiverProcessDays`` names, Monday first, as ``date.weekday`` numbers them."""
+WEEKLY_DAY: Final = WEEKDAYS.index("MONDAY")
+WEEKLY_AT: Final = time(9)
+"""When the weekly window opens, US Eastern wall clock: Monday 09:00 ET (ROADMAP #62), the morning after the NFL's
+Sunday games and the morning an NBA matchup week begins."""
 
 
 class DeadlineKind(StrEnum):
@@ -71,6 +83,7 @@ class WindowKind(StrEnum):
     PRE_LOCK = "pre_lock"
     PRE_ROSTER_LOCK = "pre_roster_lock"
     PRE_WAIVER = "pre_waiver"
+    WEEKLY = "weekly"
 
 
 LINEUP_DECISIONS: Final = frozenset({"lineup", "lineup_daily"})
@@ -84,9 +97,11 @@ WINDOW_DECISIONS: Mapping[WindowKind, frozenset[str] | None] = MappingProxyType(
         WindowKind.PRE_LOCK: LINEUP_DECISIONS,
         WindowKind.PRE_ROSTER_LOCK: ACQUISITION_DECISIONS,
         WindowKind.PRE_WAIVER: WAIVER_DECISIONS,
+        WindowKind.WEEKLY: frozenset(),
     }
 )
-"""Which registered decision kinds each window runs; ``None`` runs every decision registered for the sport."""
+"""Which registered decision kinds each window runs; ``None`` runs every decision registered for the sport, and the
+empty set none (the weekly window is the tick's own: the strategist and the report)."""
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -139,6 +154,9 @@ class RunWindow:
 
     def describe(self) -> str:
         local = self.closes_at.astimezone(EASTERN)
+        if self.kind is WindowKind.WEEKLY:
+            opens = self.opens_at.astimezone(EASTERN)
+            return f"{self.league_key} weekly from {opens:%a %H:%M} ET until the matchup turns {local:%a %H:%M} ET"
         return f"{self.league_key} {self.kind.value} before {local:%a %H:%M} ET ({self.deadline.kind.value})"
 
 
@@ -183,6 +201,77 @@ def period_turns_at(schedule: ScheduleLike, period: int) -> datetime | None:
     """When ESPN moves on from ``period``: 03:00 ET after the fantasy day of its last game."""
     last = last_start(schedule, period)
     return None if last is None else period_turn(fantasy_day(last) + timedelta(days=1))
+
+
+def matchup_bounds(
+    settings: LeagueSettings, schedule: ScheduleLike, period: int
+) -> tuple[tuple[int, ...], datetime, datetime] | None:
+    """The matchup period that holds scoring ``period``: its scoring periods, when it opens (the first of them with
+    games, :func:`period_opens_at`) and when it turns (after the last game of the last of them with games). The
+    scoring periods are the league's (:func:`fm.espn.calendar.matchup_scoring_periods`); when the league's matchups
+    cannot be placed on the calendar the scoring period stands alone. ``None`` when none of them has a game."""
+    span = matchup_scoring_periods(settings, period) or (period,)
+    with_games = [p for p in span if last_start(schedule, p) is not None]
+    if not with_games:
+        return None
+    opens = period_opens_at(schedule, with_games[0])
+    closes = period_turns_at(schedule, with_games[-1])
+    assert opens is not None and closes is not None
+    return tuple(span), opens, closes
+
+
+def weekly_opens_at(opens: datetime, closes: datetime, *, zone: ZoneInfo = EASTERN) -> datetime:
+    """When the weekly window of a matchup period open from ``opens`` to ``closes`` begins: the last
+    :data:`WEEKLY_DAY` at :data:`WEEKLY_AT` (Monday 09:00 ET) strictly before ``closes``, or ``opens`` itself when that
+    Monday morning is before the period opened (a matchup period with no Monday morning inside it)."""
+    local = closes.astimezone(zone)
+    for offset in range(8):
+        day = local.date() - timedelta(days=offset)
+        if day.weekday() != WEEKLY_DAY:
+            continue
+        monday = datetime.combine(day, WEEKLY_AT, tzinfo=zone).astimezone(UTC)
+        if monday < closes:
+            return monday if monday >= opens else opens
+    return opens  # unreachable: eight days always hold a Monday morning before ``closes``
+
+
+def weekly_window(
+    league_key: str, settings: LeagueSettings, schedule: ScheduleLike, *, period: int
+) -> RunWindow | None:
+    """The weekly window of the matchup period that holds scoring ``period`` (module docs): from
+    :func:`weekly_opens_at` until the matchup period turns, recorded under the matchup's last scoring period. ``None``
+    when the matchup period has no games on the schedule."""
+    bounds = matchup_bounds(settings, schedule, period)
+    if bounds is None:
+        return None
+    span, opens, closes = bounds
+    turn = Deadline(at=closes, kind=DeadlineKind.PERIOD_TURN, league_key=league_key, period=span[-1])
+    return _window(turn, WindowKind.WEEKLY, weekly_opens_at(opens, closes))
+
+
+def weekly_windows(
+    league_key: str,
+    sport: Sport,
+    settings: LeagueSettings,
+    schedule: ScheduleLike,
+    *,
+    now: datetime,
+    since: datetime | None = None,
+) -> tuple[RunWindow, ...]:
+    """The weekly windows of the matchup periods current at ``since`` (the tick's previous run, so a window that closed
+    while the PC slept is reported missed) and at ``now``, ascending; one when both fall in the same matchup period."""
+    plugin = plugin_for(sport)
+    found: dict[str, RunWindow] = {}
+    for at in (since, now):
+        if at is None:
+            continue
+        period = plugin.scoring_period_at(at, schedule)
+        if period is None:
+            continue
+        window = weekly_window(league_key, settings, schedule, period=period)
+        if window is not None:
+            found.setdefault(window.key, window)
+    return tuple(sorted(found.values(), key=lambda window: window.opens_at))
 
 
 def lock_deadlines(
@@ -290,9 +379,12 @@ def run_windows(
     now: datetime,
     lock_lead: Mapping[Sport, timedelta] = LOCK_LEAD,
     waiver_lead: timedelta = WAIVER_LEAD,
+    settings: LeagueSettings | None = None,
+    since: datetime | None = None,
 ) -> tuple[RunWindow, ...]:
     """The decision windows the deadlines imply, plus the opening of the period current at ``now`` (from its turn
-    until its first game), ascending by opening time."""
+    until its first game) and, given the league ``settings``, the weekly windows (:func:`weekly_windows`, for the
+    matchup periods current at ``since`` and at ``now``), ascending by opening time."""
     plugin = plugin_for(sport)
     listed = sorted(deadlines)
     windows: list[RunWindow] = []
@@ -312,6 +404,8 @@ def run_windows(
         if opens is not None and closes is not None and opens < closes:
             first_lock = Deadline(at=closes, kind=DeadlineKind.PERIOD_TURN, league_key=league_key, period=current)
             windows.append(_window(first_lock, WindowKind.PERIOD_OPEN, opens))
+    if settings is not None:
+        windows.extend(weekly_windows(league_key, sport, settings, schedule, now=now, since=since))
     return tuple(sorted(windows, key=lambda window: (window.opens_at, window.closes_at, window.kind.value)))
 
 
@@ -352,6 +446,8 @@ __all__ = [
     "WAIVER_DECISIONS",
     "WAIVER_LEAD",
     "WEEKDAYS",
+    "WEEKLY_AT",
+    "WEEKLY_DAY",
     "WINDOW_DECISIONS",
     "Deadline",
     "DeadlineKind",
@@ -359,10 +455,14 @@ __all__ = [
     "WindowKind",
     "due_windows",
     "lock_deadlines",
+    "matchup_bounds",
     "missed_windows",
     "next_waiver_run",
     "period_opens_at",
     "period_turns_at",
     "run_windows",
     "upcoming",
+    "weekly_opens_at",
+    "weekly_window",
+    "weekly_windows",
 ]
