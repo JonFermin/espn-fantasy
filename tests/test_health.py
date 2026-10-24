@@ -28,12 +28,14 @@ import fm.health as health_module
 from fm import paths
 from fm.browser.session import BrowserLaunchError
 from fm.commands import doctor
-from fm.config import League
+from fm.config import League, load_config
 from fm.espn.auth import EspnSession, NotLoggedInError
 from fm.espn.client import EspnClient
 from fm.health import (
     AUTOSTART_FIX,
     DEADLINE_SOON,
+    NEWS_LATE_FIX,
+    NEWS_TRIAGE_WINDOW,
     NO_STATE,
     SYNC_FAIL_AFTER,
     SYNC_WARN_AFTER,
@@ -48,11 +50,12 @@ from fm.health import (
     job_installed,
     run_checks,
 )
+from fm.jobs.advice import advisor_off
 from fm.jobs.runlock import RunLock
 from fm.jobs.scheduler_base import Runner, RunResult, SchedulerError
 from fm.jobs.scheduler_windows import WINDOWS_AUTOSTART
 from fm.proposals import pause
-from fm.store import LlmUsageRow, ProposalRow, Store
+from fm.store import LlmUsageRow, NewsItemRow, ProposalRow, Sport, Store
 
 HOME = Path(__file__).resolve().parent / "fixtures" / "home"
 SYNCED = datetime(2026, 10, 4, 15, 0, tzinfo=UTC)
@@ -88,6 +91,7 @@ OFFLINE_NAMES = [
     "proposals",
     "deadlines",
     "llm",
+    "news",
 ]
 
 TASK_INFO = "TaskName: espn-fantasy-run\nState: Running\nExecute: C:\\uv\\uvw.exe\nLastTaskResult: 267009"
@@ -150,11 +154,19 @@ def make_profile(home: Path) -> None:
     (profile / "Default").mkdir()  # any entry inside counts as "a browser wrote here"
 
 
-def write_tick(home: Path, at: datetime | str, *, session: dict[str, str | None] | None = None) -> None:
+def write_tick(
+    home: Path,
+    at: datetime | str,
+    *,
+    session: dict[str, str | None] | None = None,
+    news: dict[str, datetime | str] | None = None,
+) -> None:
     stamp = at if isinstance(at, str) else at.isoformat()
     state: dict[str, Any] = {"last_tick": stamp, "runs": {}}
     if session is not None:
         state["session"] = session
+    if news is not None:  # TickState.news: league key -> when its news was last polled
+        state["news"] = {key: value if isinstance(value, str) else value.isoformat() for key, value in news.items()}
     (home / TICK_STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
 
 
@@ -205,6 +217,24 @@ def add_spend(home: Path, cost: float, at: datetime) -> None:
         store.llm_usage.insert(LlmUsageRow(called_at=at, worker="explain", model="claude-opus-5-5", cost_usd=cost))
 
 
+def add_news(home: Path, *, fetched: datetime, triaged: datetime | None = None, sport: Sport = "nfl") -> int:
+    """A news item the tick's poll stored at ``fetched`` (its ``published_at`` too), triaged at ``triaged`` or not."""
+    with Store.open(home / "state.db") as store:
+        row = store.news.ingest(
+            NewsItemRow(
+                source="espn",
+                external_id=f"{sport}-{fetched.isoformat()}-{triaged}",
+                sport=sport,
+                title="Fixture news item",
+                published_at=fetched,
+                fetched_at=fetched,
+                triaged_at=triaged,
+            )
+        )
+        assert row is not None
+        return row.row_id
+
+
 # --- the fixture home, offline ----------------------------------------------------------------------------------------
 
 
@@ -240,6 +270,11 @@ def test_a_fresh_fixture_home_says_what_is_missing_and_how_to_fix_it(home: Path)
     assert found["proposals"] == Check("proposals", CheckStatus.OK, "no open proposals")
     assert found["deadlines"].status is CheckStatus.OK
     assert found["llm"].status is CheckStatus.OK and "$0.00" in found["llm"].detail  # the home's budget is 0
+    assert found["news"] == Check(
+        "news",
+        CheckStatus.OK,
+        f"nfl news never polled; no item triaged in the last {NEWS_TRIAGE_WINDOW.days} d; 0 items waiting",
+    )
     assert has_failure(found.values())
 
 
@@ -582,7 +617,7 @@ def test_a_fresh_install_without_state_db_is_warned_and_never_creates_it(home: P
 
     found = checks(store_opener=opener)
     assert list(found) == OFFLINE_NAMES
-    for name in ("sync:nfl", "proposals", "deadlines", "llm"):
+    for name in ("sync:nfl", "proposals", "deadlines", "llm", "news"):
         assert found[name] == Check(name, CheckStatus.WARN, NO_STATE, fix="fm sync")
     assert "no state yet" in NO_STATE and found["pause"].status is CheckStatus.OK
     assert not (home / "state.db").exists()
@@ -640,21 +675,103 @@ def test_no_deadline_within_two_hours_is_fine(home: Path) -> None:
 # --- llm --------------------------------------------------------------------------------------------------------------
 
 
+def advisor_on(home: Path) -> None:
+    """A $1.00 daily budget and the key in ``.env``: the tick would build the advisor."""
+    (home / "config.toml").write_text(NTFY_CONFIG, encoding="utf-8")
+    (home / ".env").write_text(NTFY_ENV, encoding="utf-8")
+
+
 def test_todays_spend_counts_against_the_budget(home: Path) -> None:
-    (home / "config.toml").write_text(NTFY_CONFIG, encoding="utf-8")  # budget $1.00
+    advisor_on(home)
     add_spend(home, 0.40, NOW - timedelta(hours=2))
     add_spend(home, 0.35, NOW - timedelta(days=1))  # yesterday: outside the window
     check = checks()["llm"]
-    assert check == Check("llm", CheckStatus.OK, "Claude spend since 00:00 UTC: $0.40 of $1.00")
+    assert check == Check("llm", CheckStatus.OK, "advisor on: Claude spend since 00:00 UTC: $0.40 of $1.00")
     add_spend(home, 0.60, NOW - timedelta(minutes=1))
     check = checks()["llm"]
-    assert check.status is CheckStatus.WARN and check.detail.startswith("Claude spend since 00:00 UTC: $1.00 of $1.00")
-    assert "refused until 00:00 UTC" in check.detail
+    assert check.status is CheckStatus.WARN and check.fix is None
+    assert check.detail.startswith("advisor off until 00:00 UTC: today's Claude budget is spent ($1.00 of $1.00)")
+    assert "refused" in check.detail and "template rationales" in check.detail
 
 
 def test_a_zero_budget_means_the_advisor_is_off_not_broken(home: Path) -> None:
     check = checks()["llm"]
     assert check.status is CheckStatus.OK and "advisor is off" in check.detail
+    assert check.detail == f"{advisor_off(load_config())}; $0.00 used today"
+
+
+def test_a_missing_key_is_reported_as_the_tick_would_note_it(home: Path) -> None:
+    """``llm`` says what ``fm.jobs.advice.advisor_off`` tells the tick, word for word; the WARN and the fix for the
+    key stay with the ``config`` check, so one cause is not flagged twice."""
+    (home / "config.toml").write_text(NTFY_CONFIG, encoding="utf-8")  # budget $1.00, but no .env: no key
+    found = checks()
+    reason = advisor_off(load_config())
+    assert reason is not None and "ANTHROPIC_API_KEY is not set" in reason
+    assert found["llm"] == Check("llm", CheckStatus.OK, f"{reason}; $0.00 used today")
+    assert found["config"].status is CheckStatus.WARN and found["config"].fix == "fm setup"
+    (home / ".env").write_text(NTFY_ENV, encoding="utf-8")
+    found = checks()
+    assert advisor_off(load_config()) is None
+    assert found["llm"] == Check("llm", CheckStatus.OK, "advisor on: Claude spend since 00:00 UTC: $0.00 of $1.00")
+    assert found["config"].status is CheckStatus.OK
+
+
+# --- news -------------------------------------------------------------------------------------------------------------
+
+
+def test_news_reports_the_last_poll_the_last_triage_and_what_waits(home: Path) -> None:
+    advisor_on(home)
+    polled = NOW - timedelta(minutes=12)
+    write_tick(home, NOW - timedelta(minutes=5), news={"nfl": polled})
+    add_news(home, fetched=NOW - timedelta(hours=3), triaged=NOW - timedelta(hours=2))
+    add_news(home, fetched=polled, triaged=NOW - timedelta(minutes=11))
+    add_news(home, fetched=NOW - timedelta(hours=1), sport="nba")  # no NBA league is configured: not the tick's
+    check = checks()["news"]
+    assert check == Check("news", CheckStatus.OK, "nfl news polled 12 min ago; last triage 11 min ago; 0 items waiting")
+
+
+def test_items_the_last_poll_left_untriaged_warn_only_with_the_advisor_on(home: Path) -> None:
+    """The tick triages everything untriaged right after each poll, so an item fetched at that poll and still waiting
+    means the triage failed: a WARN pointing at the log. Without an advisor the items wait by design."""
+    advisor_on(home)
+    polled = NOW - timedelta(minutes=12)
+    write_tick(home, NOW - timedelta(minutes=5), news={"nfl": polled})
+    add_news(home, fetched=NOW - timedelta(hours=2), triaged=NOW - timedelta(hours=1))
+    add_news(home, fetched=polled)
+    check = checks()["news"]
+    assert check.status is CheckStatus.WARN and check.fix == NEWS_LATE_FIX
+    assert check.detail == (
+        "nfl news polled 12 min ago; last triage 1 h 0 min ago; 1 item waiting; all of them fetched by the last poll "
+        "or earlier and still untriaged with the advisor on"
+    )
+    add_spend(home, 1.00, NOW - timedelta(minutes=1))  # the budget is spent: the triage stopped on purpose
+    check = checks()["news"]
+    assert check == Check(
+        "news",
+        CheckStatus.OK,
+        "nfl news polled 12 min ago; last triage 1 h 0 min ago; 1 item waiting (the advisor is off, so they wait)",
+    )
+    (home / ".env").unlink()  # no key: same
+    assert checks()["news"].status is CheckStatus.OK and "the advisor is off" in checks()["news"].detail
+
+
+def test_news_fetched_after_the_last_poll_is_not_late_yet(home: Path) -> None:
+    advisor_on(home)
+    write_tick(home, NOW - timedelta(minutes=5), news={"nfl": NOW - timedelta(minutes=40)})
+    add_news(home, fetched=NOW - timedelta(minutes=2))  # stored by a later hand poll; the next tick triages it
+    check = checks()["news"]
+    assert check == Check(
+        "news",
+        CheckStatus.OK,
+        f"nfl news polled 40 min ago; no item triaged in the last {NEWS_TRIAGE_WINDOW.days} d; 1 item waiting",
+    )
+
+
+@pytest.mark.parametrize("record", [{"nfl": "2026-10-04T15:00:00"}, {"nfl": "soon"}, {"nba": NOW}, "polled"])
+def test_a_malformed_or_missing_news_record_reads_as_never_polled(home: Path, record: Any) -> None:
+    state: dict[str, Any] = {"last_tick": NOW.isoformat(), "runs": {}, "news": record}
+    (home / TICK_STATE_FILE).write_text(json.dumps(state, default=str), encoding="utf-8")
+    assert checks()["news"].detail.startswith("nfl news never polled;")
 
 
 # --- online -----------------------------------------------------------------------------------------------------------
@@ -879,6 +996,7 @@ def test_the_health_module_imports_neither_the_executor_nor_the_flows() -> None:
             modules.add(node.module or "")
     assert {m for m in modules if m.startswith(FORBIDDEN_MODULES + FORBIDDEN_PACKAGES)} == set()
     assert "fm.store" in modules  # the parse found the real imports
+    assert "fm.jobs.advice" in modules  # the advisor's on/off rule comes from the tick's module, not a copy
 
 
 def test_importing_health_loads_no_executor_flow_or_sdk() -> None:

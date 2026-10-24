@@ -38,7 +38,16 @@ Offline checks, in order:
   the first sync.
 - ``pause``: the kill switch (a WARN while thrown).
 - ``proposals``: what is open, by status. ``deadlines``: open proposals due within :data:`DEADLINE_SOON` or overdue.
-- ``llm``: today's recorded Claude spend against ``[llm] daily_budget_usd``; the cap reached is a WARN.
+- ``llm``: the advisor's state (ROADMAP #63), by the rule the tick applies, :func:`fm.jobs.advice.advisor_off`,
+  imported from there (that module loads only the config and the store; the SDK stays out). Off by configuration
+  (no ``ANTHROPIC_API_KEY`` in ``.env``, or ``[llm] daily_budget_usd`` 0) is OK with the reason, since the ``config``
+  check carries the key's WARN and fix; today's recorded spend at the cap is a WARN (off until 00:00 UTC, the engine
+  decides alone with template rationales); otherwise on, with the spend against the cap.
+- ``news``: when each league's news was last polled (the ``news`` record in ``tick-state.json``), when an item was
+  last triaged (``news_items.triaged_at``, over the last :data:`NEWS_TRIAGE_WINDOW`) and how many items of the
+  configured sports wait untriaged. The tick triages everything untriaged right after each poll, so an item fetched
+  at or before its sport's last poll and still waiting while the advisor is on means that triage failed: a WARN
+  pointing at ``logs/run.log``. With the advisor off the items wait by design (OK).
 
 The store checks need ``state.db``; on a fresh install it does not exist yet, and opening it would create and migrate
 it, so they report WARN "no state yet" instead. ``--online`` adds ``espn:<league>`` (an ``mStatus`` read through
@@ -59,7 +68,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -69,10 +78,11 @@ import httpx
 
 from fm import paths, render
 from fm.browser.session import CHANNELS, BrowserError, profile_exists
-from fm.config import Config, ConfigError, League, load_config
+from fm.config import Config, ConfigError, League, Sport, load_config
 from fm.espn.auth import AuthError, EspnSession, NotLoggedInError, SessionStatus, describe, load_session
 from fm.espn.client import EspnAuthError, EspnClient, EspnClientError
 from fm.espn.models import LeagueStatus
+from fm.jobs.advice import advisor_off
 from fm.jobs.runlock import RunLock, RunLockHeld
 from fm.jobs.scheduler_base import (
     LOGS_DIRNAME,
@@ -106,6 +116,11 @@ SYNC_FAIL_AFTER = timedelta(hours=24)
 """A day-old roster and standings mislead every recommendation."""
 DEADLINE_SOON = timedelta(hours=2)
 """An open proposal due within this is listed by the ``deadlines`` check."""
+NEWS_TRIAGE_WINDOW = timedelta(days=7)
+"""How far back ``news_items`` is read for the last triage time: the feeds carry about a week of items, so an older
+triage means none happened while there was news."""
+NEWS_LATE_FIX = f"the tick's news triage is failing: check {LOGS_DIRNAME}/{RUN_LOG_FILENAME}"
+"""The news check's fix when the advisor is on and the last poll left items untriaged."""
 ADVISOR_KEY = "ANTHROPIC_API_KEY"
 AUTOSTART_FIX = "fm autostart install"
 """The autostart check's fix: registers ``fm run`` at logon and starts it now (the tick task stays the wake timer)."""
@@ -257,7 +272,7 @@ def run_checks(
         _autostart(backend, runner, lock),
     ]
     if database.exists():
-        checks.extend(_store_checks(store_opener, config, pause_reader(), at))
+        checks.extend(_store_checks(store_opener, config, pause_reader(), at, polled=record.news))
     else:
         checks.extend(_no_state(config, pause_reader()))
     if online:
@@ -304,18 +319,37 @@ class _SessionRecord:
 class _TickRecord:
     last_tick: datetime | None = None
     session: _SessionRecord | None = None
+    news: Mapping[str, datetime] = field(default_factory=dict[str, datetime])
+    """League key -> when the tick last polled (and, with an advisor, triaged) its news (``TickState.news``)."""
 
 
 def _tick_record(path: Path) -> _TickRecord:
-    """``last_tick`` and the session record from the tick's state file; either is ``None`` when the file is missing,
-    unreadable, or the value is malformed or naive (the tick itself ignores such a file, so it has no memory either)."""
+    """``last_tick``, the session record and the news stamps from the tick's state file; each is empty when the file
+    is missing, unreadable, or the value is malformed or naive (the tick itself ignores such a file, so it has no
+    memory either)."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return _TickRecord()
     if not isinstance(data, dict):
         return _TickRecord()
-    return _TickRecord(last_tick=_aware(data.get("last_tick")), session=_session_record(data.get("session")))
+    return _TickRecord(
+        last_tick=_aware(data.get("last_tick")),
+        session=_session_record(data.get("session")),
+        news=_stamps(data.get("news")),
+    )
+
+
+def _stamps(value: object) -> dict[str, datetime]:
+    """A ``{key: ISO stamp}`` record's aware entries, the malformed ones dropped."""
+    if not isinstance(value, dict):
+        return {}
+    found: dict[str, datetime] = {}
+    for key, raw in value.items():
+        at = _aware(raw)
+        if isinstance(key, str) and at is not None:
+            found[key] = at
+    return found
 
 
 def _session_record(value: object) -> _SessionRecord | None:
@@ -556,14 +590,22 @@ def _no_state(config: Config | None, paused: PauseState | None) -> list[Check]:
     syncs = [f"sync:{league.key}" for league in config.leagues] if config is not None else ["sync"]
     checks = [Check(name, CheckStatus.WARN, NO_STATE, fix=fix) for name in syncs]
     checks.append(_pause(paused))
-    checks.extend(Check(name, CheckStatus.WARN, NO_STATE, fix=fix) for name in ("proposals", "deadlines", "llm"))
+    checks.extend(
+        Check(name, CheckStatus.WARN, NO_STATE, fix=fix) for name in ("proposals", "deadlines", "llm", "news")
+    )
     return checks
 
 
 def _store_checks(
-    opener: Callable[[], Store], config: Config | None, paused: PauseState | None, now: datetime
+    opener: Callable[[], Store],
+    config: Config | None,
+    paused: PauseState | None,
+    now: datetime,
+    *,
+    polled: Mapping[str, datetime],
 ) -> list[Check]:
-    """The checks that read ``state.db``: syncs, pause, proposals, deadlines, Claude spend."""
+    """The checks that read ``state.db``: syncs, pause, proposals, deadlines, the advisor's state and the news.
+    ``polled`` is the tick's news record (league key -> last poll)."""
     try:
         store = opener()
     except (SchemaError, sqlite3.Error, OSError) as exc:
@@ -575,6 +617,7 @@ def _store_checks(
             _skipped("proposals", reason),
             _skipped("deadlines", reason),
             _skipped("llm", reason),
+            _skipped("news", reason),
         ]
     with store:
         checks = [_sync(store, league, now) for league in config.leagues] if config is not None else [_skipped("sync")]
@@ -583,7 +626,9 @@ def _store_checks(
         keys = {row.row_id: row.key for row in store.leagues.all()}
         checks.append(_proposals(open_rows))
         checks.append(_deadlines(open_rows, keys, now))
-        checks.append(_llm(store, config, now))
+        advisor = _advisor_state(store, config, now)
+        checks.append(_llm(advisor))
+        checks.append(_news(store, config, advisor, polled, now))
     return checks
 
 
@@ -632,18 +677,85 @@ def _deadlines(open_rows: Sequence[ProposalRow], keys: Mapping[int, str], now: d
     return Check("deadlines", CheckStatus.WARN, "; ".join(parts), fix="fm proposals list")
 
 
-def _llm(store: Store, config: Config | None, now: datetime) -> Check:
+@dataclass(frozen=True, slots=True)
+class _Advisor:
+    """The advisor's state today, as the tick would find it: shared by the ``llm`` and ``news`` checks."""
+
+    off: str | None
+    """Why the configuration gives no advisor (:func:`fm.jobs.advice.advisor_off`'s text), or ``None`` when it does."""
+    spent: float
+    """Today's recorded Claude spend in USD (``llm_usage`` since 00:00 UTC)."""
+    budget: float
+    """``[llm] daily_budget_usd``."""
+
+    @property
+    def on(self) -> bool:
+        """Configured and under the cap: the tick's workers call Claude."""
+        return self.off is None and self.spent < self.budget
+
+
+def _advisor_state(store: Store, config: Config | None, now: datetime) -> _Advisor | None:
     if config is None:
-        return _skipped("llm")
-    budget = config.llm.daily_budget_usd
+        return None
     spent = store.llm_usage.cost_since(_day_start(now))
-    if budget <= 0:
-        detail = f"daily Claude budget is $0.00, so the advisor is off (template rationales only); ${spent:.2f} used"
-        return Check("llm", CheckStatus.OK, detail)
-    detail = f"Claude spend since 00:00 UTC: ${spent:.2f} of ${budget:.2f}"
+    return _Advisor(off=advisor_off(config), spent=spent, budget=config.llm.daily_budget_usd)
+
+
+def _llm(advisor: _Advisor | None) -> Check:
+    """The advisor's state: off by configuration (the reason, as the tick notes it), off until 00:00 UTC on a spent
+    budget, or on with the spend."""
+    name = "llm"
+    if advisor is None:
+        return _skipped(name)
+    spent, budget = advisor.spent, advisor.budget
+    if advisor.off is not None:  # the config check carries the WARN and the fix for a missing key
+        return Check(name, CheckStatus.OK, f"{advisor.off}; ${spent:.2f} used today")
     if spent >= budget:
-        return Check("llm", CheckStatus.WARN, f"{detail}; the daily cap is reached, calls are refused until 00:00 UTC")
-    return Check("llm", CheckStatus.OK, detail)
+        detail = (
+            f"advisor off until 00:00 UTC: today's Claude budget is spent (${spent:.2f} of ${budget:.2f}); calls are "
+            "refused and the engine decides alone with template rationales"
+        )
+        return Check(name, CheckStatus.WARN, detail)
+    return Check(name, CheckStatus.OK, f"advisor on: Claude spend since 00:00 UTC: ${spent:.2f} of ${budget:.2f}")
+
+
+def _news(
+    store: Store, config: Config | None, advisor: _Advisor | None, polled: Mapping[str, datetime], now: datetime
+) -> Check:
+    """When news was last polled (per league, from the tick's record) and triaged (from ``news_items``), and what
+    waits. The tick triages every untriaged item of a sport right after polling it, so an item fetched at or before
+    its sport's last poll that still waits while the advisor is on was left behind by a failed triage."""
+    name = "news"
+    if config is None or advisor is None:
+        return _skipped(name)
+    last_poll: dict[Sport, datetime] = {}
+    polls: list[str] = []
+    for league in config.leagues:
+        at = polled.get(league.key)
+        if at is None:
+            polls.append(f"{league.key} news never polled")
+            continue
+        polls.append(f"{league.key} news polled {_age(now - at)} ago")
+        last_poll[league.sport] = max(at, last_poll.get(league.sport, at))
+    sports = {league.sport for league in config.leagues}
+    recent = store.news.published_since(now - NEWS_TRIAGE_WINDOW)
+    triaged = max((item.triaged_at for item in recent if item.triaged_at is not None), default=None)
+    waiting = [item for item in store.news.untriaged() if item.sport in sports]
+    parts = [", ".join(polls)]
+    if triaged is not None:
+        parts.append(f"last triage {_age(now - triaged)} ago")
+    else:
+        parts.append(f"no item triaged in the last {NEWS_TRIAGE_WINDOW.days} d")
+    parts.append(f"{len(waiting)} item{'' if len(waiting) == 1 else 's'} waiting")
+    detail = "; ".join(parts)
+    behind = [item for item in waiting if item.sport in last_poll and item.fetched_at <= last_poll[item.sport]]
+    if behind and advisor.on:
+        left = f"{len(behind)} of them" if len(behind) != len(waiting) else "all of them"
+        detail += f"; {left} fetched by the last poll or earlier and still untriaged with the advisor on"
+        return Check(name, CheckStatus.WARN, detail, fix=NEWS_LATE_FIX)
+    if waiting and not advisor.on:
+        detail += " (the advisor is off, so they wait)"
+    return Check(name, CheckStatus.OK, detail)
 
 
 def _day_start(now: datetime) -> datetime:
@@ -734,6 +846,8 @@ __all__ = [
     "BROWSER_NAMES",
     "BROWSER_PATHS",
     "DEADLINE_SOON",
+    "NEWS_LATE_FIX",
+    "NEWS_TRIAGE_WINDOW",
     "NO_STATE",
     "NTFY_HEALTH_PATH",
     "RUN_COMMAND",

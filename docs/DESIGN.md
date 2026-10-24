@@ -1,9 +1,9 @@
 # ESPN Fantasy Manager: Design
 
-> Status: v0.3, 2026-10-13; your answers are recorded in §18 · Sports: NFL (`ffl`), NBA (`fba`) · Platform: ESPN Fantasy
+> Status: v0.4, 2026-10-24; your answers are recorded in §18 · Sports: NFL (`ffl`), NBA (`fba`) · Platform: ESPN Fantasy
 > Started as the planning doc `ROADMAP.md` was generated from; it now also describes the plug-and-play layer as built
-> (§11 presets, §12 setup, health, dashboard and Claude, §13 `fm run`, §14 config). `ROADMAP.md` records what each
-> phase built.
+> (§11 presets, §12 setup, health, dashboard and Claude, §13 `fm run`, §14 config) and where each Claude worker runs
+> in the tick (§10, §13.4). `ROADMAP.md` records what each phase built.
 
 ## 1. Summary
 
@@ -438,8 +438,10 @@ the `as_of` of each input.
 
 ### 9.5 Weekly strategy
 
-Each league gets a report on Monday/Tuesday. It covers the matchup outlook, the playoff-odds trend, priorities (needs,
-punts, stash candidates), and trade targets, which become proposals.
+Each league gets a report in its weekly window: from the matchup period's Monday 09:00 ET until the period turns, once
+per period, run by the tick (§13.4). It covers the matchup outlook, the playoff-odds trend, priorities (needs, punts,
+stash candidates), and trade targets, which become approve-only proposals. `fm report` writes the same report on
+demand.
 
 ## 10. Advisor (Claude)
 
@@ -448,11 +450,38 @@ read-only inputs. None can write to ESPN.
 
 | Worker | Trigger | Output | Effort |
 |---|---|---|---|
-| `news_triage` | New items about relevant players: your roster, this week's opponent, top free agents, trade targets | `{player_id, kind: injury\|role\|rest\|suspension\|other, severity, games_out, p_active_delta, confidence, source_url, published_at}` | low; batched; overnight work via the Batches API |
-| `close_call` | Top two options within a margin, near a deadline | pick + cited reason (web search over an allowlist of domains) | medium |
-| `explain` | Each non-trivial proposal (trivial ones like "X has no game" are templated) | 2–4 sentence rationale | low |
-| `trade_pitch` | An approved trade idea | short message to the other manager | medium |
-| `weekly_strategist` | Mon/Tue per league | priorities, punts, targets → proposals | high |
+| `news_triage` | Each news poll in the tick (NBA every 30 min, NFL hourly): the untriaged items about relevant players (your roster, this week's opponent, top free agents, trade targets), a chunk of items per call | `{player_id, kind: injury\|role\|rest\|suspension\|other, severity, games_out, p_active_delta, confidence, source_url, published_at}` | low |
+| `close_call` | Inside the NFL and NBA lineup decisions: a slot whose top engine options are near-ties, when its lock is under 6 h away; at most 3 per run | pick among those options + cited reason (web search over an allowlist of domains) | medium |
+| `explain` | After a league's decisions, before the push: each new non-trivial proposal (trivial ones like "X has no game" are templated) | 2–4 sentence rationale | low |
+| `trade_pitch` | Each new `trade_propose` (the trade finder's or the strategist's), in the same pass as `explain` | short message to the other manager, stored on the proposal for you to paste | medium |
+| `weekly_strategist` | The weekly window per league: Monday 09:00 ET until the matchup period turns, once per period | priorities, punts, targets → approve-only proposals, and the weekly report's strategy section | high |
+
+**Where each worker runs** (ROADMAP Phase 13; `src/fm/jobs/tick.py`, §13.4). A tick builds at most one advisor,
+through `fm.jobs.advice.advisor_for`: a client when `ANTHROPIC_API_KEY` is in `.env` and `[llm] daily_budget_usd` is
+above 0, else `None` with the reason (`advisor_off`), which the tick notes per league and `fm doctor` shows (§12.3).
+A tick without one never imports the SDK.
+
+- `news_triage` runs in each league's news refresh. The poll (`fm.sources.news`: ESPN and RotoWire) and the store
+  (`fm.model.relevance.ingest_news`) need no key; the triage of that sport's untriaged items does, and stores bounded
+  `news_signals`. New signals refresh the availability inputs at once. Without an advisor the items wait for the
+  first poll that has one.
+- `close_call` runs inside the lineup decisions (`fm.decide.lineup.close_call_lineup`, both sports), which take the
+  advisor as an optional argument. It picks among the engine's near-tie options only, with a source from the
+  allowlist; an answer outside them, uncited or with no time left keeps the engine's lineup. The pick and its sources
+  go into the proposal's `engine_numbers`. Legality rules are unchanged.
+- `explain` and `trade_pitch` run after a league's decisions and before the push. Claude's rationale replaces the
+  template as the stored `rationale`, once per proposal (`tick-state.json` remembers which), and each new
+  `trade_propose` gets its pitch in `engine_numbers["pitch"]` with its `source`; the phone, the dashboard and
+  `fm proposals` show it.
+- `weekly_strategist` runs in the weekly window (`fm.jobs.deadlines.weekly_window`), once per matchup period. The
+  engine's inputs (`fm.jobs.report.strategy_inputs`: the category plan, our season odds, the trade finder's deals) go
+  to `fm.advisor.strategist.run_strategist`; its targets become approve-only `trade_propose` rows under
+  `[league.trade_finder]`'s `max_offers` and the weekly cap (none while the finder is off); then the league's weekly
+  report is written and pushed, the strategy as its last section. Without an advisor `fm.decide.strategy` gives the
+  template note and the same drafts. A window the tick slept through is alerted, never re-run.
+- **Fallbacks.** Every worker has a template answer, used when there is no advisor, the daily budget is spent, the
+  call fails, is refused or cut off, or the answer does not parse. A failure is a warning in the tick report, never a
+  skipped league and never a retry that asks Claude again.
 
 - **Model:** `claude-opus-5-5`, with effort set per worker. One model means one prompt-cache namespace. Measure a
   cheaper model only if spend becomes a problem.
@@ -465,7 +494,8 @@ read-only inputs. None can write to ESPN.
   - A Claude-only signal can never trigger a drop or a trade by itself.
 - **Cost:**
   - Prompt caching on the stable prefix (system prompt + league context).
-  - Batches API (50% off) for anything not urgent; triage only relevant players.
+  - Batches API (50% off) in the client for anything not urgent; the tick itself triages synchronously, a chunk of
+    items per call, and only relevant players.
   - A daily spend cap in config.
   - Rough estimate: **~$15–30/month** with both seasons running.
 - **No Claude Agent SDK.** The workers need no filesystem or shell, so the plain Messages API is the smaller, safer
@@ -624,8 +654,13 @@ import-light: no executor, flows, tick, advisor, fastmcp or anthropic (a test pi
   - `tick`: the last tick in `tick-state.json`, WARN after 30 min, FAIL after 6 h or when none ever ran.
   - `autostart`: `fm run` registered at logon and holding the run lock.
   - `sync:<league>`: WARN after 2 h, FAIL after 24 h or before the first sync.
-  - `pause`, open `proposals`, `deadlines` (open proposals due within 2 h), and today's `llm` spend against the
-    budget.
+  - `pause`, open `proposals`, `deadlines` (open proposals due within 2 h).
+  - `llm`: the advisor's state by the tick's own rule (`fm.jobs.advice.advisor_off`, which loads no SDK): on, with
+    today's spend against `[llm] daily_budget_usd`; off because the key is missing or the budget is 0 (OK with the
+    reason, since `config` carries the WARN); or off until 00:00 UTC because today's budget is spent (WARN).
+  - `news`: when each league's news was last polled (`tick-state.json`), when an item was last triaged
+    (`news_items`) and how many wait. Items the last poll left untriaged while the advisor is on are a WARN pointing
+    at `logs/run.log`.
 - **The session without a second browser.** Every tick records its session verdict in `tick-state.json`, and the
   check reads that record. Only `fm doctor` (`launch_browser=True`) may launch the browser to read the cookie, only
   when the record is older than 30 minutes, and only while it can take the run lock, so it never starts a browser
@@ -647,7 +682,7 @@ imports Starlette.
 | `GET /auth?t=<secret>`, `GET /auth/ping` | sign-in with a one-time link; `fm ui`'s probe for a running dashboard |
 | `GET /api/session` | the session's CSRF token |
 | `GET /api/overview` | per league: team, record, standing, sync age, next deadlines, open proposals; plus the session check, health counts and pause state |
-| `GET /api/proposals?all=0&league=` | the proposal list, with the moves in player names |
+| `GET /api/proposals?all=0&league=` | the proposal list, with the moves in player names and a trade offer's pitch |
 | `POST /api/proposals/{id}/approve`, `.../reject` | `fm.proposals.approve` / `reject` with `decided_by="dashboard"` (404 unknown, 409 not allowed) |
 | `POST /api/pause`, `POST /api/resume` | the kill switch |
 | `GET /api/lineup/{league}`, `GET /api/waivers/{league}` | through `fm.views`; nothing stored |
@@ -796,14 +831,20 @@ approvals wait for the next tick. The scheduled tick's log is `logs/tick.log`.
    or auto proposal that expired unexecuted is alerted as missed).
 2. Check the session, and record the verdict in `tick-state.json` for the health checks.
 3. Per league: refresh stale data (sync when older than an hour); compute upcoming deadlines (kickoffs and tips from
-   the pro schedule, the waiver run from league settings); alert the windows missed since the last tick; run the
-   decisions that are due, once per window; push new proposals to the phone.
+   the pro schedule, the waiver run from league settings); alert the windows missed since the last tick; poll and
+   store the news on its cadence (NBA 30 min, NFL 1 h) and have the advisor triage it (§10); refresh the availability
+   inputs (a few times a day, and at once when the triage stored new signals); run the decisions that are due, once
+   per window, the advisor breaking cited near-ties in lineups under 6 h from a lock; in the weekly window (Monday
+   09:00 ET until the matchup period turns, once per period) run the weekly strategist and write and push the weekly
+   report; have the advisor explain the run's new non-trivial proposals and draft the pitch of each new trade offer;
+   push new proposals to the phone. News and advisor failures are warnings, never a skipped league.
 4. Auto-approve at T-15, then execute approved proposals whose time has come, soonest deadline first, through the one
    write path. Nothing executes while paused.
-5. Record the tick in `tick-state.json`.
+5. Record the tick in `tick-state.json`: last run, windows run, proposals explained and pushed, inputs refreshed, news
+   polled, alerts sent, and the session verdict.
 
-- `fm report` writes the weekly report on demand; running it on a schedule beside the tick is an open follow-up
-  (`ROADMAP.md`, Phase 8).
+- The weekly report is the tick's (step 3); `fm report` writes the same report on demand. A weekly window the tick
+  slept through is alerted ("run fm report by hand"), never re-run, since a retry would ask Claude again.
 - The PC must be awake at locks: enable wake timers. The first tick after a missed window reports what was missed.
 - If the PC proves unreliable, move to an always-on box later. The tradeoff is that the ESPN session then lives there.
 
@@ -814,7 +855,8 @@ approvals wait for the next tick. The scheduled tick's log is `logs/tick.log`.
   - `.env`: `ANTHROPIC_API_KEY`, `ODDS_API_KEY`, and either `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` or
     `NTFY_TOPIC` + `NTFY_REPLY_TOPIC`;
   - `browser-profile/`, `state.db` (SQLite), `audit/` (requests, responses, traces, screenshots);
-  - `tick-state.json` (what earlier ticks did, and the last session verdict), `run.lock` (§13.2), `dashboard.url`
+  - `tick-state.json` (what earlier ticks did: windows run, proposals explained and pushed, inputs refreshed, news
+    polled, alerts sent, and the last session verdict), `run.lock` (§13.2), `dashboard.url`
     (the dashboard's one-time login link, owner-only), `logs/run.log` (`fm run`) and `logs/tick.log` (the scheduled
     tick), `paused.json` while `fm pause` holds.
 - `~/.cache/espn-fantasy/`: raw source responses and ESPN captures, parquet snapshots, reports. Safe to delete.
@@ -968,11 +1010,11 @@ espn-fantasy/
 
 Phases 4 and 5 can swap if your NFL trade deadline is early (it's in league settings).
 
-These are product phases with calendar targets. `ROADMAP.md` breaks them into 57 tasks. Its "Phase N" headings are
+These are product phases with calendar targets. `ROADMAP.md` breaks them into 63 tasks. Its "Phase N" headings are
 dependency layers, not these product phases, so NBA work runs in parallel with NFL work there. Its Phase 6 milestone
 covers product phases 1–3 plus NBA lineups and streaming; its Phase 8 milestone is trades. Its Phases 10 to 12 came
 after this plan and make the tool plug and play: presets (§11), `fm setup`, `fm doctor`, the dashboard and the Claude
-integration (§12), and `fm run` (§13).
+integration (§12), and `fm run` (§13). Its Phase 13 wires the Claude workers into the tick (§10, §13.4).
 
 ## 18. Decisions and open questions
 

@@ -4,15 +4,17 @@ A personal assistant GM for ESPN fantasy football (NFL) and basketball (NBA).
 
 - It reads league state from ESPN, blends projections from several public data sources, and proposes lineups,
   waiver and streaming moves, and trades.
-- Claude triages news and explains each decision.
+- Claude triages news, breaks close calls in lineups, explains each decision, drafts trade pitches and writes the
+  weekly strategy. It needs an API key; without one everything still runs on the engine (see Claude below).
 - You approve on your phone, in a local dashboard or from Claude. Approved moves are carried out through a logged-in
   browser session and verified afterward.
 
-**Status:** roadmap phases 1 to 12 are built. Phases 1 to 9 are the engine: ESPN reads and the write executor,
+**Status:** roadmap phases 1 to 13 are built. Phases 1 to 9 are the engine: ESPN reads and the write executor,
 projections and availability, NFL and NBA lineups, waivers and streaming, trades, phone approvals, the weekly report
 and backtests. Phases 10 to 12 make it plug and play: `fm setup`, `fm doctor`, the always-on `fm run`, the dashboard
-and the Claude integration, with an offline end-to-end test of that journey. Open follow-ups are listed per phase in
-`ROADMAP.md`.
+and the Claude integration, with an offline end-to-end test of that journey. Phase 13 puts Claude's judgment in the
+live loop: news triage, close calls, rationales, trade pitches and the weekly strategist run inside `fm run`'s ticks.
+Open follow-ups are listed per phase in `ROADMAP.md`.
 
 - [`docs/DESIGN.md`](docs/DESIGN.md): architecture, data sources, safety rules, runtime, config
 - [`ROADMAP.md`](ROADMAP.md): the dependency-ordered build tasks and what each phase built
@@ -102,6 +104,27 @@ is not configurable. The weekly cap is 3 transactions in NFL and 7 in NBA.
 
 `fm notify setup --channel <ntfy|telegram>` adds or replaces a channel later. Approvals are Approve/Reject buttons
 that work over outbound connections only, so no port is opened on the PC.
+
+### Claude
+
+Claude's judgment needs `ANTHROPIC_API_KEY` in `~/.config/espn-fantasy/.env`. `fm setup` asks for it (Enter skips);
+to add it later, put the line `ANTHROPIC_API_KEY=sk-ant-...` in that file, and the next tick picks it up. Spend is
+capped by `[llm] daily_budget_usd` in `config.toml` ($2 a day by default; 0 turns Claude off). `fm doctor`'s `llm`
+line says whether the advisor is on, has no key, or has spent today's budget, and its `news` line when news was last
+polled and triaged.
+
+| Claude does | The engine alone does |
+|---|---|
+| Reads the news and turns it into bounded, cited availability adjustments | Projections, scoring, lineup optimization, waiver and streaming ranking, trade evaluation, season odds |
+| Breaks near-ties between the engine's top lineup options under 6 hours before a lock, with a cited source, at most 3 a run | Every lineup legality rule, and the pick whenever Claude is silent, uncited or off |
+| Writes the 2 to 4 sentence rationale on each non-trivial proposal | Every drop and every trade: a Claude-only signal never triggers one |
+| Drafts the pitch for each trade offer, for you to paste into ESPN | Every write to ESPN, after your approval or the preset's auto rule; trades are approval-only in every preset |
+| Writes the weekly strategy note; its trade targets become approve-only proposals | The targets themselves (the trade finder's deals): Claude cannot add, remove or reorder one |
+
+Without a key, with the budget at 0 or spent, or when a call fails, the tick runs every decision on the engine and
+uses the template text instead; news is stored and triaged on the first poll that has Claude again. This is separate
+from `fm claude install` above, which lets you ask Claude about your team through MCP: there Claude reads and drafts
+for you; here the tool asks Claude during its ticks.
 
 ### macOS
 
