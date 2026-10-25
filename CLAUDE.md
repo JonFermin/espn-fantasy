@@ -10,6 +10,20 @@ order and status live in `ROADMAP.md`.
 - `uv run ruff check . && uv run pyright`: lint + types
 - `uv run fm <command>`: CLI
 
+## Architecture
+
+Data flows one way: `espn/` + `sources/` (fetch) → `store/` (SQLite) → `model/` + `sports/` (stat-line projections,
+scored per league) → `decide/` + `advisor/` (propose; `advisor/` is the Claude layer) → `proposals/` (human approval via
+Telegram, dashboard, or MCP) → `executor/` over `browser/` (the only ESPN writer, verified by re-reading the API).
+
+- `fm tick` is one short pass (session check, sync, news, decisions, execute approved). The scheduler runs it every
+  10 min as a wake timer. `fm run` is the always-on process that polls the phone channel and runs ticks itself, and it
+  replaces a hand-started `fm bot`. Never run `fm run` beside `fm bot` (the channel would be polled twice). A scheduled
+  tick yields to `fm run` via `run.lock`.
+- Ticks run as killable child processes with a timeout (`jobs/runner.py`, `jobs/proctree.py`).
+- `cli.py` and `commands/` are thin; `mcp_server.py`, `web/`, `setup/` and `claude/` are read/record-only front ends.
+- Design lives in `docs/DESIGN.md` (§11-§14 cover setup, `fm run`, dashboard, MCP).
+
 ## Invariants
 
 - **Workers propose, the executor acts.** Only `src/fm/executor/` (via `src/fm/browser/`) may write to ESPN. Never
