@@ -223,7 +223,7 @@ def test_the_logon_task_runs_fm_run_windowless_at_this_users_logon_restarted_and
     assert argv[:-1] == [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
     script = argv[-1]
     arguments = subprocess.list2cmdline(
-        ["run", "--project", str(REPO), "--env-file", str(spec.env_file_path), "fm", "run"]
+        ["run", "--project", str(REPO), "--env-file", spec.env_file_path.as_posix(), "fm", "run"]
     )
     assert render_autostart_argv(spec) == [
         str(pinned["uvw"]),
@@ -231,7 +231,7 @@ def test_the_logon_task_runs_fm_run_windowless_at_this_users_logon_restarted_and
         "--project",
         str(REPO),
         "--env-file",
-        str(spec.env_file_path),
+        spec.env_file_path.as_posix(),  # uv unescapes backslashes in --env-file
         "fm",
         "run",
     ]

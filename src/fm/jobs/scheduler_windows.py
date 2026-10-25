@@ -320,9 +320,11 @@ def env_file_env(path: Path) -> dict[str, str]:
 
 
 def render_autostart_argv(spec: AutostartSpec) -> list[str]:
-    """What the task runs: ``<uvw> run --project <repo> --env-file <env> fm run``."""
+    """What the task runs: ``<uvw> run --project <repo> --env-file <env> fm run``. The env file goes with forward
+    slashes: uv (0.10) unescapes backslashes in ``--env-file``, so a ``C:`` path lost its separators and the
+    task exited at once with "No environment file found" (exit 2)."""
     uv, *rest = spec.argv()
-    return [uv, *rest[:3], "--env-file", str(spec.env_file_path), *rest[3:]]
+    return [uv, *rest[:3], "--env-file", spec.env_file_path.as_posix(), *rest[3:]]
 
 
 def render_register_logon_task(spec: AutostartSpec) -> list[str]:
