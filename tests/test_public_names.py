@@ -79,6 +79,7 @@ MODULES = (
     "fm.decide.offers",
     "fm.jobs.tick",
     "fm.jobs.advice",
+    "fm.advisor.claude_cli",
     "fm.render.proposals",
     "fm.jobs.deadlines",
     "fm.jobs.scheduler_base",

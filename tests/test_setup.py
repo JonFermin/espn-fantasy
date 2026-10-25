@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+import tomlkit
 import typer
 from dotenv import dotenv_values, set_key
 from typer.testing import CliRunner
@@ -621,6 +622,22 @@ def test_a_key_only_in_this_shells_environment_is_saved_to_env_and_never_printed
     assert "Saved ANTHROPIC_API_KEY to" in output and ANTHROPIC_KEY not in output
     _, output = wizard(Fakes(), SetupOptions(channel="none"))
     assert "ANTHROPIC_API_KEY is already set in .env." in output  # saved once, then found in the file
+
+
+def test_the_subscription_backend_is_not_asked_for_an_anthropic_key() -> None:
+    wizard(Fakes(), SetupOptions(channel="none"))
+    document = tomlkit.parse(config_path().read_text(encoding="utf-8"))
+    llm = document.get("llm")
+    if llm is None:
+        llm = tomlkit.table()
+        document["llm"] = llm
+    llm["backend"] = "claude_code"
+    config_path().write_text(tomlkit.dumps(document), encoding="utf-8")
+    prompts = Recording(answers={})
+    _, output = wizard(Fakes(), SetupOptions(channel="none"), prompts=prompts)
+    assert "ANTHROPIC_API_KEY is not needed: the advisor runs on your Claude subscription" in output
+    assert not any("Anthropic API key" in question for question in prompts.defaults)
+    assert load_config().missing_secrets() == ()
 
 
 def test_a_shell_only_key_the_user_declines_to_save_stays_out_of_env(monkeypatch: pytest.MonkeyPatch) -> None:

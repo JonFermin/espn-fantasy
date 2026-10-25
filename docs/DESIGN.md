@@ -478,9 +478,30 @@ read-only inputs. None can write to ESPN.
 | `weekly_strategist` | The weekly window per league: Monday 09:00 ET until the matchup period turns, once per period | priorities, punts, targets → approve-only proposals, and the weekly report's strategy section | high |
 
 **Where each worker runs** (ROADMAP Phase 13; `src/fm/jobs/tick.py`, §13.4). A tick builds at most one advisor,
-through `fm.jobs.advice.advisor_for`: a client when `ANTHROPIC_API_KEY` is in `.env` and `[llm] daily_budget_usd` is
-above 0, else `None` with the reason (`advisor_off`), which the tick notes per league and `fm doctor` shows (§12.3).
-A tick without one never imports the SDK.
+through `fm.jobs.advice.advisor_for`: a client when the backend is usable and `[llm] daily_budget_usd` is above 0,
+else `None` with the reason (`advisor_off`), which the tick notes per league and `fm doctor` shows (§12.3). A tick
+without one never imports the SDK.
+
+**Backends** (`[llm] backend`). Both sit behind `fm.advisor.client.Transport`, so the workers, the budget and the
+`llm_usage` record are the same either way.
+
+- `api` (the default): the Python SDK with `ANTHROPIC_API_KEY` from `.env`, the server-side refusal fallback, and
+  Message Batches.
+- `claude_code`: `fm.advisor.claude_cli.ClaudeCliTransport` runs each call as a headless `claude -p` on the user's
+  `claude login` subscription. No key is needed. `fm.jobs.advice.claude_cli_path` looks in `~/.local/bin` first, then
+  PATH.
+  - The call is shut off from everything but the question. The system prompt is a `--system-prompt-file`, and the
+    question goes on stdin. There are no tools except Claude Code's `WebSearch`, which stands in for the
+    `web_search` server tool (its domains and use cap go in the system prompt). There are no MCP servers, no settings
+    files and no saved session, the working directory is an empty temp dir, and `ANTHROPIC_API_KEY` is stripped from
+    the child's environment.
+  - The answer comes from `--json-schema` structured output. `WebSearch` result links become `search_urls`, so close
+    calls are still judged against what the search returned.
+  - Each run is a `fm.jobs.proctree` tree with a 5-minute timeout.
+  - The recorded cost is the API-list-price equivalent of the run's tokens, so `daily_budget_usd` caps how much of the
+    subscription the advisor uses.
+  - There are no batches.
+  - A usage-limit or login error is an `AdvisorError`: the engine's answer stands, as with any advisor failure.
 
 - `news_triage` runs in each league's news refresh. The poll (`fm.sources.news`: ESPN and RotoWire) and the store
   (`fm.model.relevance.ingest_news`) need no key; the triage of that sport's untriaged items does, and stores bounded
@@ -617,7 +638,8 @@ the two scheduler jobs, the `fm bot` probe, the doctor), so the tests drive the 
    named by URL defaults to yes.
 3. **Presets.** Each new league gets a short key (`nfl`, `nba`, then `nfl2`...) and a preset (default `balanced`;
    `--preset` sets it for all), shown with its one-line description.
-4. **API keys.** `ANTHROPIC_API_KEY` (a hidden prompt, skippable: the advisor falls back to template rationales) and
+4. **API keys.** `ANTHROPIC_API_KEY` (a hidden prompt, skippable: the advisor falls back to template rationales; not
+   asked at all when an existing config has `[llm] backend = "claude_code"`, §10) and
    the optional `ODDS_API_KEY` go to `.env` through `dotenv.set_key`. A key `.env` already has is left alone. A key
    only this shell exports is offered for saving (default yes), because `fm run` at logon reads `.env`, not the shell.
    No value is ever printed.
@@ -668,7 +690,9 @@ import-light: no executor, flows, tick, advisor, fastmcp or anthropic (a test pi
 
 - **Offline checks** (the default; only local state is read):
   - `config`: the file and `.env` load, and the required secrets are there. With `notify.channel = "none"` only
-    `ANTHROPIC_API_KEY` is required, and its absence is a WARN: the advisor writes template rationales.
+    `ANTHROPIC_API_KEY` is required, and its absence is a WARN: the advisor writes template rationales. With
+    `[llm] backend = "claude_code"` no key is required. The `llm` line then names the subscription, or says the
+    `claude` CLI was not found.
   - `session`: the profile exists and the cookie expiry gives ok, expiring or expired.
   - `browser`: Edge or Chrome is installed, found without launching anything.
   - `notify`: the channel's secrets are in `.env`; `none` is a WARN.
@@ -912,7 +936,8 @@ preset = "balanced"
 
 [llm]
 model = "claude-opus-5-5"
-daily_budget_usd = 2.0
+daily_budget_usd = 2.0        # with backend = "claude_code": the API-price equivalent of subscription use
+# backend = "claude_code"     # run Claude on your `claude login` subscription instead of ANTHROPIC_API_KEY (§10)
 
 [notify]
 channel = "ntfy"              # telegram | ntfy | none; the credentials live in .env

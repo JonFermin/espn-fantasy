@@ -107,9 +107,16 @@ that work over outbound connections only, so no port is opened on the PC.
 
 ### Claude
 
-Claude's judgment needs `ANTHROPIC_API_KEY` in `~/.config/espn-fantasy/.env`. `fm setup` asks for it (Enter skips);
-to add it later, put the line `ANTHROPIC_API_KEY=sk-ant-...` in that file, and the next tick picks it up. Spend is
-capped by `[llm] daily_budget_usd` in `config.toml` ($2 a day by default; 0 turns Claude off). `fm doctor`'s `llm`
+Claude's judgment runs on either an API key or your Claude subscription.
+
+- **API key** (the default): put `ANTHROPIC_API_KEY` in `~/.config/espn-fantasy/.env`. `fm setup` asks for it (Enter
+  skips). To add it later, put the line `ANTHROPIC_API_KEY=sk-ant-...` in that file, and the next tick picks it up.
+- **Subscription**: install Claude Code, run `claude login` once, and set `backend = "claude_code"` under `[llm]` in
+  `config.toml`. Each call then runs as a headless `claude -p` with no tools but web search, and needs no key. It
+  counts against your plan's usage limits, and there are no batches.
+
+Usage is capped by `[llm] daily_budget_usd` in `config.toml`: $2 a day by default, and 0 turns Claude off. On the
+subscription the cap counts what the same tokens would cost on the API. `fm doctor`'s `llm`
 line says whether the advisor is on, has no key, or has spent today's budget, and its `news` line when news was last
 polled and triaged.
 

@@ -687,6 +687,8 @@ class _Advisor:
     """Today's recorded Claude spend in USD (``llm_usage`` since 00:00 UTC)."""
     budget: float
     """``[llm] daily_budget_usd``."""
+    subscription: bool = False
+    """``[llm] backend = "claude_code"``: calls run on the Claude subscription; spend is the API-price equivalent."""
 
     @property
     def on(self) -> bool:
@@ -698,7 +700,12 @@ def _advisor_state(store: Store, config: Config | None, now: datetime) -> _Advis
     if config is None:
         return None
     spent = store.llm_usage.cost_since(_day_start(now))
-    return _Advisor(off=advisor_off(config), spent=spent, budget=config.llm.daily_budget_usd)
+    return _Advisor(
+        off=advisor_off(config),
+        spent=spent,
+        budget=config.llm.daily_budget_usd,
+        subscription=config.llm.backend == "claude_code",
+    )
 
 
 def _llm(advisor: _Advisor | None) -> Check:
@@ -716,6 +723,12 @@ def _llm(advisor: _Advisor | None) -> Check:
             "refused and the engine decides alone with template rationales"
         )
         return Check(name, CheckStatus.WARN, detail)
+    if advisor.subscription:
+        detail = (
+            f"advisor on over the Claude subscription (claude CLI): API-price equivalent since 00:00 UTC: "
+            f"${spent:.2f} of ${budget:.2f}"
+        )
+        return Check(name, CheckStatus.OK, detail)
     return Check(name, CheckStatus.OK, f"advisor on: Claude spend since 00:00 UTC: ${spent:.2f} of ${budget:.2f}")
 
 

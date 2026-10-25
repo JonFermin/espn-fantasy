@@ -44,6 +44,9 @@ EspnGame = Literal["ffl", "fba"]
 Channel = Literal["telegram", "ntfy", "none"]
 """The phone channel; ``none`` is an installation without one (proposals wait for ``fm proposals`` or the
 dashboard, alerts stay in the logs)."""
+LlmBackend = Literal["api", "claude_code"]
+"""How the advisor reaches Claude: ``api`` (the SDK with ``ANTHROPIC_API_KEY``) or ``claude_code`` (the Claude Code
+CLI on the user's subscription; :mod:`fm.advisor.claude_cli`)."""
 Approval = Literal["off", "approve", "auto"]
 ApprovalNoAuto = Literal["off", "approve"]
 
@@ -206,6 +209,13 @@ class Llm(BaseModel):
 
     model: str = Field(default=DEFAULT_MODEL, min_length=1)
     daily_budget_usd: float = Field(default=2.0, ge=0, description="Daily spend cap across all workers.")
+    backend: LlmBackend = Field(
+        default="api",
+        description=(
+            "api: the Python SDK with ANTHROPIC_API_KEY. claude_code: the Claude Code CLI (`claude -p`) on the "
+            "`claude login` subscription, no key; spend is then the API-list-price equivalent, still capped daily."
+        ),
+    )
 
 
 class Notify(BaseModel):
@@ -289,8 +299,8 @@ class Config(BaseModel):
         raise KeyError(f"no league {key!r} in config.toml; known: {', '.join(lg.key for lg in self.leagues)}")
 
     def required_secrets(self) -> tuple[str, ...]:
-        """Environment variables this configuration needs: the Anthropic key plus the chosen channel's credentials
-        (none for ``channel = "none"``)."""
+        """Environment variables this configuration needs: the Anthropic key (only for ``[llm] backend = "api"``)
+        plus the chosen channel's credentials (none for ``channel = "none"``)."""
         channel: tuple[str, ...]
         match self.notify.channel:
             case "telegram":
@@ -299,7 +309,8 @@ class Config(BaseModel):
                 channel = ("NTFY_TOPIC", "NTFY_REPLY_TOPIC")
             case "none":
                 channel = ()
-        return ("ANTHROPIC_API_KEY", *channel)
+        advisor = ("ANTHROPIC_API_KEY",) if self.llm.backend == "api" else ()
+        return (*advisor, *channel)
 
     def missing_secrets(self) -> tuple[str, ...]:
         """Required variables that neither ``.env`` nor the environment provides. Empty means setup is complete."""

@@ -269,7 +269,7 @@ def run_setup(
 
     _heading(echo, "API keys")
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    _api_keys(env_path, prompts, echo, env)
+    _api_keys(env_path, prompts, echo, env, subscription=existing is not None and existing.llm.backend == "claude_code")
 
     _heading(echo, "Phone")
     channel = _phone(options, existing, env_path, deps, prompts, echo, env)
@@ -542,14 +542,23 @@ def _preset(name: str) -> PresetName:
     raise SetupError(f"unknown preset {name!r}; choose one of {', '.join(PRESET_NAMES)}")
 
 
-def _api_keys(env_path: Path, prompts: Prompts, echo: Echo, environ: Mapping[str, str]) -> None:
+def _api_keys(
+    env_path: Path, prompts: Prompts, echo: Echo, environ: Mapping[str, str], *, subscription: bool = False
+) -> None:
     """Each key in :data:`SECRET_PROMPTS`: left alone when ``.env`` has it; offered for saving when only this shell's
     environment has it (``fm run`` at logon and the scheduled tick read ``.env``, not the shell that ran setup, so a
     key only exported here would be missing there; ``--yes`` saves it); otherwise asked for, hidden. No value is ever
-    printed."""
+    printed. With ``subscription`` (``[llm] backend = "claude_code"``) the advisor needs no Anthropic key, so none is
+    asked for."""
     read_secrets(env_path, environ)  # a value that does not validate stops setup here, named but never shown
     in_file = dotenv_values(env_path) if env_path.is_file() else {}
     for prompt in SECRET_PROMPTS:
+        if subscription and prompt.name == "ANTHROPIC_API_KEY":
+            echo(
+                "ANTHROPIC_API_KEY is not needed: the advisor runs on your Claude subscription "
+                '([llm] backend = "claude_code").'
+            )
+            continue
         if (in_file.get(prompt.name) or "").strip():
             echo(f"{prompt.name} is already set in {env_path.name}.")
             continue

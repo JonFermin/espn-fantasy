@@ -645,11 +645,13 @@ class AdvisorClient:
         """A client for the configured model and cap over the real SDK with the ``.env`` key, unless ``transport``
         is given. Raises :class:`AdvisorError` when no key is configured."""
         if transport is None:
+            if config.llm.backend == "claude_code":
+                raise AdvisorError('backend "claude_code" needs a ClaudeCliTransport (fm.jobs.advice.advisor_for)')
             key = config.secrets.anthropic_api_key
             if key is None:
                 raise AdvisorError("ANTHROPIC_API_KEY is not set in .env; the advisor cannot run (fm config check)")
             transport = SdkTransport.with_key(key)
-        return cls(store, config.llm, transport)
+        return cls(store, config.llm, transport, refusal_fallback=config.llm.backend == "api")
 
     # --- budget ---
 

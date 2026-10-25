@@ -1091,3 +1091,19 @@ def test_fm_doctor_exits_0_when_nothing_fails(monkeypatch: pytest.MonkeyPatch) -
     assert fake.online is False  # type: ignore[attr-defined]
     result = runner.invoke(cli(), ["doctor", "--json"], catch_exceptions=False)
     assert result.exit_code == 0 and json.loads(result.output)[1]["fix"] == "fm resume"
+
+
+def test_the_subscription_backend_needs_no_key_and_says_so(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = NTFY_CONFIG.replace("daily_budget_usd = 1.0", 'daily_budget_usd = 1.0\nbackend = "claude_code"')
+    (home / "config.toml").write_text(config, encoding="utf-8")
+    (home / ".env").write_text(NTFY_ENV.replace("ANTHROPIC_API_KEY=sk-ant-test\n", ""), encoding="utf-8")
+    monkeypatch.setattr("fm.jobs.advice.claude_cli_path", lambda: "/opt/claude")
+    found = checks()
+    assert found["config"].status is CheckStatus.OK
+    assert found["llm"] == Check(
+        "llm",
+        CheckStatus.OK,
+        "advisor on over the Claude subscription (claude CLI): API-price equivalent since 00:00 UTC: $0.00 of $1.00",
+    )
+    monkeypatch.setattr("fm.jobs.advice.claude_cli_path", lambda: None)
+    assert "claude CLI was not found" in checks()["llm"].detail

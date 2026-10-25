@@ -71,11 +71,11 @@ if sys.platform == "win32":
     _kernel32.CloseHandle.restype = wintypes.BOOL
 
     def _popen(
-        argv: list[str], *, env: dict[str, str] | None, output: int | None, cwd: Path | None
+        argv: list[str], *, env: dict[str, str] | None, output: int | None, cwd: Path | None, stdin: int | None
     ) -> subprocess.Popen[bytes]:
         return subprocess.Popen(
             argv,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin is None else stdin,
             stdout=output,
             stderr=subprocess.STDOUT if output is not None else None,
             env=env,
@@ -129,11 +129,11 @@ else:
     _NO_WINDOW = 0
 
     def _popen(
-        argv: list[str], *, env: dict[str, str] | None, output: int | None, cwd: Path | None
+        argv: list[str], *, env: dict[str, str] | None, output: int | None, cwd: Path | None, stdin: int | None
     ) -> subprocess.Popen[bytes]:
         return subprocess.Popen(
             argv,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin is None else stdin,
             stdout=output,
             stderr=subprocess.STDOUT if output is not None else None,
             env=env,
@@ -289,12 +289,13 @@ def spawn(
     env: Mapping[str, str] | None = None,
     output: int | None = None,
     cwd: Path | None = None,
+    stdin: int | None = None,
 ) -> ProcessTree:
     """Start ``argv`` (never through a shell) as the root of a tree :meth:`ProcessTree.kill` can stop whole: stdin
-    from ``os.devnull``, stdout and stderr both to the descriptor ``output`` (this process's own when ``None``),
-    ``env`` as its whole environment (this process's when ``None``)."""
+    from the descriptor ``stdin`` (``os.devnull`` when ``None``), stdout and stderr both to the descriptor ``output``
+    (this process's own when ``None``), ``env`` as its whole environment (this process's when ``None``)."""
     return ProcessTree(
-        _popen([str(arg) for arg in argv], env=None if env is None else dict(env), output=output, cwd=cwd)
+        _popen([str(arg) for arg in argv], env=None if env is None else dict(env), output=output, cwd=cwd, stdin=stdin)
     )
 
 

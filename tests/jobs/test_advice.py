@@ -13,9 +13,10 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from fm.advisor.claude_cli import ClaudeCliTransport
 from fm.advisor.client import AdvisorClient, AdvisorError, CallParams, RawReply, Transport
 from fm.config import DEFAULT_MODEL, Config, Llm, Secrets
-from fm.jobs.advice import advisor_for, advisor_off
+from fm.jobs.advice import advisor_for, advisor_off, claude_cli_path
 from fm.store import Store
 
 LEAGUE: dict[str, Any] = {"key": "nfl", "sport": "nfl", "espn_league_id": 1234567, "season": 2026, "team_id": 1}
@@ -80,3 +81,35 @@ def test_a_tick_without_a_key_never_loads_the_sdk() -> None:
     )
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert done.stdout.strip() == "[]", done.stdout
+
+
+SUBSCRIPTION = CONFIG.model_copy(update={"llm": Llm(backend="claude_code")})
+
+
+def test_the_claude_code_backend_needs_the_cli_not_a_key() -> None:
+    assert advisor_off(SUBSCRIPTION, cli_path=lambda: "/bin/claude") is None
+    note = advisor_off(SUBSCRIPTION, cli_path=lambda: None)
+    assert note is not None and "claude CLI was not found" in note
+    spent = SUBSCRIPTION.model_copy(update={"llm": Llm(backend="claude_code", daily_budget_usd=0)})
+    assert advisor_off(spent, cli_path=lambda: "/bin/claude") == NO_BUDGET_NOTE
+    assert "ANTHROPIC_API_KEY" not in SUBSCRIPTION.required_secrets()
+    assert "ANTHROPIC_API_KEY" in CONFIG.required_secrets()
+
+
+def test_advisor_for_runs_the_subscription_over_the_cli(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fm.jobs.advice.claude_cli_path", lambda: "/opt/claude")
+    client = advisor_for(store, SUBSCRIPTION)
+    assert isinstance(client, AdvisorClient) and not client.refusal_fallback
+    transport = client._transport  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(transport, ClaudeCliTransport) and transport.command == ("/opt/claude",)
+    with pytest.raises(AdvisorError, match="ClaudeCliTransport"):
+        AdvisorClient.from_config(store, SUBSCRIPTION)
+
+
+def test_claude_cli_path_prefers_the_native_install(tmp_path: Path) -> None:
+    local = tmp_path / ".local" / "bin" / "claude.exe"
+    assert claude_cli_path(which=lambda _: "C:/on/path/claude", home=tmp_path, platform="win32") == "C:/on/path/claude"
+    local.parent.mkdir(parents=True)
+    local.write_text("")
+    assert claude_cli_path(which=lambda _: None, home=tmp_path, platform="win32") == str(local)
+    assert claude_cli_path(which=lambda _: None, home=tmp_path, platform="darwin") is None
