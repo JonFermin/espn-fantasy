@@ -28,6 +28,12 @@ the player, ESPN's otherwise: :func:`fm.model.availability.assess`), never ESPN'
 ESPN still shows OUT whom the official report clears as Available plays. The row also zeroes the player who is
 inactive, has no team or no game; whether he has a game comes from the pro schedule in hand.
 
+**Role.** A healthy player the coach does not play is not the injury model's to catch, so a game's value is also
+multiplied by his **role factor** (:meth:`fm.model.in_season.Evidence.role_factor`): the share of his recent healthy
+team games he played, read from the game log ``fm sync`` stores and shrunk toward 1 so a player without a game log is
+not penalized. :func:`daily_inputs` loads the evidence once for everyone with a line (the roster and the wire) and
+:class:`DayModel` applies it beside ``p_active``, which stays the injury's; :attr:`DayPlayer.role_factor` shows it.
+
 **Locks** are hard constraints: a locked player (ESPN's ``lineupLocked`` at the last sync, or his lock time under
 ``LeagueSettings.lineup_lock_type`` has passed) keeps his slot and the slot stays his; a player on IR stays there. A
 lock type that locks every team at the day's first start (``FIRSTGAME_*``) locks a team without a game with the rest,
@@ -96,6 +102,7 @@ from fm.model.availability import (
     plan_pivots,
 )
 from fm.model.categories import CategoryModel, fit_categories
+from fm.model.in_season import Evidence, InSeasonParams, load_evidence, load_params
 from fm.model.projections import BlendWeights
 from fm.model.scoring import Scorer
 from fm.model.value_nba import blend_day, per_game_lines
@@ -180,7 +187,8 @@ _NO_GAME: Final = PlayerDay()
 class DayPlayer:
     """A player over the planning days. ``slot_id`` is where he sits now, the base every day's moves are measured from
     (future days carry the lineup forward); ``eligible`` the active slots he may fill; ``per_game`` the value of one
-    game from an empty slot (what ``days`` scales by ``p_active``)."""
+    game from an empty slot (what ``days`` scales by ``p_active`` and ``role_factor``, the share of his healthy games
+    the coach plays him, 1 without a game log)."""
 
     espn_id: int
     slot_id: int
@@ -190,6 +198,7 @@ class DayPlayer:
     position: str | None = None
     name: str = ""
     pro_team_id: int | None = None
+    role_factor: float = 1.0
 
     def day(self, period: int) -> PlayerDay:
         return self.days.get(period, _NO_GAME)
@@ -824,7 +833,9 @@ def _freshest(
 @dataclass(frozen=True)
 class DayModel:
     """Builds :class:`DayPlayer` rows for one league's planning days: the per-game value of each player (``per_game``),
-    his game and ``p_active`` each day, and his lock each day."""
+    his game, ``p_active`` and role factor each day, and his lock each day. ``evidence`` is the players' in-season
+    evidence (:func:`fm.model.in_season.load_evidence`) and ``params`` the constants it is read with; without them
+    every role factor is 1."""
 
     store: Store
     league: LeagueRow
@@ -836,6 +847,8 @@ class DayModel:
     plugin: SportPlugin = NBA
     official: OfficialReport | OfficialInjuryReport | None = None
     respect_locks: bool = True
+    evidence: Mapping[int, Evidence] = field(default_factory=lambda: MappingProxyType({}))
+    params: InSeasonParams | None = None
     _locks: Mapping[int, tuple[Mapping[int, datetime], datetime | None]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -859,11 +872,20 @@ class DayModel:
         team = by_team.get(player.pro_team_id) if player.pro_team_id is not None else None
         return team if team is not None else everyone
 
+    def role_factor(self, espn_id: int) -> float:
+        """The player's role factor from his evidence; 1 without evidence or constants."""
+        entry = self.evidence.get(espn_id)
+        if entry is None or self.params is None:
+            return 1.0
+        return entry.role_factor(self.params)
+
     def day_player(self, row: PlayerRow, slot_id: int, *, flagged_locked: bool = False) -> DayPlayer | None:
-        """The player as the planner sees him, or ``None`` when he has no per-game value (no projection line)."""
+        """The player as the planner sees him, or ``None`` when he has no per-game value (no projection line). A
+        game's value is ``p_active`` (injury) times his role factor (the coach) times ``per_game``."""
         per_game = self.per_game.get(row.espn_id)
         if per_game is None:
             return None
+        role = self.role_factor(row.espn_id)
         listed = frozenset(row.eligible_slot_ids)
         if not listed and row.position is not None:
             try:
@@ -897,7 +919,7 @@ class DayModel:
             days[day] = PlayerDay(
                 has_game=True,
                 p_active=p_active,
-                value=p_active * per_game,
+                value=p_active * role * per_game,
                 locked=locked,
                 lock_at=lock_at,
                 availability=availability,
@@ -913,6 +935,7 @@ class DayModel:
             position=row.position,
             name=row.full_name,
             pro_team_id=row.pro_team_id,
+            role_factor=role,
         )
 
     def roster(
@@ -1045,14 +1068,17 @@ def daily_inputs(
     official: OfficialReport | OfficialInjuryReport | None = None,
     game_sd: Mapping[str, float] | float = DEFAULT_GAME_SD,
     margin_so_far: Mapping[str, float] | None = None,
+    params: InSeasonParams | None = None,
 ) -> DailyInputs:
     """Our roster for the rest of the matchup as :class:`DayPlayer` rows.
 
     Reads the roster snapshot of ``period``, the ``players`` rows, the day's blended per-game lines (``lines`` or
-    :func:`_lines_for`), availability (:func:`_freshest`) and locks (from ``schedule`` at ``now`` and ESPN's
-    ``lineupLocked``). In a category league the opponent's stored roster (``opponent_team_id``) sets the swing weights
-    (:func:`swing_outlook`). Raises :class:`DailyLineupError` when the period's roster snapshot is missing, the
-    settings are not an NBA league's, the matchup cannot be placed on the calendar or the lock type is unknown.
+    :func:`_lines_for`), availability (:func:`_freshest`), the in-season evidence of everyone with a line (the role
+    factors, read with ``params``, the NBA table of ``data/in_season.toml`` by default) and locks (from ``schedule`` at
+    ``now`` and ESPN's ``lineupLocked``). In a category league the opponent's stored roster (``opponent_team_id``) sets
+    the swing weights (:func:`swing_outlook`). Raises :class:`DailyLineupError` when the period's roster snapshot is
+    missing, the settings are not an NBA league's, the matchup cannot be placed on the calendar or the lock type is
+    unknown.
     """
     _require_aware(now)
     if settings.game is not Game.FBA or league.sport != "nba":
@@ -1072,7 +1098,21 @@ def daily_inputs(
     flat = game_values(settings, day_lines, _positions(store, league, day_lines, rows), model=model)
     values = flat
     plugin = plugin_for(league.sport)
-    day_model = DayModel(store, league, settings, schedule, now, days, flat.per_game, plugin, official)
+    constants = params if params is not None else load_params()["nba"]
+    evidence = load_evidence(store, league.sport, league.season, day_lines, current_period=period)
+    day_model = DayModel(
+        store,
+        league,
+        settings,
+        schedule,
+        now,
+        days,
+        flat.per_game,
+        plugin,
+        official,
+        evidence=evidence,
+        params=constants,
+    )
     players, notes = day_model.roster(entries, rows)
     all_warnings.extend(notes)
     if settings.is_categories and flat.model is not None:
@@ -1087,7 +1127,19 @@ def daily_inputs(
         values = game_values(
             settings, day_lines, _positions(store, league, day_lines, rows), model=flat.model, outlook=outlook
         )
-        day_model = DayModel(store, league, settings, schedule, now, days, values.per_game, plugin, official)
+        day_model = DayModel(
+            store,
+            league,
+            settings,
+            schedule,
+            now,
+            days,
+            values.per_game,
+            plugin,
+            official,
+            evidence=evidence,
+            params=constants,
+        )
         players, _ = day_model.roster(entries, rows)
     all_warnings.extend(values.warnings)
     limits, limit_notes = slot_limits_left(settings, games_used)
@@ -1146,6 +1198,8 @@ def _opponent_outlook(
         day_model.plugin,
         day_model.official,
         respect_locks=False,
+        evidence=day_model.evidence,
+        params=day_model.params,
     )
     theirs, notes = unlocked.roster(entries, rows)
     counts = active_slot_counts(settings)

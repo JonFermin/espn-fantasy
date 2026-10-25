@@ -347,6 +347,27 @@ the `as_of` of each input.
 - **Market value** (what league-mates believe) is tracked separately. Sources are redraft trade values (NFL) and ESPN
   rank and ownership trends (both sports). It's used only to model whether a trade gets accepted.
 
+### 8.3a In-season evidence (added 2026-10-24)
+
+Projections are preseason opinions until the season corrects them. Two live proposals showed the cost of ignoring
+it: an NBA stream for a healthy player who had been a DNP-coach's-decision every game (valued on ESPN's preseason
+24 MPG), and an NFL drop of a WR1 whose rest-of-season line ESPN sent empty (scored as a known zero). So every
+decision now reads the season's own record first (`src/fm/model/in_season.py`, constants in `data/in_season.toml`):
+
+- **Game log.** `fm sync` keeps ESPN's actual line for every played period the player card carries. A stored period
+  is a team game; an empty line in it is a game he sat. A game missed under a non-playing designation (the nearest
+  stored `availability` row) never counts against him.
+- **Role factor** = `(played + role_k) / (healthy + role_k)` over his last `role_window` healthy games. It multiplies a
+  game's value next to `p_active`, which stays the injury model's. No evidence is 1.
+- **Production.** The season-to-date per-game line is mixed into the projection stat by stat with weight
+  `GP / (GP + line_k)`, so actual production overtakes the projection after `line_k` games.
+- **No data is unknown, never zero.** An empty projection line falls back to actual production, else the player is
+  unvalued: never dropped, never added on actuals alone.
+- **Hard guards.** Streaming and waivers never add a player benched for `min_benched` healthy games in a row. DARKO's
+  zero-minute projection for an available player blends as a zero line instead of being left out.
+- Proposals carry an `in_season` block in `engine_numbers` (played/healthy, role factor, actual vs projected) and the
+  rationale says when the evidence moved the value. The constants are starting points for the backtest to tune.
+
 ### 8.4 Simulation
 
 - Run a Monte Carlo (numpy, ~10k runs) over the remaining ESPN schedule, using each team's expected-optimal lineups.

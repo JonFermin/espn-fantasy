@@ -930,6 +930,7 @@ def blend_period(
     weights: BlendWeights,
     sources: ProjectionSourceRegistry = source_registry,
     save: bool = True,
+    adjust: Callable[[Blend], Blend] | None = None,
     **options: Unpack[FetchOptions],
 ) -> PeriodBlend:
     """Load every registered source of the sport for the period, blend them, and save.
@@ -937,8 +938,11 @@ def blend_period(
     Stored sources are read from ``projections``; loaded ones are fetched (``options`` pass through to their adapters)
     and, with ``save``, written there under their own name so the inputs of every blend stay replayable. A source the
     weights file weights but nothing can load is warned about, and so are rows a loader returns for another sport or
-    period. Positions come from the ``players`` table. The blend is written under :data:`BLEND` in the same
-    transaction, replacing each player's previous blended row.
+    period. Positions come from the ``players`` table. ``adjust``, when given, rewrites the :class:`Blend` before it is
+    saved (:func:`fm.model.value_nba.blend_day` mixes each line with the player's season-to-date actuals there); what
+    it returns is what is stored and reported, so a correction to the blend is replayable from the stored rows like
+    the sources are. The blend is written under :data:`BLEND` in the same transaction, replacing each player's previous
+    blended row.
 
     A stored blended row this run does not replace belongs to a player no weighted source projects now: a loader
     failed or dropped him, the weights changed, or the crosswalk moved his id. It is deleted in the same transaction
@@ -973,6 +977,8 @@ def blend_period(
             fetched_rows.extend(wanted)
     players = store.players.many(normalized, {row.espn_id for row in rows})
     result = blend(rows, weights=weights, positions={player.espn_id: player.position for player in players})
+    if adjust is not None:
+        result = adjust(result)
     saved = 0
     retired: list[int] = []
     if save:

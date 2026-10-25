@@ -15,10 +15,12 @@ and returns a :class:`Rankings`, :func:`write_csv` saves one sheet per league.
   (:meth:`fm.model.valuation.RosterValuer.vor`).
 - NBA: per-game points under the league's scoring items (:func:`fm.model.value_nba.scheduled_points`) times the games
   his pro team plays from the current day to the season's last (the pro schedule), the day's line being the blend of
-  ESPN's per-game rate and DARKO (:func:`fm.model.value_nba.blend_day`). Every remaining day weighs the same: ESPN's
-  playoff days are only known through its calendar (ROADMAP #31). Availability is not applied (a rest-of-season line has
-  no day to apply it to), so an injured player is shown with his status, not discounted; a player off an active pro
-  roster is worth nothing. Replacement is the best wire player eligible for the same active slot, as for the NFL.
+  ESPN's per-game rate and DARKO (:func:`fm.model.value_nba.blend_day`, mixed with his season-to-date actuals) times
+  his role factor (:meth:`fm.model.in_season.Evidence.role_factor`, the share of his healthy games the coach plays
+  him; the note says so when it is below 1). Every remaining day weighs the same: ESPN's playoff days are only known
+  through its calendar (ROADMAP #31). Availability is not applied (a rest-of-season line has no day to apply it to), so
+  an injured player is shown with his status, not discounted; a player off an active pro roster is worth nothing.
+  Replacement is the best wire player eligible for the same active slot, as for the NFL.
 
 **Category leagues** (NBA). Each player's per-game line is scaled to the games his team plays in the rest of the season
 (:func:`fm.model.value_nba.period_lines`) and the league's own categories, in the settings' order and with
@@ -48,10 +50,14 @@ from fm.espn.ids import Game, ids_for
 from fm.espn.settings import LeagueSettings
 from fm.model.categories import CategoryMetric, CategoryModel, fit_categories, metric_for
 from fm.model.ids_nba import NBA_SPORT
+from fm.model.in_season import load_evidence, load_params, role_factors
 from fm.model.projections import ESPN, BlendWeights, ProjectionSourceRegistry, source_registry
 from fm.model.valuation import (
+    BASIS_ACTUAL_ONLY,
+    BASIS_IN_SEASON,
     BASIS_NONE,
     BASIS_SEASON,
+    BASIS_SEASON_WITHOUT_GAMES,
     BASIS_THIS_WEEK,
     DEFAULT_PLAYOFF_WEIGHT,
     ValuationError,
@@ -61,7 +67,7 @@ from fm.model.valuation import (
     load_valuation,
     slot_instances,
 )
-from fm.model.value_nba import SEASON_PERIOD, blend_day, period_lines, scheduled_points
+from fm.model.value_nba import SEASON_PERIOD, blend_day, expected_lines, period_lines, scheduled_points
 from fm.sports.base import ScheduleLike
 from fm.store import LeagueRow, PlayerRow, Store
 
@@ -401,8 +407,14 @@ def _rank_nfl(
             notes.append("no projection")
         elif outlook.basis == BASIS_THIS_WEEK:
             notes.append("this week's line stands in for every week")
-        elif outlook.basis != BASIS_SEASON:
+        elif outlook.basis == BASIS_IN_SEASON:
+            notes.append("rate mixed with season-to-date actuals")
+        elif outlook.basis == BASIS_ACTUAL_ONLY:
+            notes.append("valued on actuals alone; no projection")
+        elif outlook.basis == BASIS_SEASON_WITHOUT_GAMES:
             notes.append("season line without a games count")
+        elif outlook.basis != BASIS_SEASON:
+            notes.append(f"basis {outlook.basis}")
         known = outlook.has_projection
         candidates.append(
             _Candidate(
@@ -434,6 +446,13 @@ class _NbaInputs:
     periods: range
     schedule: ScheduleLike
     warnings: tuple[str, ...]
+    role: Mapping[int, float] = MappingProxyType({})
+    """Each player's role factor (the share of his healthy games he plays); 1 for a player without one."""
+
+
+def _role_note(inputs: _NbaInputs, espn_id: int) -> list[str]:
+    role = inputs.role.get(espn_id, 1.0)
+    return [f"plays {role:.0%} of his healthy games"] if role < 1.0 else []
 
 
 def _rank_nba(
@@ -488,6 +507,9 @@ def _nba_inputs(
     )
     lines = {row.espn_id: dict(row.stats) for row in blended.rows if row.espn_id in players}
     warnings = list(blended.warnings)
+    role = role_factors(
+        load_evidence(store, NBA_SPORT, league.season, players, current_period=period), load_params()["nba"]
+    )
     days = range(period, last + 1)
     listed = set(schedule.scoring_periods)
     scheduled = sum(day in listed for day in days)
@@ -509,11 +531,14 @@ def _nba_inputs(
         periods=days,
         schedule=schedule,
         warnings=tuple(warnings),
+        role=MappingProxyType(role),
     )
 
 
 def _nba_points(inputs: _NbaInputs, settings: LeagueSettings) -> _Built:
-    scheduled = scheduled_points(inputs.lines, inputs.players.values(), settings, inputs.schedule, inputs.periods)
+    scheduled = scheduled_points(
+        inputs.lines, inputs.players.values(), settings, inputs.schedule, inputs.periods, role_factor=inputs.role
+    )
     values: dict[int, float] = {}
     for espn_id, points in scheduled.items():
         values[espn_id] = points.total if inputs.players[espn_id].active else 0.0
@@ -530,13 +555,14 @@ def _nba_points(inputs: _NbaInputs, settings: LeagueSettings) -> _Built:
         notes = [] if player.active else ["not on an active pro roster"]
         if points.games == 0:
             notes.append("no games on the pro schedule")
+        notes.extend(_role_note(inputs, espn_id))
         candidates.append(
             _Candidate(
                 espn_id=espn_id,
                 value=values[espn_id],
                 vor=values[espn_id] - min(mine) if mine else None,
                 games=float(points.games),
-                per_game=points.per_game,
+                per_game=points.expected_per_game,
                 note="; ".join(notes),
             )
         )
@@ -565,7 +591,8 @@ def _slot_levels(
 
 
 def _nba_categories(inputs: _NbaInputs, settings: LeagueSettings, tau: Mapping[str, float] | None) -> _Built:
-    scaled = period_lines(inputs.lines, inputs.players.values(), inputs.schedule, inputs.periods)
+    expected = expected_lines(inputs.lines, inputs.role)
+    scaled = period_lines(expected, inputs.players.values(), inputs.schedule, inputs.periods)
     if len(scaled) < 2:
         raise RankingsError(f"league {settings.league_id}: category scores need at least two projected players")
     model: CategoryModel = fit_categories(scaled, settings, tau=tau)
@@ -594,6 +621,7 @@ def _nba_categories(inputs: _NbaInputs, settings: LeagueSettings, tau: Mapping[s
         notes = [] if player.active else ["not on an active pro roster"]
         if games == 0:
             notes.append("no games on the pro schedule")
+        notes.extend(_role_note(inputs, espn_id))
         candidates.append(
             _Candidate(
                 espn_id=espn_id,

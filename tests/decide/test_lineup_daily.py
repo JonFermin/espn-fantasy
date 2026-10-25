@@ -56,6 +56,7 @@ from fm.decide.lineup_daily import (
 from fm.espn.ids import FBA
 from fm.espn.settings import LeagueSettings, LockType, load_league_settings
 from fm.model.availability import assess
+from fm.model.in_season import InSeasonParams
 from fm.proposals import LineupPayload, ProposalKind, parse_payload
 from fm.sources.nba_injuries import OfficialInjuryEntry, OfficialInjuryReport
 from fm.sports.nba import NBA
@@ -807,6 +808,55 @@ def test_a_questionable_designation_counts_at_his_chance_of_playing(store: Store
     inputs = daily_inputs(store, league, real_points(), schedule=schedule(), period=DAY, now=MORNING)
     ben = next(player for player in inputs.players if player.espn_id == 111)
     assert ben.day(DAY).p_active == pytest.approx(0.5) and ben.day(DAY).value == pytest.approx(0.5 * 8.0)
+
+
+def test_a_healthy_player_the_coach_does_not_play_is_worth_his_role_factor(store: Store) -> None:
+    """Ben sat team games 1 and 2 healthy (empty actual lines, nothing injured): 0 of 2 with role_k 2 is 0.5, so his
+    game is worth half, with ``p_active`` untouched (the injury's). Bo sat the same games ruled OUT: no penalty."""
+    league = seed(store)
+    for espn_id in (111, 112):
+        for period in (1, 2):
+            store.projections.upsert(
+                ProjectionRow(
+                    sport="nba",
+                    espn_id=espn_id,
+                    source="espn",
+                    kind="actual",
+                    season=SEASON,
+                    scoring_period_id=period,
+                    stats={},
+                    as_of=SYNCED,
+                )
+            )
+    for period in (1, 2):
+        store.availability.upsert(
+            AvailabilityRow(
+                sport="nba",
+                espn_id=112,
+                season=SEASON,
+                scoring_period_id=period,
+                designation="OUT",
+                p_active=0.0,
+                as_of=SYNCED,
+            )
+        )
+    inputs = daily_inputs(store, league, real_points(), schedule=schedule(), period=DAY, now=MORNING)
+    by_id = {player.espn_id: player for player in inputs.players}
+    ben, bo, pat = by_id[111], by_id[112], by_id[101]
+    assert ben.role_factor == pytest.approx(0.5) and ben.per_game == 8.0
+    assert ben.day(DAY).p_active == 1.0 and ben.day(DAY).value == pytest.approx(0.5 * 8.0)
+    assert bo.role_factor == 1.0 and bo.day(DAY).value == pytest.approx(7.0)
+    assert pat.role_factor == 1.0 and pat.day(DAY).value == pytest.approx(30.0)  # no game log: no penalty
+    assert inputs.model.role_factor(111) == pytest.approx(0.5) and inputs.model.role_factor(999) == 1.0
+    assert inputs.model.evidence[111].benched() == 2 and inputs.model.evidence[112].benched() == 0
+    # the constants are a parameter
+    harsh = InSeasonParams(line_k=8.0, role_k=1.0, role_window=10, min_benched=2)
+    strict = daily_inputs(store, league, real_points(), schedule=schedule(), period=DAY, now=MORNING, params=harsh)
+    assert next(player for player in strict.players if player.espn_id == 111).role_factor == pytest.approx(1 / 3)
+    # the planner prefers the bench player who plays his games: Bea (6 a game, no log) over Ben (8 x 0.5 = 4)
+    decision = plan_daily_lineup(store, league, schedule=schedule(), now=MORNING, period=DAY)
+    today = decision.best.day(DAY)
+    assert today.slots[113] != BENCH and today.slots[111] == BENCH
 
 
 def test_the_lock_rules_the_planner_obeys_come_from_the_league(store: Store) -> None:

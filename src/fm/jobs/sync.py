@@ -469,11 +469,26 @@ def _projection_rows(
 
     A line ESPN sends empty is kept (a bye projects zero); a line it does not send is absent. A period's line is the
     game's "Game" split (:data:`fm.espn.models.STAT_SPLIT_GAME`: 1 in ``ffl``, 5 in ``fba``).
+
+    Actual lines are also kept for every earlier period the card carries (ESPN sends one per game the player's team
+    played, empty for a game he did not play): the game log :mod:`fm.model.in_season` reads.
     """
     rows: list[ProjectionRow] = []
     kinds: tuple[tuple[ProjectionKind, bool], ...] = (("projected", True), ("actual", False))
     for kind, projected in kinds:
-        for scoring_period in (period, 0):
+        periods = [period, 0]
+        if not projected:
+            periods += sorted(
+                {
+                    entry.scoring_period_id
+                    for entry in player.stats
+                    if entry.is_actual
+                    and entry.season_id == season
+                    and entry.is_single_period
+                    and 0 < entry.scoring_period_id < period
+                }
+            )
+        for scoring_period in periods:
             line = player.stat_entry(
                 season=season, scoring_period=scoring_period, projected=projected, game=schema.game
             )

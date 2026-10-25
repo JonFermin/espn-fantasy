@@ -8,8 +8,11 @@ of a roster (DESIGN sections 8.1, 8.3 and 9.3; ROADMAP #24).
 per-100 rates, pace and minutes (:meth:`fm.sources.darko.DarkoProjection.per_game`); :func:`darko_line` keys it by ESPN
 abbreviation (:data:`DARKO_STATS`) and :func:`darko_rows` joins it to ESPN ids through the NBA crosswalk ``fm sync``
 saves (:meth:`fm.model.ids_nba.NbaCrosswalk.espn_id`). DARKO zeroes the minutes of a player it does not expect to
-play; such a row is left out rather than blended as a line of zeros, since availability is ``p_active``'s business
-(:mod:`fm.model.availability`), not the stat line's.
+play. A player it marks unavailable is left out: an injury is ``p_active``'s business (:mod:`fm.model.availability`),
+not the stat line's. An *available* player at zero minutes is different: DARKO is saying he is out of the rotation,
+and that opinion has to reach the blend, so his row is an explicit line of zeros, which the blend averages in as a
+projection of zero (:func:`fm.model.projections.blend_line`). Dropping it, as this module once did, left ESPN's
+preseason line standing alone for a healthy benchwarmer and made him look like a streamer.
 
 **Sources.** Importing this module attaches :class:`DarkoLoader` to the ``darko`` source ROADMAP #15 registered without
 one. ESPN's NBA source stays the ``stored`` one the sync job writes, and what it stores is the season line, so a day's
@@ -18,9 +21,18 @@ as the per-game rate of its stored season line (:class:`EspnDayLoader`, :func:`d
 ``d`` is a per-game line, what the player produces if he plays; the blend weights' NBA uncertainty covers one game.
 The line does not change from day to day, so one day's blend values any span of days.
 
+**In-season production.** The sources are preseason opinions. :func:`blend_day` therefore passes the blend through
+:func:`in_season_adjuster`: each player's blended per-game line is mixed, stat by stat, toward his season-to-date
+per-game actual line (ESPN's period-0 actuals the sync job stores, divided by ``GP`` with :func:`per_game_line`) with
+:func:`fm.model.in_season.shrink_line`, the actuals weighing ``GP / (GP + line_k)``. A player with no games played
+keeps the blend; one with a season of them is valued on it. Adjusted rows carry :data:`IN_SEASON` in the blend's
+``inputs`` so a proposal can say so. Whether he *plays* is the role factor's business (next).
+
 **Points** (:func:`scheduled_points`). In a points league a player's worth over a span of days is his per-game points
-under the league's scoring items times the games his team plays in the span (DESIGN 8.3), times ``p_active`` when
-given.
+under the league's scoring items times the games his team plays in the span (DESIGN 8.3), times ``p_active`` and the
+``role_factor`` when given: ``p_active`` is the injury model's chance he is active (:mod:`fm.model.availability`), the
+role factor (:meth:`fm.model.in_season.Evidence.role_factor`) the share of his healthy games the coach plays him. A
+category league's expected line is :func:`expected_line`, the per-game line scaled by the same factor.
 
 **Daily lineup value** (:func:`daily_lineup_value`). Only players in active slots score, so a roster's worth over a
 span is the sum, day by day, of its most valuable lineup among the players whose team plays: an assignment over the
@@ -36,7 +48,7 @@ the daily lineup and streaming decisions (ROADMAP #31).
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
@@ -49,10 +61,13 @@ from fm.espn.ids import FBA, Game
 from fm.espn.settings import LeagueSettings
 from fm.model.categories import GAMES_PLAYED, RATE_CATEGORIES
 from fm.model.ids_nba import NBA_SPORT, NbaCrosswalk
+from fm.model.in_season import Evidence, InSeasonParams, load_evidence, load_params, shrink_line
 from fm.model.projections import (
     BLEND,
     DARKO,
     ESPN,
+    RECOMPUTED_RATIOS,
+    Blend,
     BlendWeights,
     Converted,
     PeriodBlend,
@@ -74,6 +89,8 @@ TALENT_DATASET: Final = "talent"
 """``Fetched.dataset`` of DARKO's talent sheet (:meth:`fm.sources.darko.DarkoSource.projections`)."""
 DARKO_LABEL: Final = "DARKO per-game projections (talent sheet, joined through the NBA crosswalk)"
 ESPN_DAY_LABEL: Final = "ESPN per-game rate of its stored season projection"
+IN_SEASON: Final = "in_season"
+"""Appended to a blended row's ``inputs`` when :func:`in_season_adjuster` mixed it with the season's actuals."""
 
 DARKO_STATS: Mapping[str, str] = MappingProxyType(
     {
@@ -145,22 +162,30 @@ def darko_rows(
 ) -> Converted:
     """DARKO's projections as ``darko`` rows for one day, keyed by ESPN id through the NBA crosswalk.
 
-    Left out: players DARKO projects for no minutes or marks unavailable (counted in a warning), and players the
-    crosswalk does not map (listed in ``unmapped`` by nba.com id). The crosswalk holds the players ``fm sync`` has seen,
-    so most of DARKO's sheet is unmapped by design; a warning comes only when nobody maps. When two rows name one
+    Left out: players DARKO marks unavailable (an injury, the availability model's to price; counted in a warning) and
+    players the crosswalk does not map (listed in ``unmapped`` by nba.com id). The crosswalk holds the players
+    ``fm sync`` has seen, so most of DARKO's sheet is unmapped by design; a warning comes only when nobody maps. An
+    available player DARKO projects for no minutes gets an explicit zero line (``GP`` 1, every :data:`DARKO_STATS` stat
+    0), DARKO's "he will not play" that the blend averages in; a warning counts those too. When two rows name one
     player the later wins.
     """
     rows: dict[int, ProjectionRow] = {}
     unmapped: list[str] = []
-    resting = 0
+    unavailable = 0
+    zeroed = 0
     for projection in projections:
-        if not projection.available or projection.minutes <= 0:
-            resting += 1
+        if not projection.available:
+            unavailable += 1
             continue
         espn_id = crosswalk.espn_id(projection.nba_id)
         if espn_id is None:
             unmapped.append(str(projection.nba_id))
             continue
+        if projection.minutes <= 0:
+            zeroed += 1
+            line = zero_line()
+        else:
+            line = darko_line(projection)
         rows[espn_id] = ProjectionRow(
             sport=NBA_SPORT,
             espn_id=espn_id,
@@ -168,7 +193,7 @@ def darko_rows(
             kind="projected",
             season=season,
             scoring_period_id=scoring_period,
-            stats=darko_line(projection),
+            stats=line,
             as_of=as_of,
         )
     warnings: list[str] = []
@@ -176,9 +201,19 @@ def darko_rows(
         warnings.append(
             f"darko: the NBA crosswalk maps none of the {len(unmapped)} players DARKO projects; run fm sync to save it"
         )
-    if resting:
-        warnings.append(f"darko: left out {resting} players projected for no minutes or marked unavailable")
+    if unavailable:
+        warnings.append(f"darko: left out {unavailable} players marked unavailable")
+    if zeroed:
+        warnings.append(f"darko: {zeroed} available players are projected for no minutes; blended as a line of zeros")
     return Converted(tuple(rows.values()), tuple(unmapped), tuple(warnings))
+
+
+def zero_line() -> dict[str, float]:
+    """DARKO's line for an available player it projects for no minutes: every :data:`DARKO_STATS` stat 0 with ``GP``
+    1, a projection of zero the blend counts (:func:`fm.model.projections.blend_line`)."""
+    line = dict.fromkeys(DARKO_STATS.values(), 0.0)
+    line[GAMES_PLAYED] = 1.0
+    return line
 
 
 def espn_day_rows(rows: Iterable[ProjectionRow], *, scoring_period: int) -> Converted:
@@ -289,6 +324,68 @@ def day_sources(sources: ProjectionSourceRegistry = source_registry) -> Projecti
     return day
 
 
+def season_per_game(evidence: Evidence) -> dict[str, float] | None:
+    """The player's season-to-date actual line per game (:func:`per_game_line` over ``evidence.games``), or ``None``
+    without a stored season line or a game played. The line's own ``GP`` is set aside for ``evidence.games``, which
+    falls back to the game log when ESPN's season line carries no count."""
+    if evidence.season_line is None or evidence.games <= 0:
+        return None
+    return per_game_line({**evidence.season_line, GAMES_PLAYED: evidence.games})
+
+
+def shrink_per_game(line: Mapping[str, float], evidence: Evidence, params: InSeasonParams) -> dict[str, float] | None:
+    """A blended per-game line mixed toward the season's per-game actuals (:func:`fm.model.in_season.shrink_line`
+    with ``n`` = games played), its percentages recomputed from the mixed makes and attempts as the blend's are.
+    ``None`` when there is nothing to mix (no season line or no game played), so the caller keeps the line as it is."""
+    actual = season_per_game(evidence)
+    if actual is None:
+        return None
+    mixed = shrink_line(line, actual, evidence.games, params)
+    ratios = tuple(stat for stat in RECOMPUTED_RATIOS[Game.FBA] if stat in mixed)
+    if ratios:
+        parts = {stat: value for stat, value in mixed.items() if stat not in ratios}
+        recomputed = derive_stats(parts, Game.FBA, ratios)
+        mixed.update((stat, recomputed[stat]) for stat in ratios if stat in recomputed)
+    return mixed
+
+
+def in_season_adjuster(
+    store: Store, season: int, day: int, params: InSeasonParams | None = None
+) -> Callable[[Blend], Blend]:
+    """The ``adjust`` hook :func:`blend_day` gives :func:`fm.model.projections.blend_period`: every blended row is
+    mixed with the player's season-to-date actuals (:func:`shrink_per_game`) read once for the blend's players with
+    :func:`fm.model.in_season.load_evidence` as of ``day``. Adjusted rows get :data:`IN_SEASON` appended to their
+    ``inputs`` and the count goes in a warning; rows without actuals pass through. ``params`` default to the NBA table
+    of ``data/in_season.toml``."""
+    constants = params if params is not None else load_params()["nba"]
+
+    def adjust(result: Blend) -> Blend:
+        if not result.rows:
+            return result
+        evidence = load_evidence(store, NBA_SPORT, season, (row.espn_id for row in result.rows), current_period=day)
+        rows: list[ProjectionRow] = []
+        inputs = dict(result.inputs)
+        adjusted = 0
+        for row in result.rows:
+            mixed = shrink_per_game(row.stats, evidence[row.espn_id], constants)
+            if mixed is None:
+                rows.append(row)
+                continue
+            adjusted += 1
+            rows.append(row.model_copy(update={"stats": mixed}))
+            key = (row.espn_id, row.season, row.scoring_period_id)
+            inputs[key] = (*inputs.get(key, ()), IN_SEASON)
+        warnings = result.warnings
+        if adjusted:
+            warnings = (
+                *warnings,
+                f"nba: {adjusted} of {len(rows)} blended lines were mixed with the players' season-to-date actuals",
+            )
+        return Blend(tuple(rows), MappingProxyType(inputs), warnings)
+
+    return adjust
+
+
 def blend_day(
     store: Store,
     season: int,
@@ -297,19 +394,32 @@ def blend_day(
     weights: BlendWeights,
     sources: ProjectionSourceRegistry = source_registry,
     save: bool = True,
+    params: InSeasonParams | None = None,
+    in_season: bool = True,
     **options: Unpack[FetchOptions],
 ) -> PeriodBlend:
     """Blend the NBA sources' per-game lines for one day (a scoring period >= 1) and, with ``save``, store them.
 
     :func:`fm.model.projections.blend_period` over :func:`day_sources`: ESPN's per-game rate and every other NBA
     source (DARKO's loader; the in-house baselines of ROADMAP #43 once registered), averaged stat by stat with the
-    weights file's NBA weights. Saved, the inputs land under their own source names and the blend under ``blend`` for
-    the day. Raises ``ValueError`` for a day below 1 (period 0 holds season lines).
+    weights file's NBA weights, then each line mixed toward the player's season-to-date actuals
+    (:func:`in_season_adjuster` with ``params``, the NBA table of ``data/in_season.toml`` by default; ``in_season``
+    False skips the mix, for a replay of the raw blend). Saved, the inputs land under their own source names and the
+    adjusted blend under ``blend`` for the day. Raises ``ValueError`` for a day below 1 (period 0 holds season lines).
     """
     if day < 1:
         raise ValueError(f"an NBA day is a scoring period >= 1 (period 0 holds season lines), got {day}")
+    adjust = in_season_adjuster(store, season, day, params) if in_season else None
     return blend_period(
-        store, NBA_SPORT, season, day, weights=weights, sources=day_sources(sources), save=save, **options
+        store,
+        NBA_SPORT,
+        season,
+        day,
+        weights=weights,
+        sources=day_sources(sources),
+        save=save,
+        adjust=adjust,
+        **options,
     )
 
 
@@ -349,21 +459,23 @@ def period_lines(
 
 @dataclass(frozen=True, slots=True)
 class ScheduledPoints:
-    """A player's points over a span of days: ``per_game`` league points per game, the ``games`` his team plays and
-    the chance ``p_active`` that he plays."""
+    """A player's points over a span of days: ``per_game`` league points per game, the ``games`` his team plays, the
+    chance ``p_active`` that he is active (injury) and the ``role_factor``, the share of his healthy games he plays
+    (:meth:`fm.model.in_season.Evidence.role_factor`)."""
 
     espn_id: int
     per_game: float
     games: int
     p_active: float = 1.0
+    role_factor: float = 1.0
 
     @property
     def expected_per_game(self) -> float:
-        return self.per_game * self.p_active
+        return self.per_game * self.p_active * self.role_factor
 
     @property
     def total(self) -> float:
-        return self.per_game * self.games * self.p_active
+        return self.per_game * self.games * self.p_active * self.role_factor
 
 
 def _points_league(settings: LeagueSettings) -> None:
@@ -375,11 +487,33 @@ def _points_league(settings: LeagueSettings) -> None:
         )
 
 
-def _probability(p_active: Mapping[int, float] | None, espn_id: int) -> float:
+def _probability(p_active: Mapping[int, float] | None, espn_id: int, what: str = "p_active") -> float:
     value = 1.0 if p_active is None else p_active.get(espn_id, 1.0)
     if isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= value <= 1.0:
-        raise ValueError(f"p_active of ESPN {espn_id} should be a probability, got {value!r}")
+        raise ValueError(f"{what} of ESPN {espn_id} should be a probability, got {value!r}")
     return float(value)
+
+
+def expected_line(line: Mapping[str, float], role_factor: float) -> dict[str, float]:
+    """A per-game line scaled by the role factor: the counting stats times it, the rates and ``GP`` as they are. What a
+    category league expects of a game from a player the coach plays in only some of his healthy games. Raises
+    ``ValueError`` for a factor outside [0, 1]."""
+    if isinstance(role_factor, bool) or not isinstance(role_factor, int | float) or not 0.0 <= role_factor <= 1.0:
+        raise ValueError(f"role_factor should be within [0, 1], got {role_factor!r}")
+    if role_factor == 1.0:
+        return dict(line)
+    return {
+        stat: value if stat in RATE_CATEGORIES or stat == GAMES_PLAYED else value * role_factor
+        for stat, value in line.items()
+    }
+
+
+def expected_lines(
+    lines: Mapping[int, Mapping[str, float]], role_factor: Mapping[int, float] | None
+) -> dict[int, dict[str, float]]:
+    """:func:`expected_line` for every player, with 1 for a player ``role_factor`` does not name (or ``None``)."""
+    factors = role_factor or {}
+    return {espn_id: expected_line(line, factors.get(espn_id, 1.0)) for espn_id, line in lines.items()}
 
 
 def scheduled_points(
@@ -390,13 +524,15 @@ def scheduled_points(
     periods: Iterable[int],
     *,
     p_active: Mapping[int, float] | None = None,
+    role_factor: Mapping[int, float] | None = None,
     scorer: Scorer | None = None,
 ) -> dict[int, ScheduledPoints]:
     """Per-game points × games over ``periods`` (days) for each player with a line, by ESPN id (DESIGN 8.3).
 
     ``lines`` are per-game lines (:func:`per_game_lines`); each is scored with the league's items at the player's
-    position, and his team's games come from ``schedule``. ``p_active`` (ESPN id -> probability, 1 when absent) scales
-    the total. Raises ``ValueError`` for a league that is not an NBA points league or a ``p_active`` outside [0, 1].
+    position, and his team's games come from ``schedule``. ``p_active`` (ESPN id -> probability, 1 when absent) and
+    ``role_factor`` (ESPN id -> the share of his healthy games he plays, 1 when absent) scale the total. Raises
+    ``ValueError`` for a league that is not an NBA points league or a ``p_active`` or ``role_factor`` outside [0, 1].
     """
     _points_league(settings)
     scoring = scorer if scorer is not None else Scorer(settings)
@@ -411,6 +547,7 @@ def scheduled_points(
             per_game=scoring.points(line, position=player.position),
             games=team_games(schedule, player.pro_team_id, span),
             p_active=_probability(p_active, player.espn_id),
+            role_factor=_probability(role_factor, player.espn_id, "role_factor"),
         )
     return values
 

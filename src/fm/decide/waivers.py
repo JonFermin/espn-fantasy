@@ -19,9 +19,15 @@ pair is left out when it would break the league's position limits, or when its d
 
 Never dropped: an untouchable (:func:`fm.proposals.find_untouchables`; :func:`fm.proposals.evaluate` refuses one again
 at propose time), a player in the IR slot (dropping him frees no roster spot), and a player nothing projects (his value
-is unknown, not zero). The league's open add/drop and waiver proposals count as moves already made: the valuation
-applies them from the periods they count in, and new moves leave their players alone, so two proposals never claim or
-drop the same player; the same move proposed again is deduplicated by :func:`fm.proposals.propose`.
+is unknown, not zero), whether nothing values him at all or only his own season-to-date actuals do
+(:attr:`fm.model.valuation.PlayerOutlook.projected` is false: ESPN sent an empty rest-of-season line for Terry McLaurin,
+out one week with a hamstring, and read as a known 0 it had a WR1 dropped for a kicker); the decision warns about each
+such player. Never added: a player valued on his actuals alone, or one the in-season evidence shows benched (healthy
+and not playing for ``min_benched`` team games in a row, :class:`fm.model.in_season.InSeasonParams`): the preseason line
+that still projects him assumes a role he no longer has. The league's open add/drop and waiver proposals count as moves
+already made: the valuation applies them from the periods they count in, and new moves leave their players alone, so two
+proposals never claim or drop the same player; the same move proposed again is deduplicated by
+:func:`fm.proposals.propose`.
 
 **Timing** is read from the league, never assumed. A claim's deadline is its waiver run (``waiverProcessDate``), and it
 counts from the period that run falls in (the next one when the add's game that period starts before the run). A
@@ -84,6 +90,8 @@ from fm.decide.registry import register
 from fm.espn.client import View
 from fm.espn.models import POOL_FREE_AGENT, POOL_WAIVERS, PlayersView, PoolEntry, Transaction
 from fm.espn.settings import LeagueSettings, LockType
+from fm.model.in_season import DEFAULT_PARAMS as IN_SEASON_DEFAULTS
+from fm.model.in_season import Evidence, InSeasonParams
 from fm.model.projections import ESPN, BlendWeights
 from fm.model.valuation import (
     DEFAULT_PLAYOFF_WEIGHT,
@@ -360,6 +368,9 @@ class WaiverMove:
     drop_vor: float | None = None
     roster_value: float | None = None
     bidding: Bidding | None = None
+    add_evidence: Mapping[str, Any] | None = None
+    """The add's in-season evidence as the proposal's ``in_season`` block (:func:`_in_season`); ``None`` without any."""
+    drop_evidence: Mapping[str, Any] | None = None
 
     @property
     def bid(self) -> int | None:
@@ -383,8 +394,10 @@ class WaiverMove:
             "gain": round(self.gain, 3),
             "start_period": self.start,
             "scoring_period": self.scoring_period,
-            "add": _numbers(self.add, self.add_value, self.add_vor),
-            "drop": None if self.drop is None else _numbers(self.drop, self.drop_value or 0.0, self.drop_vor),
+            "add": _numbers(self.add, self.add_value, self.add_vor, self.add_evidence),
+            "drop": None
+            if self.drop is None
+            else _numbers(self.drop, self.drop_value or 0.0, self.drop_vor, self.drop_evidence),
         }
         if self.clears_at is not None:
             numbers["clears_at"] = self.clears_at.isoformat()
@@ -405,11 +418,16 @@ class WaiverMove:
         text += f": +{self.gain:.1f} rest-of-season points from period {self.start}"
         if self.bid is not None and self.bidding is not None:
             text += f"; bid ${self.bid} (cap ${self.bidding.cap}, ${self.bidding.budget_left} left)"
+        clauses = [clause for clause in (_evidence_clause(self.add), _evidence_clause(self.drop)) if clause]
+        if clauses:
+            text += f" ({'; '.join(clauses)})"
         return text + "."
 
 
-def _numbers(outlook: PlayerOutlook, value: float, vor: float | None) -> dict[str, Any]:
-    return {
+def _numbers(
+    outlook: PlayerOutlook, value: float, vor: float | None, in_season: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    numbers: dict[str, Any] = {
         "espn_id": outlook.espn_id,
         "name": outlook.name,
         "position": outlook.position,
@@ -421,6 +439,40 @@ def _numbers(outlook: PlayerOutlook, value: float, vor: float | None) -> dict[st
         "p_active": outlook.p_active,
         "basis": outlook.basis,
     }
+    if in_season is not None:
+        numbers["in_season"] = dict(in_season)
+    return numbers
+
+
+def _in_season(outlook: PlayerOutlook, evidence: Evidence, params: InSeasonParams) -> dict[str, Any]:
+    """A player's ``in_season`` block: the evidence's own numbers (played and healthy games, role factor, benched
+    streak) plus his actual and projected points per game and the mixed rate the valuation used."""
+    return {
+        **evidence.numbers(params),
+        "actual_per_game": None if outlook.actual_per_game is None else round(outlook.actual_per_game, 3),
+        "actual_games": outlook.actual_games,
+        "projected_per_game": None if outlook.projected_per_game is None else round(outlook.projected_per_game, 3),
+        "per_game": round(outlook.per_game, 3),
+        "moved": outlook.evidence_moved,
+    }
+
+
+def _evidence_clause(outlook: PlayerOutlook | None) -> str:
+    """The rationale's clause when in-season evidence moved a player's value: ``McLaurin 8.8/g actual over 5 games vs
+    10.2 projected`` and, for a role factor below 1, ``role factor 0.43``; empty when it did not."""
+    if outlook is None or not outlook.evidence_moved:
+        return ""
+    surname = outlook.name.rsplit(" ", 1)[-1]
+    parts: list[str] = []
+    if outlook.actual_per_game is not None and outlook.actual_games > 0:
+        games = f"{outlook.actual_games:g} game{'s' if outlook.actual_games != 1 else ''}"
+        actual = f"{outlook.actual_per_game:.1f}/g actual over {games}"
+        if outlook.projected_per_game is not None:
+            actual += f" vs {outlook.projected_per_game:.1f} projected"
+        parts.append(actual)
+    if outlook.role_factor < 1.0:
+        parts.append(f"role factor {outlook.role_factor:.2f}")
+    return f"{surname} {', '.join(parts)}" if parts else ""
 
 
 def _label(outlook: PlayerOutlook) -> str:
@@ -578,8 +630,28 @@ def _board(
     )
 
 
+def _params(board: _Board) -> InSeasonParams:
+    """The in-season constants the valuation was built with (a hand-made one gets the sport's defaults)."""
+    params = board.valuation.in_season
+    return params if params is not None else IN_SEASON_DEFAULTS[board.valuation.league.sport]
+
+
+def _unprojected(board: _Board, valuer: RosterValuer) -> list[int]:
+    """Our players outside the IR slot that no projection values (:attr:`PlayerOutlook.projected` false): nothing at
+    all, or their own actuals alone. Never dropped, and named in the decision's warnings."""
+    ir_slot = board.valuation.settings.ids.ir_slot
+    return sorted(
+        espn_id
+        for espn_id in valuer.roster
+        if espn_id in board.entries
+        and board.entries[espn_id].lineup_slot_id != ir_slot
+        and not valuer.outlooks[espn_id].projected
+    )
+
+
 def _droppable(board: _Board, valuer: RosterValuer) -> list[int]:
-    """Our players a move may drop: not untouchable, outside the IR slot, and projected by something."""
+    """Our players a move may drop: not untouchable, outside the IR slot, and projected by something (the module
+    docs: a value standing on no projection, or on his actuals alone, is no reason to let a player go)."""
     ir_slot = board.valuation.settings.ids.ir_slot
     return sorted(
         espn_id
@@ -587,7 +659,7 @@ def _droppable(board: _Board, valuer: RosterValuer) -> list[int]:
         if espn_id in board.entries
         and espn_id not in board.protected
         and board.entries[espn_id].lineup_slot_id != ir_slot
-        and valuer.outlooks[espn_id].has_projection
+        and valuer.outlooks[espn_id].projected
     )
 
 
@@ -623,6 +695,7 @@ def _candidates(
         (espn_id for espn_id in valuer.wire if espn_id not in exclude and valuer.ros(espn_id) > 0),
         key=lambda espn_id: (-valuer.ros(espn_id), espn_id),
     )
+    params = _params(board)
     chosen: list[tuple[int, _Timing]] = []
     for espn_id in ranked:
         if len(chosen) >= board.candidates:
@@ -630,6 +703,13 @@ def _candidates(
         entry = board.wire.get(espn_id)
         if entry is None:
             skipped["not in the free-agent pool the last sync read"] += 1
+            continue
+        if not valuer.outlooks[espn_id].projected:
+            skipped["valued on season-to-date actuals alone, with no projection behind them"] += 1
+            continue
+        benched = board.valuation.evidence_for(espn_id).benched()
+        if benched >= params.min_benched:
+            skipped[f"healthy and not playing for {params.min_benched} or more team games in a row"] += 1
             continue
         timing = _timing(entry, valuer.outlooks[espn_id], board.clock, board.now)
         if isinstance(timing, str):
@@ -690,6 +770,7 @@ def _move(
         payload = WaiverPayload(add_espn_id=add, drop_espn_id=drop_id, bid_amount=bid)
     else:
         payload = AddDropPayload(add_espn_id=add, drop_espn_id=drop_id)
+    params = _params(board)
     return WaiverMove(
         kind=timing.kind,
         add=valuer.outlooks[add],
@@ -706,6 +787,8 @@ def _move(
         drop_vor=None if drop_id is None else valuer.vor(drop_id),
         roster_value=roster_value,
         bidding=bidding,
+        add_evidence=_in_season(valuer.outlooks[add], board.valuation.evidence_for(add), params),
+        drop_evidence=None if drop is None else _in_season(drop, board.valuation.evidence_for(drop.espn_id), params),
     )
 
 
@@ -1054,6 +1137,13 @@ def decide_waivers(
         add_drops=effective_setting(ProposalKind.ADD_DROP, policy) != "off",
     )
     valuer = valuation.valuer(pending=pending)
+    unprojected = _unprojected(board, valuer)
+    if unprojected:
+        names = ", ".join(f"{_label(valuer.outlooks[i])} ({i})" for i in unprojected)
+        warnings.append(
+            f"{row.key}: {names}: no projection values him (an empty or missing rest-of-season line), so his value is"
+            " unknown, not zero; never dropped"
+        )
     moves, ranked, skipped = _plan(
         board,
         valuer,

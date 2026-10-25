@@ -90,6 +90,7 @@ from fm.espn.models import MatchupsView
 from fm.espn.settings import LeagueSettings, LockType, ScoringType
 from fm.model.availability import assess
 from fm.model.categories import CategoryModel, fit_categories
+from fm.model.in_season import load_evidence, load_params, role_factors
 from fm.model.projections import ESPN, BlendWeights, ProjectionSourceRegistry, source_registry
 from fm.model.scoring import Scorer
 from fm.model.simulate import (
@@ -117,7 +118,7 @@ from fm.model.valuation import (
     slot_instances,
     start_value,
 )
-from fm.model.value_nba import SEASON_PERIOD, blend_day, period_lines, team_games
+from fm.model.value_nba import SEASON_PERIOD, blend_day, expected_lines, period_lines, team_games
 from fm.proposals import PolicyError, ProposalKind, TradePayload, evaluate, find_untouchables, propose
 from fm.proposals.policy import as_utc
 from fm.sources.base import Fetched
@@ -1153,6 +1154,11 @@ def _nba_model(
     lines = {row.espn_id: dict(row.stats) for row in blended.rows if row.espn_id in players}
     if not lines:
         raise TradeError(f"league {league.key!r}: no NBA projections are stored; run fm sync")
+    # the role factor (the share of his healthy games the coach plays him) prices a healthy benchwarmer as the
+    # streaming and lineup decisions do, so a trade cannot value him on his preseason line alone
+    role = role_factors(
+        load_evidence(store, league.sport, league.season, lines, current_period=period), load_params()["nba"]
+    )
     left = tuple(range(period, last + 1))
     listed = set(schedule.scoring_periods)
     if sum(day in listed for day in left) < len(left):
@@ -1177,8 +1183,9 @@ def _nba_model(
         )
     wire_ids = frozenset(espn_id for espn_id in wire if espn_id in lines)
     if settings.is_points:
-        return _nba_points(settings, players, lines, wire_ids, schedule, left, weeks, playoff_weight, cv), players
-    return _nba_categories(settings, players, lines, wire_ids, schedule, left, weeks, cv, warnings), players
+        model = _nba_points(settings, players, lines, wire_ids, schedule, left, weeks, playoff_weight, cv, role)
+        return model, players
+    return _nba_categories(settings, players, lines, wire_ids, schedule, left, weeks, cv, warnings, role), players
 
 
 def _nba_points(
@@ -1191,13 +1198,15 @@ def _nba_points(
     weeks: Mapping[int, tuple[int, ...]] | None,
     playoff_weight: float,
     cv: float,
+    role: Mapping[int, float] | None = None,
 ) -> TradeModel:
     scorer = Scorer(settings)
     spans = dict(weeks) if weeks is not None else {0: left}
+    factors = role or {}
     outlooks: dict[int, PlayerOutlook] = {}
     for espn_id, line in lines.items():
         player = players[espn_id]
-        per_game = scorer.points(line, position=player.position)
+        per_game = scorer.points(line, position=player.position) * factors.get(espn_id, 1.0)
         weekly = {
             matchup: (per_game * team_games(schedule, player.pro_team_id, span) if player.active else 0.0)
             for matchup, span in spans.items()
@@ -1244,7 +1253,9 @@ def _nba_categories(
     weeks: Mapping[int, tuple[int, ...]] | None,
     cv: float,
     warnings: list[str],
+    role: Mapping[int, float] | None = None,
 ) -> TradeModel:
+    lines = expected_lines(lines, role)
     scaled = period_lines(lines, players.values(), schedule, left)
     if len(scaled) < 2:
         raise TradeError(f"league {settings.league_id}: category scores need at least two projected players")

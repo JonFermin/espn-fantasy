@@ -409,6 +409,29 @@ class ProjectionRepo(Repository[ProjectionRow]):
             order="scoring_period_id, source",
         )
 
+    def for_players(
+        self,
+        sport: Sport,
+        season: int,
+        espn_ids: Iterable[int],
+        *,
+        source: str,
+        kind: ProjectionKind = "actual",
+    ) -> list[ProjectionRow]:
+        """One source's lines of every period for these players (by default the actuals: season to date and the game
+        log), ordered by player and period; ids without a row are absent."""
+        ids = sorted(set(espn_ids))
+        found: list[ProjectionRow] = []
+        for chunk in _chunks(ids):
+            found.extend(
+                self._select(
+                    f"sport = ? AND season = ? AND source = ? AND kind = ? AND espn_id IN ({_marks(len(chunk))})",
+                    (sport, season, source, kind, *chunk),
+                    order="espn_id, scoring_period_id",
+                )
+            )
+        return found
+
     def delete(
         self,
         sport: Sport,
@@ -456,6 +479,20 @@ class AvailabilityRepo(Repository[AvailabilityRow]):
         return self._select(
             "sport = ? AND season = ? AND scoring_period_id = ?", (sport, season, scoring_period_id), order="espn_id"
         )
+
+    def for_players(self, sport: Sport, season: int, espn_ids: Iterable[int]) -> list[AvailabilityRow]:
+        """Every period's row for these players, ordered by player and period; ids without a row are absent."""
+        ids = sorted(set(espn_ids))
+        found: list[AvailabilityRow] = []
+        for chunk in _chunks(ids):
+            found.extend(
+                self._select(
+                    f"sport = ? AND season = ? AND espn_id IN ({_marks(len(chunk))})",
+                    (sport, season, *chunk),
+                    order="espn_id, scoring_period_id",
+                )
+            )
+        return found
 
 
 class NewsRepo(Repository[NewsItemRow]):

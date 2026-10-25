@@ -31,12 +31,14 @@ from fm.espn.settings import LeagueSettings, load_league_settings, parse_league_
 from fm.model import value_nba
 from fm.model.categories import fit_categories
 from fm.model.ids_nba import NbaCrosswalk
+from fm.model.in_season import InSeasonParams
 from fm.model.projections import (
     BLEND,
     DARKO,
     ESPN,
     BlendWeights,
     ProjectionSourceRegistry,
+    blend_line,
     blend_period,
     projection_source,
 )
@@ -44,6 +46,7 @@ from fm.model.scoring import Scorer, ScoringError
 from fm.model.value_nba import (
     DARKO_LABEL,
     DARKO_STATS,
+    IN_SEASON,
     DarkoLoader,
     EspnDayLoader,
     blend_day,
@@ -52,6 +55,7 @@ from fm.model.value_nba import (
     darko_rows,
     day_sources,
     espn_day_rows,
+    expected_line,
     marginal_lineup_value,
     per_game_line,
     per_game_lines,
@@ -59,6 +63,7 @@ from fm.model.value_nba import (
     scale_line,
     scheduled_points,
     team_games,
+    zero_line,
 )
 from fm.sources.base import RateLimiter
 from fm.sources.darko import TALENT_URL, DarkoProjection, DarkoSource, parse_talent
@@ -276,13 +281,33 @@ def test_darko_rows_join_nba_ids_to_espn_ids_through_the_crosswalk() -> None:
     playing = {str(projection.nba_id) for projection in talent() if projection.available and projection.minutes > 0}
     assert len(playing) == 12  # Cedric Coward is marked unavailable at zero minutes
     assert set(converted.unmapped) == playing - {str(JOKIC_NBA), str(JAYLEN_BROWN_NBA)}
-    assert converted.warnings == ("darko: left out 1 players projected for no minutes or marked unavailable",)
+    assert converted.warnings == ("darko: left out 1 players marked unavailable",)
 
     before_sync = darko_rows(talent(), NbaCrosswalk(()), season=SEASON, scoring_period=3, as_of=DARKO_AS_OF)
     assert before_sync.rows == ()
     assert before_sync.warnings[0] == (
         "darko: the NBA crosswalk maps none of the 12 players DARKO projects; run fm sync to save it"
     )
+
+
+def test_an_available_player_darko_projects_for_no_minutes_is_a_line_of_zeros() -> None:
+    """DARKO's "he will not play" has to reach the blend: dropped, ESPN's preseason line stood alone for a healthy
+    benchwarmer (Danny Wolf, 2026-10-24). An unavailable player is still left out: that is the injury model's job."""
+    benched = darko(JOKIC_NBA).model_copy(update={"minutes": 0.0})
+    hurt = darko(JAYLEN_BROWN_NBA).model_copy(update={"minutes": 0.0, "available": False})
+    converted = darko_rows([benched, hurt], crosswalk(), season=SEASON, scoring_period=3, as_of=DARKO_AS_OF)
+    rows = by_id(converted.rows)
+    assert set(rows) == {JOKIC}
+    assert rows[JOKIC].stats == zero_line() == {**dict.fromkeys(DARKO_STATS.values(), 0.0), "GP": 1.0}
+    assert converted.warnings == (
+        "darko: left out 1 players marked unavailable",
+        "darko: 1 available players are projected for no minutes; blended as a line of zeros",
+    )
+    # blended with equal weights, the zero line halves ESPN's per-game rate
+    espn = espn_per_game()[JOKIC]
+    blended = blend_line({ESPN: espn, DARKO: zero_line()}, {ESPN: 1.0, DARKO: 1.0}, sport="nba")
+    assert blended["PTS"] == pytest.approx(espn["PTS"] / 2) and blended["REB"] == pytest.approx(espn["REB"] / 2)
+    assert Scorer(league()).points(blended) == pytest.approx(Scorer(league()).points(espn) / 2)
 
 
 def test_darko_loader_reads_the_sheet_and_the_saved_crosswalk(store: Store, tmp_path: Path) -> None:
@@ -417,7 +442,7 @@ def test_blend_day_blends_espns_rate_with_darko(store: Store, tmp_path: Path) ->
     registry = nba_registry(DarkoLoader(DarkoServer(tmp_path / "cache").source))
     weights = BlendWeights.parse(EQUAL, sources=registry)
     result = blend_day(store, SEASON, 1, weights=weights, sources=registry)
-    assert result.warnings == ("darko: left out 1 players projected for no minutes or marked unavailable",)
+    assert result.warnings == ("darko: left out 1 players marked unavailable",)
     assert len(result.rows) == 16 and result.saved == 16 + 2 + 16  # ESPN's per-game rows, DARKO's, the blend
     assert result.blend.sources_for(JOKIC, SEASON, 1) == (DARKO, ESPN)
     assert result.blend.sources_for(CADE, SEASON, 1) == (ESPN,)
@@ -459,6 +484,69 @@ def test_blend_day_runs_on_espn_alone_when_darko_is_down(store: Store, tmp_path:
     assert by_id(store.projections.for_period("nba", SEASON, 2, source=BLEND))[JOKIC].stats == espn_per_game()[JOKIC]
 
 
+def test_blend_day_mixes_each_line_toward_the_seasons_actuals(store: Store, tmp_path: Path) -> None:
+    """Cade has played 8 games at 10 points, 2 rebounds and 3-of-6 shooting a night: with line_k 8 the season weighs
+    half, so the blend sits halfway between ESPN's per-game rate and his actual rate, stat by stat, and the percentage
+    is recomputed from the mixed makes and attempts. Everyone else keeps the raw blend."""
+    seed(store)
+    actual = {"GP": 8.0, "PTS": 80.0, "REB": 16.0, "MIN": 160.0, "FGM": 24.0, "FGA": 48.0}
+    store.projections.upsert(
+        ProjectionRow(
+            sport="nba",
+            espn_id=CADE,
+            source=ESPN,
+            kind="actual",
+            season=SEASON,
+            scoring_period_id=0,
+            stats=actual,
+            as_of=ESPN_AS_OF,
+        )
+    )
+    registry = nba_registry(DarkoLoader(DarkoServer(tmp_path / "cache", status=404).source))
+    weights = BlendWeights.parse(EQUAL, sources=registry)
+    result = blend_day(store, SEASON, 2, weights=weights, sources=registry)
+    espn = espn_per_game()[CADE]
+    mixed = by_id(result.rows)[CADE].stats
+    assert mixed["PTS"] == pytest.approx((espn["PTS"] + 10.0) / 2)
+    assert mixed["REB"] == pytest.approx((espn["REB"] + 2.0) / 2)
+    assert mixed["FGM"] == pytest.approx((espn["FGM"] + 3.0) / 2) and mixed["FGA"] == pytest.approx(
+        (espn["FGA"] + 6.0) / 2
+    )
+    assert mixed["FG%"] == pytest.approx(mixed["FGM"] / mixed["FGA"]) and mixed["GP"] == 1.0
+    assert mixed["AST"] == espn["AST"]  # not in the actual line: the projection stands
+    assert result.blend.sources_for(CADE, SEASON, 2) == (ESPN, IN_SEASON)
+    assert result.blend.sources_for(JOKIC, SEASON, 2) == (ESPN,)
+    assert by_id(result.rows)[JOKIC].stats == espn_per_game()[JOKIC]
+    assert any(
+        warning == "nba: 1 of 16 blended lines were mixed with the players' season-to-date actuals"
+        for warning in result.warnings
+    )
+    assert per_game_lines(store, SEASON, 2)[CADE] == pytest.approx(mixed)  # the adjusted line is what is stored
+
+    # the constants are a parameter: a season weighs nothing against an enormous line_k, and the mix can be skipped
+    heavy = InSeasonParams(line_k=8.0e9, role_k=2.0, role_window=10, min_benched=2)
+    raw = blend_day(store, SEASON, 2, weights=weights, sources=registry, save=False, params=heavy)
+    assert by_id(raw.rows)[CADE].stats["PTS"] == pytest.approx(espn["PTS"], abs=1e-6)
+    skipped = blend_day(store, SEASON, 2, weights=weights, sources=registry, save=False, in_season=False)
+    assert by_id(skipped.rows)[CADE].stats == espn and skipped.blend.sources_for(CADE, SEASON, 2) == (ESPN,)
+    # without a game played there is nothing to mix: the season line alone changes nothing
+    store.projections.upsert(
+        ProjectionRow(
+            sport="nba",
+            espn_id=SENGUN,
+            source=ESPN,
+            kind="actual",
+            season=SEASON,
+            scoring_period_id=0,
+            stats={"GP": 0.0, "PTS": 0.0},
+            as_of=ESPN_AS_OF,
+        )
+    )
+    again = blend_day(store, SEASON, 2, weights=weights, sources=registry, save=False)
+    assert by_id(again.rows)[SENGUN].stats == espn_per_game()[SENGUN]
+    assert again.blend.sources_for(SENGUN, SEASON, 2) == (ESPN,)
+
+
 # --- points over the schedule ---
 
 
@@ -482,6 +570,21 @@ def test_scheduled_points_are_points_per_game_times_games() -> None:
     assert doubtful[EDGECOMBE].total == pytest.approx(edgecombe.total / 2)
     assert doubtful[EDGECOMBE].expected_per_game == pytest.approx(edgecombe.per_game / 2)
     assert doubtful[CADE].total == values[CADE].total
+    # the role factor (a healthy player the coach sits) multiplies beside p_active, which stays the injury's
+    benched = scheduled_points(
+        lines, team1(), league(), schedule(), DAYS, p_active={EDGECOMBE: 0.5}, role_factor={EDGECOMBE: 0.4}
+    )
+    assert benched[EDGECOMBE].role_factor == 0.4 and benched[EDGECOMBE].p_active == 0.5
+    assert benched[EDGECOMBE].total == pytest.approx(edgecombe.total * 0.2)
+    assert benched[EDGECOMBE].per_game == edgecombe.per_game and benched[CADE].role_factor == 1.0
+    with pytest.raises(ValueError, match="role_factor of ESPN .* should be a probability"):
+        scheduled_points(lines, team1(), league(), schedule(), DAYS, role_factor={CADE: 1.5})
+    scaled = expected_line(lines[CADE], 0.5)
+    assert scaled["PTS"] == pytest.approx(lines[CADE]["PTS"] / 2) and scaled["GP"] == 1.0
+    assert scaled["FG%"] == lines[CADE]["FG%"]  # a rate is not a volume
+    assert expected_line(lines[CADE], 1.0) == lines[CADE]
+    with pytest.raises(ValueError, match="role_factor should be within"):
+        expected_line(lines[CADE], -0.1)
     unsigned = team1()[0].model_copy(update={"pro_team_id": FREE_AGENT})
     assert scheduled_points(lines, [unsigned], league(), schedule(), DAYS)[unsigned.espn_id].total == 0.0
     with pytest.raises(ValueError, match="should be a probability"):

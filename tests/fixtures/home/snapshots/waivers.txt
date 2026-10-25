@@ -21,3 +21,4 @@ nfl: Fixture League (PPR), waivers and free agents for scoring period 4 (as of 2
   10 add   Isaiah Likely (TE) Trey McBride (TE)   -117.3   160.8   +0.0    278.1   - 2026-10-04 17:00Z
   replacement level: QB nobody 0.0, RB Jaylen Warren 188.6, WR nobody 0.0, TE Isaiah Likely 160.8, D/ST nobody 0.0, K nobody 0.0, RB/WR/TE Jaylen Warren 188.6
   warning: nfl: no FAAB bid model (only 0 winning bids in the history (need 5)); bids use the heuristic
+  warning: nfl: Eagles D/ST (D/ST) (-16021), Harrison Butker (K) (3055899), Josh Allen (QB) (3918298), Chuba Hubbard (RB) (4241416), Rashid Shaheed (WR) (4249836): no projection values him (an empty or missing rest-of-season line), so his value is unknown, not zero; never dropped

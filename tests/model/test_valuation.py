@@ -23,10 +23,13 @@ import pytest
 from fm.espn.ids import FFL
 from fm.espn.models import STAT_SOURCE_PROJECTED, PlayersView, ProSchedule
 from fm.espn.settings import LeagueSettings, load_league_settings
-from fm.model.availability import assess
+from fm.model.availability import Participation, PracticeReport, assess
+from fm.model.in_season import DEFAULT_PARAMS, Evidence
 from fm.model.projections import BLEND, BlendWeights
 from fm.model.scoring import Scorer
 from fm.model.valuation import (
+    BASIS_ACTUAL_ONLY,
+    BASIS_IN_SEASON,
     BASIS_NONE,
     BASIS_SEASON,
     BASIS_SEASON_WITHOUT_GAMES,
@@ -47,6 +50,7 @@ from fm.model.valuation import (
 )
 from fm.sports.base import StatSchema
 from fm.store import (
+    AvailabilityRow,
     LeagueRow,
     LeagueSettingsRow,
     PlayerRow,
@@ -351,6 +355,129 @@ def test_a_player_out_for_the_season_is_known_to_be_worth_nothing() -> None:
     )
     assert gone.has_projection and gone.basis == BASIS_SEASON
     assert gone.value(Horizon.for_league(real_nfl())) == 0.0
+
+
+NFL_PARAMS = DEFAULT_PARAMS["nfl"]
+ACTUAL_LINE = {"REC": 50.0, "REY": 400.0, GAMES_STAT: 5.0}  # 50 + 40 = 90 PPR points over 5 games: 18 a game
+PLAYED, SAT = (1, True, True), (2, False, True)
+
+
+def evidence(*, line: Mapping[str, float] | None = ACTUAL_LINE, log: Iterable[tuple[int, bool, bool]] = ()) -> Evidence:
+    games = line.get(GAMES_STAT, 0.0) if line else 0.0
+    return Evidence(7, tuple(log), MappingProxyType(dict(line)) if line is not None else None, games)
+
+
+def test_an_empty_season_line_is_a_missing_one_not_a_known_zero() -> None:
+    """ESPN sent ``{}`` as Terry McLaurin's rest-of-season line (out one week with a hamstring); read as 0 it had a
+    WR1 dropped for a kicker. An empty line says nothing: the later weeks fall back as if there were none."""
+    common: dict[str, Any] = {"horizon": Horizon.for_league(real_nfl()), "scorer": Scorer(ppr()), "slots": frozenset()}
+    unknown = project_outlook(wr_row(), current_line={}, season_line={}, **common)
+    assert unknown.basis == BASIS_NONE
+    assert not unknown.has_projection and not unknown.projected
+    assert unknown.value(common["horizon"]) == 0.0
+    stand_in = project_outlook(wr_row(), current_line=WEEK_LINE, season_line={}, **common)
+    assert stand_in.basis == BASIS_THIS_WEEK
+    assert stand_in.expected(10) == pytest.approx(11.0)
+
+
+def test_with_an_empty_season_line_and_no_week_the_actuals_alone_value_him_but_project_nothing() -> None:
+    season = Horizon.for_league(real_nfl())
+    result = project_outlook(
+        wr_row(),
+        horizon=season,
+        scorer=Scorer(ppr()),
+        slots=frozenset({WR}),
+        current_line={},
+        season_line={},
+        p_active=0.0,  # out this week
+        evidence=evidence(),
+        schedule=pro_schedule({2: 9}),
+    )
+    assert result.basis == BASIS_ACTUAL_ONLY
+    assert result.has_projection and not result.projected  # a value, but nothing to drop him on
+    assert result.per_game == result.actual_per_game == pytest.approx(18.0)
+    assert result.projected_per_game is None and result.games is None and result.health == 1.0
+    assert result.actual_games == 5.0
+    assert result.expected(4) == 0.0  # this week: out
+    assert result.expected(9) == 0.0  # bye
+    assert result.expected(5) == result.expected(17) == pytest.approx(18.0)
+    assert result.value(season) > 0
+    assert result.evidence_moved
+
+
+def test_the_actuals_shift_the_rest_of_season_rate_by_games_played() -> None:
+    """ESPN's 12.5 a game over 10 games against 18 a game actually scored over 5: the mix weighs the actuals
+    ``5 / (5 + line_k)``, so with ``line_k`` 4 they already outweigh the preseason line."""
+    season = Horizon.for_league(real_nfl())
+    common: dict[str, Any] = {
+        "horizon": season,
+        "scorer": Scorer(ppr()),
+        "slots": frozenset({WR}),
+        "current_line": WEEK_LINE,
+        "season_line": SEASON_LINE,
+        "schedule": pro_schedule({2: 9}),
+    }
+    plain = project_outlook(wr_row(), **common)
+    mixed = project_outlook(wr_row(), evidence=evidence(), **common)
+    share = 5 / (5 + NFL_PARAMS.line_k)
+    assert mixed.basis == BASIS_IN_SEASON and mixed.projected and mixed.evidence_moved
+    assert mixed.projected_per_game == pytest.approx(12.5)
+    assert mixed.actual_per_game == pytest.approx(18.0)
+    assert mixed.per_game == pytest.approx((1 - share) * 12.5 + share * 18.0)
+    assert (mixed.games, mixed.health) == (plain.games, plain.health)  # ESPN's games and health stand
+    assert mixed.expected(4) == plain.expected(4)  # this week is this week's line, untouched
+    assert mixed.expected(5) == pytest.approx(plain.expected(5) * mixed.per_game / 12.5)
+    assert mixed.role_factor == 1.0  # no game log: no role evidence
+    unmoved = project_outlook(wr_row(), evidence=evidence(line=None), **common)
+    assert unmoved.basis == BASIS_SEASON and unmoved.weekly == plain.weekly and not unmoved.evidence_moved
+    gone = project_outlook(wr_row(), evidence=evidence(), **{**common, "season_line": {GAMES_STAT: 0.0}})
+    assert gone.basis == BASIS_SEASON and gone.per_game == 0.0  # out for the season: what he did says nothing
+
+
+def test_this_weeks_stand_in_is_mixed_with_the_actuals_too() -> None:
+    result = project_outlook(
+        wr_row(),
+        horizon=Horizon.for_league(real_nfl()),
+        scorer=Scorer(ppr()),
+        slots=frozenset({WR}),
+        current_line=WEEK_LINE,
+        evidence=evidence(),
+    )
+    share = 5 / (5 + NFL_PARAMS.line_k)
+    assert result.basis == BASIS_IN_SEASON
+    assert result.projected_per_game == pytest.approx(11.0)
+    assert result.per_game == pytest.approx((1 - share) * 11.0 + share * 18.0)
+
+
+def test_the_role_factor_lowers_the_later_weeks_of_a_healthy_scratch() -> None:
+    """Three healthy team games without playing: ``(0 + role_k) / (3 + role_k)`` of the preseason line; a player who
+    played them all keeps it whole, and this week's line and ``p_active`` are left to the weekly projection."""
+    season = Horizon.for_league(real_nfl())
+    common: dict[str, Any] = {
+        "horizon": season,
+        "scorer": Scorer(ppr()),
+        "slots": frozenset({WR}),
+        "current_line": WEEK_LINE,
+        "season_line": SEASON_LINE,
+        "p_active": 0.5,
+        "schedule": pro_schedule({2: 9}),
+    }
+    plain = project_outlook(wr_row(), **common)
+    benched = project_outlook(
+        wr_row(), evidence=evidence(line=None, log=[SAT, (2, False, True), (3, False, True)]), **common
+    )
+    factor = NFL_PARAMS.role_k / (3 + NFL_PARAMS.role_k)
+    assert benched.role_factor == pytest.approx(factor) and benched.evidence_moved
+    assert benched.basis == BASIS_SEASON and benched.per_game == plain.per_game  # the rate itself is ESPN's
+    assert benched.expected(4) == plain.expected(4) == pytest.approx(0.5 * 11.0)
+    assert benched.expected(5) == pytest.approx(plain.expected(5) * factor)
+    assert benched.expected(9) == 0.0
+    regular = project_outlook(
+        wr_row(), evidence=evidence(line=None, log=[PLAYED, (2, True, True), (3, True, True)]), **common
+    )
+    assert regular.role_factor == 1.0 and regular.weekly == plain.weekly
+    hurt = project_outlook(wr_row(), evidence=evidence(line=None, log=[(1, False, False), (2, False, False)]), **common)
+    assert hurt.role_factor == 1.0  # games missed injured never count against him
 
 
 @pytest.mark.parametrize("changes", [{"pro_team_id": 0}, {"pro_team_id": None}, {"active": False}])
@@ -679,6 +806,76 @@ def test_a_synced_league_is_valued_from_its_stored_lines(store: Store) -> None:
     assert not valuation.outlooks[RB_C].has_projection
     assert valuation.outlooks[RB_F].expected(WEEK) == pytest.approx(8.0)  # the stored blended row is ignored
     assert valuation.valuer().replacement[RB].espn_id == RB_F
+
+
+def actual(espn_id: int, period: int, stats: dict[str, float]) -> ProjectionRow:
+    """What ``fm sync`` stores of ESPN's actual lines: the season to date at period 0, one per played game after."""
+    return ProjectionRow(
+        sport="nfl",
+        espn_id=espn_id,
+        source="espn",
+        kind="actual",
+        season=SEASON,
+        scoring_period_id=period,
+        stats=stats,
+        as_of=NOW,
+    )
+
+
+def test_the_stored_actuals_move_the_valuation(store: Store) -> None:
+    """The receiver's season to date (55 points over 3 games) mixes into ESPN's 12.5 a game; the back nothing projects
+    is valued on his actuals alone, so a decision sees a value but no projection; the receiver on the wire with an
+    empty rest-of-season line (McLaurin's case) is unknown, not zero."""
+    league = seed(store)
+    store.players.upsert(player(RB_G, "RB", 9, injury_status="OUT"))
+    store.projections.upsert_many(
+        [
+            actual(WR_B, 0, {"REC": 25.0, "REY": 300.0, GAMES_STAT: 3.0}),  # 55 points: 18.33 a game
+            *(actual(WR_B, period, {"REC": 8.0, "REY": 100.0}) for period in (1, 2, 3)),
+            actual(RB_C, 0, {"RY": 240.0, GAMES_STAT: 3.0}),  # 8 a game, and nothing projects him
+            *(actual(RB_C, period, {"RY": 80.0}) for period in (1, 2, 3)),
+            projected(RB_G, "espn", 0, {}),  # an empty rest-of-season line; his Sleeper week line is 9 points
+            actual(RB_G, 0, {}),  # and no actuals either
+        ]
+    )
+    valuation = load_valuation(store, league, now=NOW, weights=EQUAL_WEIGHTS, wire=[RB_F, RB_G])
+    assert valuation.in_season == DEFAULT_PARAMS["nfl"]
+    receiver = valuation.outlooks[WR_B]
+    share = 3 / (3 + DEFAULT_PARAMS["nfl"].line_k)
+    assert receiver.basis == BASIS_IN_SEASON
+    assert receiver.actual_per_game == pytest.approx(55.0 / 3) and receiver.actual_games == 3.0
+    assert receiver.per_game == pytest.approx((1 - share) * 12.5 + share * 55.0 / 3)
+    assert valuation.evidence_for(WR_B).team_games == 3 and valuation.evidence_for(WR_B).role_factor(NFL_PARAMS) == 1.0
+    back = valuation.outlooks[RB_C]
+    assert back.basis == BASIS_ACTUAL_ONLY and back.has_projection and not back.projected
+    assert back.per_game == pytest.approx(8.0) and back.expected(WEEK + 1) == pytest.approx(8.0)
+    stranger = valuation.outlooks[RB_G]
+    assert stranger.basis == BASIS_THIS_WEEK  # the empty season line is skipped for this week's Sleeper line
+    assert stranger.per_game == pytest.approx(9.0)
+    assert valuation.evidence_for(QB_A) == Evidence(QB_A)  # nothing stored: empty evidence, factor 1
+    assert valuation.outlooks[QB_A].basis == BASIS_SEASON and valuation.outlooks[QB_A].role_factor == 1.0
+
+
+def test_the_stored_availability_rows_practice_reports_count_but_not_their_stale_number(store: Store) -> None:
+    """``fm run`` keeps the week's practice log in the period's ``availability`` row. The valuation reads the log and
+    assesses afresh from the current designation, news-free, rather than trusting the row's own ``p_active``: that
+    number may be a day old, and may carry a Claude news signal, which must never move a drop."""
+    league = seed(store)
+    receiver = store.players.get("nfl", WR_B)
+    assert receiver is not None
+    report = PracticeReport(day=NOW.date(), participation=Participation.FULL, source="nflverse")
+    fresh = assess(receiver, season=SEASON, scoring_period=WEEK, as_of=NOW, practice=[report])
+    plain = assess(receiver, season=SEASON, scoring_period=WEEK, as_of=NOW)
+    assert fresh.p_active > plain.p_active  # a full practice lifts a questionable player
+    stale = fresh.model_copy(update={"p_active": 0.01, "inputs": {**fresh.inputs, "news": {"before": fresh.p_active}}})
+    store.availability.upsert(stale)
+    valuation = load_valuation(store, league, now=NOW, weights=EQUAL_WEIGHTS)
+    assert valuation.outlooks[WR_B].p_active == pytest.approx(fresh.p_active)
+    assert valuation.outlooks[WR_B].expected(WEEK) == pytest.approx(fresh.p_active * 11.0)
+    store.availability.upsert(
+        AvailabilityRow(sport="nfl", espn_id=WR_B, season=SEASON, scoring_period_id=WEEK, p_active=0.2, as_of=NOW)
+    )
+    assert load_valuation(store, league, now=NOW, weights=EQUAL_WEIGHTS).outlooks[WR_B].p_active == plain.p_active
 
 
 def test_an_explicit_wire_replaces_the_stored_pool(store: Store) -> None:

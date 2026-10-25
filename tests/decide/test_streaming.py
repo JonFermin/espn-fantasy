@@ -42,6 +42,7 @@ from fm.espn.settings import LeagueSettings, LockType, load_league_settings
 from fm.proposals import AddDropPayload, LineupMove, LineupPayload, ProposalKind, parse_payload, propose
 from fm.sports.nba import NBA
 from fm.store import (
+    AvailabilityRow,
     LeagueRow,
     LeagueSettingsRow,
     PlayerRow,
@@ -399,6 +400,108 @@ def test_a_player_the_plan_cannot_value_is_never_dropped(store: Store) -> None:
     assert all(move.drop != 113 for move in decision.plan.moves)
     assert any("Bea Bench" in warning and "never dropped" in warning for warning in decision.warnings)
     assert decision.inputs.values.per_game.get(113) is None
+
+
+def game_log(store: Store, espn_id: int, *periods: int, stats: Mapping[str, float] | None = None) -> None:
+    """ESPN actual lines for ``espn_id`` in these past periods, as ``fm sync`` stores them: empty when he sat."""
+    for period in periods:
+        store.projections.upsert(
+            ProjectionRow(
+                sport="nba",
+                espn_id=espn_id,
+                source="espn",
+                kind="actual",
+                season=SEASON,
+                scoring_period_id=period,
+                stats=dict(stats or {}),
+                as_of=SYNCED,
+            )
+        )
+
+
+def test_a_healthy_free_agent_who_has_not_played_is_never_proposed(store: Store) -> None:
+    """Wolf-shaped (NBA #24, 2026-10-24): ESPN's preseason line gives Free One 15 a game, nothing says he is hurt, and
+    his game log shows two team games he sat. The projection does not know he is out of the rotation; the log does."""
+    league = seed(store)
+    clean = decide(store, league)
+    by_clean = {score.espn_id: score for score in clean.ranked}
+    assert 301 in by_clean and clean.inputs.model.params is not None
+    for draft in clean.drafts:  # every draft carries the in-season block, evidence or not
+        block = draft.engine_numbers["in_season"]
+        added = draft.payload.add_espn_id
+        assert added is not None
+        assert block["add"]["role_factor"] == 1.0 and block["add"]["played"] == 0 and block["add"]["unit"] == "points"
+        assert block["add"]["projected_per_game"] == pytest.approx(clean.inputs.values.per_game[added])
+        assert "actual_points_per_game" not in block["add"]  # nothing played yet
+        assert block["drop"] is not None and block["drop"]["benched"] == 0
+
+    # one healthy DNP lowers his role factor and every game's value, and the rationale says how often he has played
+    game_log(store, 301, 1)
+    once = decide(store, league)
+    by_once = {score.espn_id: score for score in once.ranked}
+    wolf = once.inputs.model.evidence[301]
+    assert wolf.benched() == 1 and once.inputs.model.role_factor(301) == pytest.approx(2 / 3)
+    assert 301 in by_once and by_once[301].value < by_clean[301].value
+    for draft in once.drafts:
+        if draft.payload.add_espn_id == 301:
+            assert draft.rationale.endswith(" Free One played 0 of 1 healthy game.")
+            assert draft.engine_numbers["in_season"]["add"]["role_factor"] == pytest.approx(2 / 3)
+
+    # two in a row (data/in_season.toml's min_benched) and he is not considered at all, whatever his projection
+    game_log(store, 301, 2)
+    benched = decide(store, league)
+    assert 301 not in {score.espn_id for score in benched.ranked}
+    assert benched.plan is not None and all(move.add != 301 for move in benched.plan.moves)
+    assert all(draft.payload.add_espn_id != 301 for draft in benched.drafts)
+    assert any(
+        warning.startswith("1 free agents sat out their last 2 or more healthy games") and "Free One (301)" in warning
+        for warning in benched.warnings
+    )
+    assert benched.inputs.model.evidence[301].benched() == 2
+
+    # a game missed injured is not a DNP: ruled OUT for game 2 (the availability rows the tick stores), his streak is
+    # the one healthy game
+    for period, designation, p_active in ((1, "ACTIVE", 1.0), (2, "OUT", 0.0)):
+        store.availability.upsert(
+            AvailabilityRow(
+                sport="nba",
+                espn_id=301,
+                season=SEASON,
+                scoring_period_id=period,
+                designation=designation,
+                p_active=p_active,
+                as_of=SYNCED,
+            )
+        )
+    hurt = decide(store, league)
+    assert 301 in {score.espn_id for score in hurt.ranked}
+    assert hurt.inputs.model.evidence[301].benched() == 1
+    assert not any("not considered" in warning for warning in hurt.warnings)
+
+    # a game he played ends the streak, and his actual points per game show up beside the projection
+    store.db.execute("DELETE FROM availability WHERE espn_id = ?", (301,))
+    game_log(store, 301, 2, stats={"MIN": 20.0, "PTS": 12.0})
+    store.projections.upsert(
+        ProjectionRow(
+            sport="nba",
+            espn_id=301,
+            source="espn",
+            kind="actual",
+            season=SEASON,
+            scoring_period_id=0,
+            stats={"GP": 1.0, "PTS": 12.0, "MIN": 20.0},
+            as_of=SYNCED,
+        )
+    )
+    played = decide(store, league, wire=pool(301))
+    evidence = played.inputs.model.evidence[301]
+    assert evidence.benched() == 0 and evidence.games == 1.0 and played.inputs.model.role_factor(301) == 0.75
+    assert played.plan is not None and [move.add for move in played.plan.moves] == [301]
+    (draft,) = [draft for draft in played.drafts if draft.payload.add_espn_id == 301]
+    block = draft.engine_numbers["in_season"]["add"]
+    assert block["actual_points_per_game"] == pytest.approx(12.0) and block["projected_per_game"] == 15.0
+    assert (block["played"], block["healthy"], block["benched"]) == (1, 2, 0)
+    assert draft.rationale.endswith(" Free One played 1 of 2 healthy games.")
 
 
 def test_a_rostered_player_without_a_players_row_is_never_dropped(store: Store) -> None:

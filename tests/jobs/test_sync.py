@@ -839,6 +839,30 @@ def test_nba_league_syncs_espn_state_and_gates_through_the_nba_crosswalk(
     assert sync_cmd.render(report)[-1] == "gate nba: 1 rostered players mapped"
 
 
+def test_every_played_periods_actuals_are_stored_as_the_game_log(job: Runner, store: Store, routes: Routes) -> None:
+    """On day 3 Jokic's card carries his day-1 line and an empty day-2 line (a game his team played without him): both
+    are stored as actuals, the empty one included, since an empty line in a played period is the DNP signal
+    ``fm.model.in_season`` reads. The current day's line is a game not yet played and is stored as before."""
+    entry = jokic_entry()
+    card = entry["playerPoolEntry"]["player"]
+    day_one = next(stat for stat in card["stats"] if stat["scoringPeriodId"] == 1 and stat["statSourceId"] == 0)
+    sat_out = {**day_one, "id": "05401800003", "externalId": "401800003", "scoringPeriodId": 2, "stats": {}}
+    card["stats"] = [*card["stats"], sat_out]
+    routes.nba_roster(entry)
+    routes.answers["mSettings"] = httpx.Response(
+        200, json={**espn_json("fba_settings_9cat.json"), "scoringPeriodId": 3}
+    )
+    report = job.run(leagues=["nba"])
+    assert report.ok
+    (league,) = report.leagues
+    assert league.scoring_period_id == 3 and league.projections == 3  # the season line, day 1 and day 2
+    log = store.projections.for_players("nba", NBA_SEASON, [JOKIC], source=ESPN_SOURCE)
+    assert [(row.scoring_period_id, row.kind) for row in log] == [(0, "actual"), (1, "actual"), (2, "actual")]
+    assert log[1].stats["PTS"] == 29.0 and log[2].stats == {}
+    assert store.projections.get("nba", JOKIC, ESPN_SOURCE, NBA_SEASON, 3, kind="actual") is None  # not played yet
+    assert all(row.as_of == T0 for row in log)
+
+
 def test_nba_gate_fails_on_a_rostered_player_whose_identity_is_in_doubt(
     job: Runner, store: Store, tmp_path: Path
 ) -> None:

@@ -1,0 +1,21 @@
+# In-season evidence constants, read by fm.model.in_season.load_params through fm.paths.data_file("in_season.toml").
+#
+# line_k       pseudo-games of projection in the production mix: after GP games the season's own per-game line has
+#              weight GP / (GP + line_k), so it overtakes the projection once GP > line_k.
+# role_k       pseudo-games of "he plays" in the role factor (played + role_k) / (healthy + role_k), over his last
+#              role_window healthy team games. A game missed injured never counts; no evidence is a factor of 1.
+# min_benched  healthy games in a row without playing after which streaming and waivers refuse to add a player.
+#
+# Starting points, not fitted: a backtest (fm.eval.tune) should replace them.
+
+[nba]
+line_k = 8.0
+role_k = 2.0
+role_window = 10
+min_benched = 2
+
+[nfl]
+line_k = 4.0
+role_k = 1.5
+role_window = 6
+min_benched = 2

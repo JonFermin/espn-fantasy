@@ -226,6 +226,11 @@ def store(tmp_path: Path) -> Iterator[Store]:
 
 NO_BID_MODEL = "nfl: no FAAB bid model (only 0 winning bids in the history (need 5)); bids use the heuristic"
 """The warning a $100 FAAB league without captured transaction history gets: its claims bid the heuristic."""
+UNPROJECTED_MYSTERY = (
+    f"nfl: Mystery Back (RB) ({MYSTERY}): no projection values him (an empty or missing rest-of-season line), so his "
+    "value is unknown, not zero; never dropped"
+)
+"""The warning the seeded roster gets for the back nothing projects."""
 
 
 def fixture_config(**policy: Any) -> Config:
@@ -285,7 +290,9 @@ def test_the_synced_league_proposes_a_claim_timed_to_its_run_and_an_add_before_k
     league = synced(store, config)
     schedule = ProSchedule.model_validate(load(FIXTURES / "sports" / "ffl_pro_schedule_2026.json"))
     decision = decide_waivers(store, config, league, now=NOW, schedule=schedule, weights=EQUAL_WEIGHTS)
-    assert decision.warnings == (NO_BID_MODEL,)
+    # the fixture cards carry no season line for most of the roster, which the decision now says out loud
+    assert decision.warnings[0] == NO_BID_MODEL
+    assert [warning for warning in decision.warnings[1:] if "never dropped" not in warning] == []
     claim, add = decision.moves
     assert (claim.kind, claim.add.name, claim.drop) == (ProposalKind.WAIVER, "Jaylen Warren", None)
     assert claim.deadline == claim.clears_at == datetime(2026, 10, 5, 16, 40, tzinfo=UTC)  # waiverProcessDate
@@ -530,6 +537,7 @@ def test_a_league_whose_roster_lock_type_is_not_mapped_gets_no_move(store: Store
     assert decision.ranked == () and decision.moves == () and decision.proposals == ()
     assert decision.warnings == (
         NO_BID_MODEL,
+        UNPROJECTED_MYSTERY,
         "nfl: 5 wire candidates skipped: the league's roster lock type FIRSTGAME_WEEKLY is not mapped, so when adds "
         "and drops close is unknown",
     )
@@ -742,6 +750,113 @@ def test_the_store_backed_league_values_like_the_hand_made_one(store: Store) -> 
     made = valuation()
     for espn_id, outlook in made.outlooks.items():
         assert stored.outlooks[espn_id].weekly == pytest.approx(dict(outlook.weekly)), espn_id
+
+
+TERRY, BENNY = 18, 106
+
+
+def actual(espn_id: int, period: int, stats: dict[str, float]) -> ProjectionRow:
+    """What ``fm sync`` stores of ESPN's actual lines: the season to date at period 0, one per played game after."""
+    return ProjectionRow(
+        sport="nfl",
+        espn_id=espn_id,
+        source=ESPN,
+        kind="actual",
+        season=SEASON,
+        scoring_period_id=period,
+        stats=stats,
+        as_of=NOW,
+    )
+
+
+def terry_lines() -> list[ProjectionRow]:
+    """ESPN's lines for Terry as the sync stored them: an empty week line, an empty rest-of-season line, and his
+    actuals (8.8 a game over 5 games, three of them in the store's game log)."""
+    empty = [
+        ProjectionRow(
+            sport="nfl", espn_id=TERRY, source=ESPN, season=SEASON, scoring_period_id=period, stats={}, as_of=NOW
+        )
+        for period in (WEEK, 0)
+    ]
+    return [
+        *empty,
+        actual(TERRY, 0, {"REY": 440.0, GAMES_STAT: 5.0}),
+        *(actual(TERRY, p, {"REY": 88.0}) for p in (1, 2, 3)),
+    ]
+
+
+def test_a_starter_with_an_empty_rest_of_season_line_and_strong_actuals_is_never_dropped(store: Store) -> None:
+    """Terry McLaurin's case (2026-10-24): out one week with a hamstring, ESPN's rest-of-season line came back ``{}``
+    and this week's line empty. Read as a known 0 he was dropped for a kicker. Now his actuals value him (8.8 a game
+    over 5 games), nothing projects him, and no move drops him; the decision says so."""
+    roster = [row for row in ROSTER if row[0] != 4]  # Will Wideout's WR spot goes to Terry
+    roster.insert(3, (TERRY, "Terry McLaurin", "WR", 12, WR, None, None))
+    seed(store, roster=roster)
+    store.players.upsert(player_row(TERRY, "Terry McLaurin", "WR", 12).model_copy(update={"injury_status": "OUT"}))
+    store.projections.upsert_many(terry_lines())
+    config = fixture_config()
+    decision = decide(store, config, store_proposals=False)
+    terry = decision.valuation.outlooks[TERRY]
+    assert terry.basis == "actual_only" and terry.per_game == pytest.approx(8.8) and not terry.projected
+    assert terry.expected(WEEK) == 0.0 and terry.expected(WEEK + 1) == pytest.approx(8.8)
+    dropped = {move.drop.espn_id for move in decision.ranked if move.drop is not None}
+    assert TERRY not in dropped and MYSTERY not in dropped and GONE in dropped
+    assert all(move.drop is None or move.drop.espn_id != TERRY for move in decision.moves)
+    warning = next(warning for warning in decision.warnings if "never dropped" in warning)
+    assert f"Terry McLaurin (WR) ({TERRY})" in warning and f"Mystery Back (RB) ({MYSTERY})" in warning
+    # on the wire the same player would be a value without a projection, and is not added either
+    wire_terry = (TERRY, "Terry McLaurin", "WR", 12, 0.0, WireStatus.FREE_AGENT, None, False)
+    seed(store, roster=[row for row in ROSTER if row[0] != 4], wire=[*WIRE, wire_terry])
+    store.projections.upsert_many(terry_lines())  # over the 0-point lines the seed wrote for a 0-a-game wire player
+    again = decide(store, config, store_proposals=False, wire=wire_of([*WIRE, wire_terry]))
+    assert again.valuation.outlooks[TERRY].basis == "actual_only"
+    assert TERRY not in {move.add.espn_id for move in again.ranked}
+    assert any("actuals alone" in warning for warning in again.warnings)
+
+
+def test_a_healthy_free_agent_who_has_not_played_is_never_added_and_actuals_explain_the_adds(store: Store) -> None:
+    """Benny's preseason line (20 a game) would make him the best add on the wire, but he sat three healthy team games
+    in a row: the role the line assumes is gone, and the decision refuses him outright. Fred's 18 a game over 5 games
+    lifts his 14-a-game line, and the proposal's numbers and rationale say so."""
+    benny = (BENNY, "Benny Benched", "WR", 24, 20.0, WireStatus.FREE_AGENT, None, False)
+    seed(store, wire=[*WIRE, benny])
+    store.projections.upsert_many(
+        [
+            *(actual(BENNY, period, {}) for period in (1, 2, 3)),  # three team games, no stats: did not play
+            actual(FRED, 0, {"REY": 900.0, GAMES_STAT: 5.0}),  # 18 a game against 14 projected
+            *(actual(FRED, period, {"REY": 180.0}) for period in (1, 2, 3)),
+        ]
+    )
+    decision = decide(store, fixture_config(), store_proposals=False, wire=wire_of([*WIRE, benny]))
+    params = decision.valuation.in_season
+    assert params is not None and decision.valuation.evidence_for(BENNY).benched() == 3 >= params.min_benched
+    assert decision.valuation.evidence_for(BENNY).role_factor(params) == pytest.approx(1.5 / 4.5)
+    assert BENNY not in {move.add.espn_id for move in decision.ranked}
+    assert any(f"{params.min_benched} or more team games in a row" in warning for warning in decision.warnings)
+    best = decision.moves[0]
+    assert best.add.espn_id == FRED and best.drop is not None
+    share = 5 / (5 + params.line_k)
+    assert best.add.basis == "in_season"
+    assert best.add.per_game == pytest.approx((1 - share) * 14.0 + share * 18.0)
+    numbers = best.engine_numbers()
+    assert numbers["add"]["in_season"] == {
+        "played": 3,
+        "healthy": 3,
+        "team_games": 3,
+        "games": 5.0,
+        "role_factor": 1.0,
+        "benched": 0,
+        "actual_per_game": 18.0,
+        "actual_games": 5.0,
+        "projected_per_game": 14.0,
+        "per_game": round(best.add.per_game, 3),
+        "moved": True,
+    }
+    assert numbers["drop"]["in_season"]["moved"] is False and numbers["drop"]["in_season"]["actual_per_game"] is None
+    assert "(Agent 18.0/g actual over 5 games vs 14.0 projected)" in best.rationale()
+    assert decision.ranked[0].rationale() == best.rationale()
+    plain = next(move for move in decision.ranked if move.add.espn_id == WALLY)
+    assert "actual" not in plain.rationale() and "role factor" not in plain.rationale()  # nothing moved Wally
 
 
 def test_a_good_add_that_drops_nobody_fires_on_its_own_and_anything_with_a_drop_waits(store: Store) -> None:

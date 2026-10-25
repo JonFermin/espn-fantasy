@@ -28,6 +28,15 @@ number) and the policy's ``max_transactions_per_week``, less the add/drop propos
 overrides it for what ESPN's own counter says). The season limit is not tracked: ESPN's counter is not in the store.
 Roster spots: a roster with no open spot drops someone for each add, and a league's position limits are kept.
 
+**Benchwarmers are never added.** A game's value already carries the role factor
+(:attr:`fm.decide.lineup_daily.DayPlayer.role_factor`, the share of his healthy games the coach plays him), but a
+healthy free agent who sat out his last ``min_benched`` or more healthy team games (``data/in_season.toml``) is not
+considered at all: a DNP-coach's-decision streak is a fact the projections do not know, and no projection is worth an
+acquisition on him until he plays. The skipped players are counted in a warning. Each draft's ``engine_numbers`` has an
+``in_season`` block for the add and the drop (:meth:`fm.model.in_season.Evidence.numbers`, plus the actual points per
+game beside the projected in a points league), and the rationale says how often the add has played when it is not
+every healthy game.
+
 **Protected players** are never dropped: the policy's untouchables, players on IR, players in other open proposals
 (add/drop and waiver claims, and the lineup proposals that move them), a player the plan cannot value (no ``players``
 row or no projection line: his value is unknown, not zero), the league's ``core`` (the best ``core_size`` players by
@@ -82,7 +91,8 @@ from fm.espn.calendar import matchup_scoring_periods
 from fm.espn.settings import LeagueSettings, LockType
 from fm.model.categories import CategoryModel
 from fm.model.projections import BlendWeights
-from fm.model.value_nba import daily_lineup_value, marginal_lineup_value, team_games
+from fm.model.scoring import Scorer
+from fm.model.value_nba import daily_lineup_value, marginal_lineup_value, season_per_game, team_games
 from fm.proposals import (
     ACQUISITION_KINDS,
     AddDropPayload,
@@ -705,6 +715,16 @@ def plan_streaming(
     usable = [i for i in wanted if i in pool_rows and i in per_game_value and pool_rows[i].pro_team_id is not None]
     if len(usable) < len(wanted):
         warnings.append(f"{len(wanted) - len(usable)} free agents have no players row or projection line; left out")
+    benched = _benched(usable, inputs)
+    if benched:
+        usable = [i for i in usable if i not in benched]
+        shown = ", ".join(f"{pool_rows[i].full_name} ({i})" for i in benched[:5])
+        shown += f" and {len(benched) - 5} more" if len(benched) > 5 else ""
+        floor = inputs.model.params.min_benched if inputs.model.params is not None else 0
+        warnings.append(
+            f"{len(benched)} free agents sat out their last {floor} or more healthy games (coach's decision) and are "
+            f"not considered: {shown}"
+        )
     usable.sort(key=lambda i: (-per_game_value[i] * team_games(schedule, pool_rows[i].pro_team_id, inputs.days), i))
     pool: dict[int, DayPlayer] = {}
     for espn_id in usable[: max(0, screen)]:
@@ -790,6 +810,40 @@ def _name(rows: Mapping[int, PlayerRow], espn_id: int | None) -> str:
     return "no one" if espn_id is None else rows[espn_id].full_name if espn_id in rows else f"ESPN {espn_id}"
 
 
+def _benched(candidates: Iterable[int], inputs: DailyInputs) -> list[int]:
+    """The candidates whose benched streak (healthy games in a row without playing) is at the constants' floor."""
+    params = inputs.model.params
+    if params is None:
+        return []
+    evidence = inputs.model.evidence
+    return [
+        espn_id
+        for espn_id in candidates
+        if (entry := evidence.get(espn_id)) is not None and entry.benched() >= params.min_benched
+    ]
+
+
+def _in_season_numbers(
+    inputs: DailyInputs, espn_id: int | None, rows: Mapping[int, PlayerRow], scorer: Scorer | None
+) -> dict[str, Any] | None:
+    """The ``in_season`` block of a draft's numbers for one player: his evidence (:meth:`Evidence.numbers`), his
+    projected per-game value in the plan's unit and, in a points league, his actual points per game this season."""
+    params = inputs.model.params
+    if espn_id is None or params is None:
+        return None
+    entry = inputs.model.evidence.get(espn_id)
+    if entry is None:
+        return None
+    numbers = entry.numbers(params)
+    numbers["unit"] = inputs.values.unit
+    numbers["projected_per_game"] = inputs.values.per_game.get(espn_id)
+    actual = season_per_game(entry)
+    if scorer is not None and actual is not None:
+        row = rows.get(espn_id)
+        numbers["actual_points_per_game"] = scorer.points(actual, position=row.position if row is not None else None)
+    return numbers
+
+
 def _drafts(
     plan: StreamPlan | None,
     ranked: Sequence[StreamerScore],
@@ -803,6 +857,7 @@ def _drafts(
     if plan is None:
         return ()
     scores = {score.espn_id: score for score in ranked}
+    scorer = Scorer(settings) if settings.is_points else None
     drafts: list[StreamDraft] = []
     for move in plan.on(target):
         add, drop = rows.get(move.add), rows.get(move.drop) if move.drop is not None else None
@@ -832,11 +887,20 @@ def _drafts(
             "acquisitions": {"limit": budget.limit, "used": budget.used, "left": budget.left},
             "days": list(inputs.days),
             "roster_as_of": inputs.roster_as_of.isoformat(),
+            "in_season": {
+                "add": _in_season_numbers(inputs, move.add, rows, scorer),
+                "drop": _in_season_numbers(inputs, move.drop, rows, scorer),
+            },
         }
         text = f"Add {_name(rows, move.add)}"
         text += f", drop {_name(rows, move.drop)}" if move.drop is not None else " (a roster spot is open)"
         extra = f" over {score.games} games, {score.open_slot_games} on open slots" if score is not None else ""
         text += f": +{move.gain:.1f} {inputs.values.unit}{extra} through day {inputs.days[-1]}."
+        evidence, params = inputs.model.evidence.get(move.add), inputs.model.params
+        if evidence is not None and params is not None and inputs.model.role_factor(move.add) < 1.0:
+            clause = evidence.describe(params)
+            if clause is not None:
+                text += f" {_name(rows, move.add)} {clause}."
         drafts.append(
             StreamDraft(
                 kind=ProposalKind.ADD_DROP,

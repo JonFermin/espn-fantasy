@@ -13,6 +13,20 @@ points per game, times the player's games that week (none on a bye, from the pro
 of his team's remaining games ESPN projects him to play (its games-played stat ``GP`` over the games left), which is
 how an injury's expected length enters.
 
+**In-season evidence** (:mod:`fm.model.in_season`, :class:`fm.model.in_season.Evidence`). ESPN's season line is a
+preseason opinion that it revises slowly, and now and then it sends none at all: a ``{}`` for a starter out this week
+with a hamstring (Terry McLaurin, week 8 2026) that, read as a known 0, had the waiver decision drop a WR1 for a kicker.
+So an empty season line is a missing one, and the later weeks fall back, in order, to this week's projection, then to
+the player's season-to-date actual points per game (his stored actual season line, ``kind='actual'``, over its ``GP``),
+and only with none of those are they unknown (:data:`BASIS_NONE`: never zero, never a reason to drop him). When a
+projected rate and actual games both exist, the rate is the two mixed (:func:`fm.model.in_season.shrink`: the actuals
+weigh ``GP / (GP + line_k)``, so the season's own numbers take over once he has played ``line_k`` games), recorded as
+:data:`BASIS_IN_SEASON`; a rate standing on his actuals alone is :data:`BASIS_ACTUAL_ONLY`, which values him but is no
+projection to drop him on. Later weeks are also multiplied by his role factor (:meth:`Evidence.role_factor`: the shrunk
+share of his recent healthy team games he played), so a healthy scratch is not worth the preseason line that assumed he
+plays. ``p_active`` and this week's line are left alone: the injury model and the weekly projection already carry this
+week. A player with no evidence is valued as before.
+
 **Which season line is rest-of-season.** ESPN sends ``ffl`` players two season projections: ``102026`` (split 0,
 "Season", what :meth:`fm.espn.models.Player.projection` reads for period 0 and :mod:`fm.jobs.sync` stores as scoring
 period 0) and ``122026`` (split 2, labelled "Rest Of Season"). The labels mislead, and the real week-4 2026 captures
@@ -57,7 +71,9 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from fm.espn.settings import LeagueSettings
-from fm.model.availability import assess
+from fm.model.availability import assess, recorded_practice
+from fm.model.in_season import DEFAULT_PARAMS as IN_SEASON_DEFAULTS
+from fm.model.in_season import Evidence, InSeasonParams, load_evidence, load_params, shrink
 from fm.model.projections import ESPN, BlendWeights, blend, position_for
 from fm.model.scoring import Scorer
 from fm.sports.base import FREE_AGENT_TEAM, ScheduleLike, plugin_for
@@ -79,7 +95,14 @@ POINT_UNIT: Final = 1000
 BASIS_SEASON: Final = "season"
 BASIS_SEASON_WITHOUT_GAMES: Final = "season_without_games"
 BASIS_THIS_WEEK: Final = "this_week"
+BASIS_IN_SEASON: Final = "in_season"
+"""A projected rate (the season line's or this week's) mixed with the player's season-to-date actuals."""
+BASIS_ACTUAL_ONLY: Final = "actual_only"
+"""Nothing projects him; his season-to-date actuals per game stand in. A value, but no projection to drop him on."""
 BASIS_NONE: Final = "none"
+
+UNPROJECTED_BASES: Final = frozenset({BASIS_NONE, BASIS_ACTUAL_ONLY})
+"""The bases under which no projection underlies a player's later weeks (:attr:`PlayerOutlook.projected`)."""
 
 
 class ValuationError(ValueError):
@@ -166,10 +189,15 @@ class Horizon:
 class PlayerOutlook:
     """One player's expected points in each period of a :class:`Horizon`, in one league's scoring.
 
-    ``slots`` are the active lineup slots he may fill. ``per_game`` is his rest-of-season points per game, ``games`` the
-    games ESPN's season line projects (``None`` when it has no ``GP``), ``health`` the share of his team's remaining
-    games that is, and ``basis`` where the later weeks came from (:data:`BASIS_SEASON` and friends). ``p_active``
-    applies to the current period only.
+    ``slots`` are the active lineup slots he may fill. ``per_game`` is his rest-of-season points per game (the
+    projection mixed with his actuals when he has any), ``games`` the games ESPN's season line projects (``None`` when
+    it has no ``GP``), ``health`` the share of his team's remaining games that is, and ``basis`` where the later weeks
+    came from (:data:`BASIS_SEASON` and friends). ``p_active`` applies to the current period only.
+
+    The in-season evidence behind the rate (the module docs): ``projected_per_game`` is the projected rate before the
+    mix (``None`` without a projection), ``actual_per_game`` his season-to-date points per game over ``actual_games``
+    played (``None`` without any), and ``role_factor`` what the later weeks were multiplied by for the games he sat
+    healthy (1 without evidence).
     """
 
     espn_id: int
@@ -183,6 +211,10 @@ class PlayerOutlook:
     health: float = 1.0
     p_active: float = 1.0
     basis: str = BASIS_NONE
+    projected_per_game: float | None = None
+    actual_per_game: float | None = None
+    actual_games: float = 0.0
+    role_factor: float = 1.0
 
     def expected(self, period: int) -> float:
         """Expected points in a period; 0 outside the horizon."""
@@ -194,8 +226,19 @@ class PlayerOutlook:
 
     @property
     def has_projection(self) -> bool:
-        """False when nothing projects him at all: his value is unknown, not zero."""
+        """False when nothing values him at all: his value is unknown, not zero."""
         return self.basis != BASIS_NONE
+
+    @property
+    def projected(self) -> bool:
+        """False when no projection underlies his later weeks: nothing at all, or his own actuals alone
+        (:data:`UNPROJECTED_BASES`). A decision drops nobody on that: the value is a stand-in, not a forecast."""
+        return self.basis not in UNPROJECTED_BASES
+
+    @property
+    def evidence_moved(self) -> bool:
+        """True when in-season evidence changed his later weeks: actuals in the rate, or a role factor below 1."""
+        return self.basis in (BASIS_IN_SEASON, BASIS_ACTUAL_ONLY) or self.role_factor < 1.0
 
 
 class _Games:
@@ -232,28 +275,78 @@ class _Games:
         return scheduled + sum(1 for period in horizon.future if not self.covers(period))
 
 
+@dataclass(frozen=True, slots=True)
+class _Rate:
+    """The later weeks' rate: ``per_game`` (after the mix), the ``projected`` rate it started from (``None`` without a
+    projection), ESPN's projected ``games``, ``health`` and ``basis``."""
+
+    per_game: float
+    projected: float | None
+    games: float | None
+    health: float
+    basis: str
+
+
+def _projected_rate(
+    season_line: Mapping[str, float] | None,
+    this_week: float | None,
+    remaining: int,
+    scorer: Scorer,
+    position: str | None,
+) -> _Rate:
+    """The rate the projections alone give. An empty season line is a missing one (the module docs): ESPN sends ``{}``
+    for a player it has no rest-of-season line for, which says nothing, not zero."""
+    if season_line:
+        total = scorer.points(season_line, position=position)
+        played = season_line.get(GAMES_STAT)
+        if played is None:
+            # No games count: spread the line over the scheduled games it spans.
+            rate = total / remaining if remaining > 0 else 0.0
+            return _Rate(rate, rate, None, 1.0, BASIS_SEASON_WITHOUT_GAMES)
+        if played <= 0:
+            return _Rate(0.0, 0.0, float(played), 0.0, BASIS_SEASON)
+        health = min(1.0, played / remaining) if remaining > 0 else 1.0
+        return _Rate(total / played, total / played, float(played), health, BASIS_SEASON)
+    if this_week is not None and this_week > 0:
+        return _Rate(this_week, this_week, None, 1.0, BASIS_THIS_WEEK)
+    # Nothing beyond an empty week (a bye, an injury): the rest of his season is unknown, not zero.
+    return _Rate(0.0, None, None, 0.0, BASIS_NONE)
+
+
 def _rate(
     season_line: Mapping[str, float] | None,
     this_week: float | None,
     remaining: int,
     scorer: Scorer,
     position: str | None,
-) -> tuple[float, float | None, float, str]:
-    """(points per game, ESPN's projected games, health, basis) for the weeks after the current one."""
-    if season_line is not None:
-        total = scorer.points(season_line, position=position)
-        played = season_line.get(GAMES_STAT)
-        if played is None:
-            # No games count: spread the line over the scheduled games it spans.
-            return (total / remaining if remaining > 0 else 0.0), None, 1.0, BASIS_SEASON_WITHOUT_GAMES
-        if played <= 0:
-            return 0.0, float(played), 0.0, BASIS_SEASON
-        health = min(1.0, played / remaining) if remaining > 0 else 1.0
-        return total / played, float(played), health, BASIS_SEASON
-    if this_week is not None and this_week > 0:
-        return this_week, None, 1.0, BASIS_THIS_WEEK
-    # Nothing beyond an empty week (a bye, an injury): the rest of his season is unknown, not zero.
-    return 0.0, None, 0.0, BASIS_NONE
+    *,
+    actual_per_game: float | None = None,
+    actual_games: float = 0.0,
+    params: InSeasonParams | None = None,
+) -> _Rate:
+    """The rate for the weeks after the current one: the projections' (:func:`_projected_rate`) mixed with the player's
+    season-to-date ``actual_per_game`` over ``actual_games`` (:func:`fm.model.in_season.shrink`,
+    :data:`BASIS_IN_SEASON`) when he has both; his actuals alone (:data:`BASIS_ACTUAL_ONLY`) when nothing projects him;
+    and the projections alone without actuals. A player ESPN projects for no games at all (``GP`` 0: out for the
+    season) keeps that 0: what he did before the injury does not say he will play again."""
+    projected = _projected_rate(season_line, this_week, remaining, scorer, position)
+    has_actuals = actual_per_game is not None and actual_games > 0 and params is not None
+    if not has_actuals or actual_per_game is None or params is None:
+        return projected
+    if projected.basis == BASIS_NONE:
+        return _Rate(actual_per_game, None, None, 1.0, BASIS_ACTUAL_ONLY)
+    if projected.games is not None and projected.games <= 0:
+        return projected
+    mixed = shrink(projected.per_game, actual_per_game, actual_games, params)
+    return _Rate(mixed, projected.projected, projected.games, projected.health, BASIS_IN_SEASON)
+
+
+def _actual_rate(evidence: Evidence | None, scorer: Scorer, position: str | None) -> tuple[float | None, float]:
+    """(season-to-date points per game, games played) from the player's stored actual season line; ``(None, 0)``
+    without a line or a game."""
+    if evidence is None or evidence.season_line is None or evidence.games <= 0:
+        return None, 0.0
+    return scorer.points(evidence.season_line, position=position) / evidence.games, evidence.games
 
 
 def _outlook(
@@ -266,6 +359,8 @@ def _outlook(
     season_line: Mapping[str, float] | None,
     p_active: float,
     games: _Games,
+    evidence: Evidence | None = None,
+    params: InSeasonParams | None = None,
 ) -> PlayerOutlook:
     if not 0.0 <= p_active <= 1.0:
         raise ValueError(f"p_active must be within [0, 1], got {p_active!r}")
@@ -273,16 +368,28 @@ def _outlook(
     team = player.pro_team_id if player.pro_team_id not in (None, FREE_AGENT_TEAM) else None
     this_week = scorer.points(current_line, position=position) if current_line is not None else None
     remaining = games.remaining(team, horizon) if team is not None else 0
-    per_game, played, health, basis = _rate(season_line, this_week, remaining, scorer, position)
+    tuning = params if params is not None else IN_SEASON_DEFAULTS[player.sport]
+    actual_per_game, actual_games = _actual_rate(evidence, scorer, position)
+    rate = _rate(
+        season_line,
+        this_week,
+        remaining,
+        scorer,
+        position,
+        actual_per_game=actual_per_game,
+        actual_games=actual_games,
+        params=tuning,
+    )
+    role = evidence.role_factor(tuning) if evidence is not None else 1.0
     weekly: dict[int, float] = {}
     for period in horizon.periods:
         if team is None or not player.active:
             weekly[period] = 0.0
         elif period == horizon.current:
-            base = this_week if this_week is not None else per_game * games.count(team, period)
+            base = this_week if this_week is not None else rate.per_game * role * games.count(team, period)
             weekly[period] = p_active * base
         else:
-            weekly[period] = per_game * health * games.count(team, period)
+            weekly[period] = rate.per_game * role * rate.health * games.count(team, period)
     return PlayerOutlook(
         espn_id=player.espn_id,
         name=player.full_name,
@@ -290,11 +397,15 @@ def _outlook(
         pro_team_id=team,
         slots=slots,
         weekly=MappingProxyType(weekly),
-        per_game=per_game,
-        games=played,
-        health=health,
+        per_game=rate.per_game,
+        games=rate.games,
+        health=rate.health,
         p_active=p_active,
-        basis=basis,
+        basis=rate.basis,
+        projected_per_game=rate.projected,
+        actual_per_game=actual_per_game,
+        actual_games=actual_games,
+        role_factor=role,
     )
 
 
@@ -308,6 +419,8 @@ def project_outlook(
     season_line: Mapping[str, float] | None = None,
     p_active: float = 1.0,
     schedule: ScheduleLike | None = None,
+    evidence: Evidence | None = None,
+    params: InSeasonParams | None = None,
 ) -> PlayerOutlook:
     """A player's expected points per period of ``horizon`` in the league ``scorer`` scores.
 
@@ -315,10 +428,14 @@ def project_outlook(
     later period is ESPN's ``season_line`` per game (its points over its ``GP``) times ``health`` (``GP`` over the
     games his team has left after the current period, at most 1) times his team's games that period: none on a bye,
     from ``schedule``; a period it does not cover, or every period without one, counts one game. A season line without
-    ``GP`` is spread over the remaining games instead; without a season line, a positive projection this week stands in
-    for every week, and with neither his later weeks are unknown (:data:`BASIS_NONE`, never a reason to drop him). A
-    player with no pro team, or not on an active pro roster, is worth 0 every week. Raises ``ValueError`` for a
-    ``p_active`` outside ``[0, 1]`` and :class:`fm.model.scoring.ScoringError` for a bad line.
+    ``GP`` is spread over the remaining games instead; without a season line, or with an empty one, a positive
+    projection this week stands in for every week; without that, his season-to-date actuals per game do
+    (``evidence``, :data:`BASIS_ACTUAL_ONLY`); and with none of those his later weeks are unknown (:data:`BASIS_NONE`,
+    never a reason to drop him). With ``evidence`` (:class:`fm.model.in_season.Evidence`) and actual games, the
+    projected rate is mixed with his actual rate (:data:`BASIS_IN_SEASON`) and the later weeks are multiplied by his
+    role factor, under ``params`` (default: the sport's :data:`fm.model.in_season.DEFAULT_PARAMS`). A player with no
+    pro team, or not on an active pro roster, is worth 0 every week. Raises ``ValueError`` for a ``p_active`` outside
+    ``[0, 1]`` and :class:`fm.model.scoring.ScoringError` for a bad line.
     """
     return _outlook(
         player,
@@ -329,6 +446,8 @@ def project_outlook(
         season_line=season_line,
         p_active=p_active,
         games=_Games(schedule),
+        evidence=evidence,
+        params=params,
     )
 
 
@@ -697,10 +816,19 @@ class LeagueValuation:
     wire: frozenset[int]
     as_of: datetime
     warnings: tuple[str, ...] = ()
+    evidence: Mapping[int, Evidence] = MappingProxyType({})
+    """Each valued player's in-season evidence (:mod:`fm.model.in_season`); empty for one with nothing stored."""
+    in_season: InSeasonParams | None = None
+    """The in-season constants the outlooks were built with (``None`` for a hand-made valuation)."""
 
     @property
     def scoring_period(self) -> int:
         return self.horizon.current
+
+    def evidence_for(self, espn_id: int) -> Evidence:
+        """A player's evidence, empty (no games, factor 1) when none was loaded."""
+        found = self.evidence.get(espn_id)
+        return found if found is not None else Evidence(espn_id)
 
     @property
     def roster(self) -> frozenset[int]:
@@ -743,6 +871,7 @@ def load_valuation(
     weights: BlendWeights | None = None,
     playoff_weight: float = DEFAULT_PLAYOFF_WEIGHT,
     include_rostered: bool = False,
+    in_season: InSeasonParams | None = None,
 ) -> LeagueValuation:
     """Outlooks for our roster and the wire of a points league, from what ``fm sync`` stored.
 
@@ -752,10 +881,17 @@ def load_valuation(
     league is valued as well (``LeagueValuation.rostered`` says who they are), for league-wide rankings, the season
     simulator and trade evaluation (ROADMAP #35, #32, #38); our roster, the wire and the replacement levels are the
     same either way. This week's lines are the stored sources blended with ``weights`` (default
-    ``data/blend_weights.toml``); later weeks come from ESPN's season lines (period 0). ``p_active`` is
-    :func:`fm.model.availability.assess` with ``schedule``, which must cover the period when given, and no news
-    signals. Players without a ``players`` row are skipped with a warning. Raises :class:`ValuationError` for a league
-    that is not synced, has no roster for our team, or is not a points league.
+    ``data/blend_weights.toml``); later weeks come from ESPN's season lines (period 0) mixed with each player's stored
+    in-season evidence (:func:`fm.model.in_season.load_evidence`: the actual season line and game log the sync keeps)
+    under ``in_season`` (default: the sport's constants from ``data/in_season.toml``).
+
+    ``p_active`` is :func:`fm.model.availability.assess` with ``schedule``, which must cover the period when given,
+    with the practice reports the stored ``availability`` row for the period recorded (``fm run`` writes them from
+    nflverse through :func:`fm.model.availability.assess_stored`) and no news signals: the designation is read fresh
+    from the ``players`` row, so a status that changed since the row was assessed counts, and a Claude-only signal
+    never moves a drop (CLAUDE.md), which the stored row's own ``p_active`` could not promise. Players without a
+    ``players`` row are skipped with a warning. Raises :class:`ValuationError` for a league that is not synced, has no
+    roster for our team, or is not a points league.
     """
     _require_aware(now)
     resolved = settings if settings is not None else league_settings(store, league)
@@ -799,10 +935,18 @@ def load_valuation(
     }
     scorer = Scorer(resolved)
     games = _Games(schedule)
+    params = in_season if in_season is not None else load_params()[sport]
+    evidence = load_evidence(store, sport, season, players, current_period=period)
+    stored = {
+        row.espn_id: row for row in store.availability.for_period(sport, season, period) if row.espn_id in players
+    }
     outlooks: dict[int, PlayerOutlook] = {}
     for espn_id, player in players.items():
+        practice = recorded_practice(stored.get(espn_id)) if sport == "nfl" else ()
         try:
-            availability = assess(player, season=season, scoring_period=period, as_of=now, schedule=schedule)
+            availability = assess(
+                player, season=season, scoring_period=period, as_of=now, schedule=schedule, practice=practice
+            )
         except ValueError as exc:
             raise ValuationError(f"league {league.key!r}: {exc}") from exc
         outlooks[espn_id] = _outlook(
@@ -814,6 +958,8 @@ def load_valuation(
             season_line=season_lines.get(espn_id),
             p_active=availability.p_active,
             games=games,
+            evidence=evidence.get(espn_id),
+            params=params,
         )
     if not horizon.playoffs_known:
         warnings.append(f"{league.key}: playoff periods are not listed in scoring periods; none weighted up")
@@ -828,4 +974,6 @@ def load_valuation(
         wire=frozenset(pool - rostered) & frozenset(outlooks),
         as_of=now,
         warnings=tuple(warnings),
+        evidence=MappingProxyType(evidence),
+        in_season=params,
     )
