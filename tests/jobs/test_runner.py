@@ -573,6 +573,13 @@ def test_poll_errors_back_off_doubling_and_are_alerted_once(world: World) -> Non
     assert backoffs[:4] == [2.0, 4.0, 8.0, 16.0]
 
 
+def test_a_poll_error_that_recovers_on_the_retry_is_only_logged(world: World) -> None:
+    world.channel.errors = [NotifyError("WinError 10054"), NotifyError("WinError 10054")]
+    stats = world.run(max_ticks=2)
+    assert stats.poll_failures == 2 and stats.ticks == 2
+    assert world.channel.titles() == []
+
+
 def test_a_press_that_blows_up_is_alerted_and_the_loop_goes_on(world: World) -> None:
     def broken(store: Store, channel: NotifyChannel, reply: Reply, *, now: datetime | None) -> DecisionResult | None:
         raise OSError("disk full")
