@@ -871,6 +871,16 @@ def test_sync_runs_only_when_the_stored_state_is_stale(world: World) -> None:
     assert world.syncs == [("nfl",)]
 
 
+def test_rosters_from_an_earlier_period_are_synced_even_when_the_state_is_fresh(world: World) -> None:
+    world.decision_payload = None
+    world.roster(ALLGEIER)
+    world.store.db.execute("UPDATE roster_snapshots SET scoring_period_id = ?", (WEEK - 1,))  # fresh, but last week's
+    report = world.tick()
+    assert world.syncs == [("nfl",)] and report.leagues[0].synced
+    world.tick(now=NOW + timedelta(minutes=10), options=TickOptions(sync=False, executor=FAST))
+    assert world.syncs == [("nfl",)]
+
+
 def test_a_league_never_synced_is_skipped_without_a_session(world: World) -> None:
     world.session = NotLoggedInError("no session")
     world.store.db.execute("DELETE FROM league_settings")

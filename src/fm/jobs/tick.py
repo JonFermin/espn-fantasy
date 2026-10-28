@@ -165,7 +165,9 @@ STATE_FILE = "tick-state.json"
 DECIDED_BY_TICK = "tick"
 """``decided_by`` of the proposals the tick rejects as executed alternatives."""
 SYNC_MAX_AGE = timedelta(hours=1)
-"""A league whose stored state is older than this is synced before its decisions run."""
+"""A league whose stored state is older than this is synced before its decisions run. So is one whose rosters are
+for an earlier scoring period than the pro schedule's current one: at a period turn the decisions due at the opening
+need the new period's rosters, and the stored state can be minutes old."""
 INPUTS_EVERY: Mapping[Sport, timedelta] = {"nfl": timedelta(hours=8), "nba": timedelta(hours=1)}
 """How often the availability inputs are refreshed: nflverse practice reports a few times a day, the NBA official
 injury report (published through the afternoon of a game day) hourly."""
@@ -857,6 +859,10 @@ class _Tick:
                     skipped="no pro schedule",
                 )
             period = plugin.scoring_period_at(self.now, schedule)
+            if period is not None and not synced and self._behind(row, period):
+                synced = self._sync(league, warnings)
+                row = self.store.leagues.by_key(key) or row
+                settings = stored_settings(self.store, row) or settings
             final = settings.final_scoring_period
             if period is None or (final is not None and period > final):
                 return LeagueTick(
@@ -938,6 +944,13 @@ class _Tick:
             notes=tuple(notes),
             warnings=tuple(warnings),
         )
+
+    def _behind(self, row: LeagueRow, period: int) -> bool:
+        """Whether the league's rosters were synced for a scoring period before ``period`` (and a sync may run)."""
+        if not (self.options.sync and self.session.usable) or row.row_id is None:
+            return False
+        latest = self.store.rosters.latest_period(row.row_id)
+        return latest is not None and latest < period
 
     def _sync(self, league: League, warnings: list[str]) -> bool:
         try:
