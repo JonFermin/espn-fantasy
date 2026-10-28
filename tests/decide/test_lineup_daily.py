@@ -681,6 +681,7 @@ def test_the_decision_proposes_the_target_days_drafts_once(store: Store) -> None
     kinds = [row.kind for row in first.proposals]
     assert kinds == [ProposalKind.BENCH_INACTIVE.value, ProposalKind.LINEUP.value][: len(kinds)] and kinds
     assert first.blocked == ()
+    assert (first.planned_periods, first.created_by) == ((DAY,), DAILY_LINEUP_CREATED_BY)  # today only by default
     for row in first.proposals:
         assert row.created_by == DAILY_LINEUP_CREATED_BY and row.scoring_period_id == DAY
         assert row.deadline == FIRST_TIP - timedelta(0)  # the earliest lock among the moved: the 7:30 p.m. ET tip

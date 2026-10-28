@@ -1235,6 +1235,7 @@ def test_propose_lineup_stores_each_draft_under_its_policy_once(store: Store) ->
     assert (best.kind, best.policy, best.status) == ("lineup", "auto", "proposed")  # lineup defaults to auto
     assert {rescue.created_by, best.created_by} == {CREATED_BY}
     assert (rescue.scoring_period_id, rescue.deadline) == (WEEK, SUNDAY_1PM)
+    assert (result.planned_periods, result.created_by) == ((WEEK,), CREATED_BY)  # what a re-plan supersedes
     assert parse_payload(rescue) == result.decision.drafts[0].payload
     assert parse_payload(best) == result.decision.drafts[1].payload
     assert rescue.engine_numbers["moves"][0]["name"] == "George Kittle"  # the player leaving the lineup comes first

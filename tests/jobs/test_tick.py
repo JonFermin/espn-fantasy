@@ -74,6 +74,7 @@ from fm.jobs.tick import (
     execute_on_approval,
     refresh_nfl_inputs,
     tick,
+    withdraw_superseded,
 )
 from fm.model.availability import NEWS_BOUND
 from fm.model.ids import GSIS
@@ -86,6 +87,7 @@ from fm.proposals import (
     ProposalKind,
     TradePayload,
     approve,
+    auto_approve_due,
     begin_execution,
     get_proposal,
     pause,
@@ -372,6 +374,8 @@ class World:
         self.decision_payload: LineupPayload | None = SWAP
         self.drafts: list[tuple[ProposalKind, Payload, str]] = []
         """(kind, payload, engine rationale) the lineup decision proposes besides ``decision_payload``."""
+        self.planned_periods: tuple[int, ...] = ()
+        """What the lineup decision says it planned (empty: it supersedes nothing, like a non-lineup decision)."""
         self.decision_error: Exception | None = None
         self.registry = DecisionRegistry()
         self.registry.register("nfl", "lineup", self.lineup_decision)
@@ -484,8 +488,9 @@ class World:
         drafts = list(self.drafts)
         if self.decision_payload is not None:
             drafts.insert(0, (ProposalKind.LINEUP, self.decision_payload, ""))
+        planned = {"planned_periods": self.planned_periods, "created_by": "decide.fake"}
         if not drafts:
-            return SimpleNamespace(proposals=(), blocked=(), warnings=())
+            return SimpleNamespace(proposals=(), blocked=(), warnings=(), **planned)
         rows = [
             propose(
                 store,
@@ -503,7 +508,7 @@ class World:
             )
             for kind, payload, rationale in drafts
         ]
-        return SimpleNamespace(proposals=tuple(rows), blocked=(), warnings=("fake lineup warning",))
+        return SimpleNamespace(proposals=tuple(rows), blocked=(), warnings=("fake lineup warning",), **planned)
 
     def waivers_decision(self, store: Store, config: Config, league: LeagueRow, *, now: datetime, **kwargs: Any) -> Any:
         self.calls.append(DecisionCall("waivers", league, {"now": now, **kwargs}))
@@ -657,6 +662,47 @@ def test_a_due_window_runs_its_decisions_once_and_pushes_the_proposal(world: Wor
     (league_again,) = again.leagues
     assert league_again.due == () and league_again.decisions == () and len(world.calls) == 1
     assert len(world.channel.notices) == 1 and league_again.notified == ()
+
+
+def test_a_re_plan_withdraws_the_unanswered_proposals_it_no_longer_makes(world: World) -> None:
+    opening = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)  # the period opening plans the week
+    world.planned_periods = (WEEK,)
+    report = world.tick(now=opening)
+    (morning,) = next(run for run in report.leagues[0].decisions if run.name == "nfl:lineup").proposals
+
+    world.decision_payload = None  # the roster moved on (the user set it in the app): the pre-lock plan is empty
+    report = world.tick()
+    (run,) = report.leagues[0].decisions
+    assert run.proposals == () and run.withdrawn == (morning,)
+    row = world.store.proposals.get(morning)
+    assert row is not None and row.status == "rejected" and row.decided_by == DECIDED_BY_TICK
+    assert f"withdrew #{morning} (superseded)" in run.describe()
+    assert auto_approve_due(world.store, now=LOCK - timedelta(minutes=15)) == []
+
+
+def test_a_re_plan_keeps_what_it_proposes_again_approved_proposals_and_other_periods(world: World) -> None:
+    opening = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+    world.planned_periods = (WEEK,)
+    report = world.tick(now=opening)
+    (same,) = next(run for run in report.leagues[0].decisions if run.name == "nfl:lineup").proposals
+    report = world.tick()  # the same plan: the open proposal is handed back, not withdrawn
+    (run,) = report.leagues[0].decisions
+    assert run.proposals == (same,) and run.withdrawn == ()
+
+    league = world.store.leagues.by_key("nfl")
+    assert league is not None
+    other_week = SimpleNamespace(proposals=(), planned_periods=(WEEK + 1,), created_by="decide.fake")
+    assert withdraw_superseded(world.store, league, other_week, now=NOW) == ()
+    someone_else = SimpleNamespace(proposals=(), planned_periods=(WEEK,), created_by="decide.other")
+    assert withdraw_superseded(world.store, league, someone_else, now=NOW) == ()
+    not_a_lineup = SimpleNamespace(proposals=())  # no planned periods: every decision but the lineups
+    assert withdraw_superseded(world.store, league, not_a_lineup, now=NOW) == ()
+
+    approve(world.store, same, decided_by="test", now=NOW)
+    gone = SimpleNamespace(proposals=(), planned_periods=(WEEK,), created_by="decide.fake")
+    assert withdraw_superseded(world.store, league, gone, now=NOW) == ()  # the user's approval stands
+    row = world.store.proposals.get(same)
+    assert row is not None and row.status == "approved"
 
 
 def test_the_period_opening_runs_every_registered_decision(world: World) -> None:

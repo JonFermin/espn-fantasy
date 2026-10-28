@@ -891,6 +891,13 @@ class LineupProposals:
     decision: LineupDecision
     proposals: tuple[ProposalRow, ...] = ()
     blocked: tuple[str, ...] = ()
+    created_by: str = CREATED_BY
+
+    @property
+    def planned_periods(self) -> tuple[int, ...]:
+        """The scoring periods this run planned: an open proposal of ours for one of them that the run did not hand
+        back is superseded (:func:`fm.jobs.tick.withdraw_superseded`)."""
+        return (self.decision.inputs.scoring_period_id,)
 
 
 def _digest(parts: Iterable[object]) -> str:

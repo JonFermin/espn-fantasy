@@ -875,11 +875,14 @@ approvals wait for the next tick. The scheduled tick's log is `logs/tick.log`.
 1. Reconcile what a killed process left executing, and expire every proposal whose deadline has passed (an approved
    or auto proposal that expired unexecuted is alerted as missed).
 2. Check the session, and record the verdict in `tick-state.json` for the health checks.
-3. Per league: refresh stale data (sync when older than an hour); compute upcoming deadlines (kickoffs and tips from
+3. Per league: refresh stale data (sync when older than an hour, or when the rosters are for an earlier scoring
+   period than the pro schedule's current one); compute upcoming deadlines (kickoffs and tips from
    the pro schedule, the waiver run from league settings); alert the windows missed since the last tick; poll and
    store the news on its cadence (NBA 30 min, NFL 1 h) and have the advisor triage it (§10); refresh the availability
    inputs (a few times a day, and at once when the triage stored new signals); run the decisions that are due, once
-   per window, the advisor breaking cited near-ties in lineups under 6 h from a lock; in the weekly window (Monday
+   per window, the advisor breaking cited near-ties in lineups under 6 h from a lock (a lineup re-plan withdraws
+   the unanswered proposals of an earlier run for the same periods that it no longer makes, so a stale plan is
+   never auto-approved at T-15; an approved one stays); in the weekly window (Monday
    09:00 ET until the matchup period turns, once per period) run the weekly strategist and write and push the weekly
    report; have the advisor explain the run's new non-trivial proposals and draft the pitch of each new trade offer;
    push new proposals to the phone. News and advisor failures are warnings, never a skipped league.

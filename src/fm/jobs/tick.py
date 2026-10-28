@@ -535,13 +535,18 @@ class DecisionRun:
     blocked: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     error: str | None = None
+    withdrawn: tuple[int, ...] = ()
+    """Unanswered proposals of an earlier run that this one superseded (:func:`withdraw_superseded`)."""
 
     def describe(self) -> str:
         if self.error is not None:
             return f"{self.name} ({self.window}): FAILED: {self.error}"
         ids = ", ".join(f"#{pid}" for pid in self.proposals) or "no proposals"
         blocked = f", {len(self.blocked)} blocked by policy" if self.blocked else ""
-        return f"{self.name} ({self.window}): {ids}{blocked}"
+        withdrawn = (
+            f", withdrew {', '.join(f'#{pid}' for pid in self.withdrawn)} (superseded)" if self.withdrawn else ""
+        )
+        return f"{self.name} ({self.window}): {ids}{blocked}{withdrawn}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1116,7 +1121,15 @@ class _Tick:
         proposals = tuple(row.row_id for row in _rows(getattr(result, "proposals", ())))
         blocked = tuple(_strings(getattr(result, "blocked", ())))
         warnings = tuple(_strings(getattr(result, "warnings", ())))
-        return DecisionRun(registration.name, window.key, proposals=proposals, blocked=blocked, warnings=warnings)
+        withdrawn = withdraw_superseded(ctx.store, ctx.row, result, now=self.now)
+        return DecisionRun(
+            registration.name,
+            window.key,
+            proposals=proposals,
+            blocked=blocked,
+            warnings=warnings,
+            withdrawn=tuple(row.row_id for row in withdrawn),
+        )
 
     # --- rationales
 
@@ -1584,6 +1597,27 @@ def execute_proposal(
     )
 
 
+def withdraw_superseded(store: Store, league: LeagueRow, result: object, *, now: datetime) -> tuple[ProposalRow, ...]:
+    """Reject the unanswered (``proposed``) proposals a decision made in an earlier run for a period ``result`` just
+    planned again (its ``planned_periods``, by its ``created_by``) and did not hand back: the new plan replaced them,
+    so they must not be auto-approved at T-15 against a roster that has moved on. An approved proposal is the user's
+    and stays; a result that names no planned periods (every decision but the lineups) withdraws nothing."""
+    periods = set(_ints(getattr(result, "planned_periods", ())))
+    created_by = getattr(result, "created_by", None)
+    if not periods or not isinstance(created_by, str) or league.row_id is None:
+        return ()
+    kept = {row.row_id for row in _rows(getattr(result, "proposals", ()))}
+    withdrawn: list[ProposalRow] = []
+    for other in store.proposals.find(league_id=league.row_id, statuses=("proposed",)):
+        if other.row_id in kept or other.created_by != created_by or other.scoring_period_id not in periods:
+            continue
+        try:
+            withdrawn.append(reject(store, other.row_id, decided_by=DECIDED_BY_TICK, now=now))
+        except ProposalError as exc:  # decided or expired in the meantime
+            logger.info("tick: superseded #%d not withdrawn: %s", other.row_id, exc)
+    return tuple(withdrawn)
+
+
 def reject_alternatives(store: Store, executed: ProposalRow, *, now: datetime | None = None) -> tuple[ProposalRow, ...]:
     """Reject the league's open proposals drafted against the same roster read as ``executed`` (the same
     ``engine_numbers["basis"]``): alternatives to a move that has landed, which would otherwise be auto-approved at
@@ -1665,6 +1699,12 @@ def _rows(value: object) -> list[ProposalRow]:
     if isinstance(value, Iterable) and not isinstance(value, str | bytes):
         return [item for item in value if isinstance(item, ProposalRow)]
     return []
+
+
+def _ints(value: object) -> list[int]:
+    if not isinstance(value, Iterable) or isinstance(value, str):
+        return []
+    return [item for item in value if isinstance(item, int) and not isinstance(item, bool)]
 
 
 def _strings(value: object) -> list[str]:

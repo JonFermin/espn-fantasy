@@ -1258,6 +1258,10 @@ class DailyLineupProposals:
     decision: DailyLineupDecision
     proposals: tuple[ProposalRow, ...] = ()
     blocked: tuple[str, ...] = ()
+    planned_periods: tuple[int, ...] = ()
+    """The days this run drafted for: an open proposal of ours for one of them that the run did not hand back is
+    superseded (:func:`fm.jobs.tick.withdraw_superseded`)."""
+    created_by: str = DAILY_LINEUP_CREATED_BY
 
     @property
     def warnings(self) -> tuple[str, ...]:
@@ -1547,7 +1551,12 @@ def propose_daily_lineup(
             )
         except PolicyError as exc:
             blocked.append(str(exc))
-    return DailyLineupProposals(decision=decision, proposals=tuple(stored), blocked=tuple(blocked))
+    return DailyLineupProposals(
+        decision=decision,
+        proposals=tuple(stored),
+        blocked=tuple(blocked),
+        planned_periods=decision.inputs.days[: days_ahead + 1],
+    )
 
 
 _registry.register("nba", DAILY_LINEUP_KIND, propose_daily_lineup)
