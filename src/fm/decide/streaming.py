@@ -23,9 +23,10 @@ over doing nothing.
 
 **Limits** are read from the league. The acquisitions a matchup allows are
 ``AcquisitionSettings.matchup_limit_for(days)`` (ESPN encodes "3 per weekly matchup" as 3/7 per day; never the raw
-number) and the policy's ``max_transactions_per_week``, less the add/drop proposals the matchup already holds
-(:func:`fm.proposals.acquisitions_this_week`, the count :func:`fm.proposals.evaluate` enforces; ``acquisitions_used``
-overrides it for what ESPN's own counter says). The season limit is not tracked: ESPN's counter is not in the store.
+number) and the policy's ``max_transactions_per_week``, less the acquisitions the matchup already used
+(:func:`fm.proposals.acquisitions_this_week`, the count :func:`fm.proposals.evaluate` enforces: ESPN's per-matchup
+counter as of the last sync, adds made in the ESPN app included, plus fm's moves it does not show yet;
+``acquisitions_used`` overrides it). The season limit is not tracked.
 Roster spots: a roster with no open spot drops someone for each add, and a league's position limits are kept.
 
 **Benchwarmers are never added.** A game's value already carries the role factor

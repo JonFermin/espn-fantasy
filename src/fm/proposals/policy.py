@@ -49,7 +49,7 @@ from fractions import Fraction
 from typing import Final, cast
 
 from fm.config import Approval, Config, League, Policy, Sport
-from fm.espn.calendar import matchup_scoring_periods
+from fm.espn.calendar import matchup_period_of, matchup_scoring_periods
 from fm.espn.settings import LeagueSettings
 from fm.proposals.pause import pause_state
 from fm.proposals.payloads import (
@@ -441,12 +441,44 @@ def acquisitions_this_week(
     (:func:`fm.espn.calendar.matchup_scoring_periods`: the real NBA league's weekly matchups, days 1-6, 7-13, ...).
     Otherwise it is every row created in the seven days before ``now``: without settings, a period or a calendar for the
     season; reading a week id as a day would count one day's moves against a seven-day cap.
+
+    When the last sync read ESPN's own counter for our team's matchup (:func:`espn_matchup_acquisitions`), that is the
+    base instead, so adds made in the ESPN app count too, and only the rows the counter cannot hold yet are added: the
+    ones still open, and the ones executed after that sync.
     """
     rows = store.proposals.find(
         league_id=league.row_id, statuses=COUNTED_STATUSES, kinds=[kind.value for kind in ACQUISITION_KINDS]
     )
     in_week = week_filter(settings, scoring_period_id, now)
-    return sum(1 for row in rows if in_week(row))
+    held = [row for row in rows if in_week(row)]
+    espn = espn_matchup_acquisitions(store, league, settings, scoring_period_id)
+    if espn is None:
+        return len(held)
+    used, read_at = espn
+    return used + sum(1 for row in held if _after_counter(row, read_at))
+
+
+def espn_matchup_acquisitions(
+    store: Store, league: LeagueRow, settings: LeagueSettings | None, scoring_period_id: int | None
+) -> tuple[int, datetime] | None:
+    """ESPN's count of our team's acquisitions in the matchup containing ``scoring_period_id`` and when the sync read
+    it, or ``None`` when no sync stored the counter or the matchup cannot be told."""
+    if settings is None or scoring_period_id is None or league.row_id is None:
+        return None
+    team = store.teams.get(league.row_id, league.team_id)
+    if team is None or team.matchup_acquisitions is None:
+        return None
+    matchup = matchup_period_of(settings, scoring_period_id)
+    if matchup is None:
+        return None
+    return int(team.matchup_acquisitions.get(str(matchup), 0)), as_utc(team.as_of)
+
+
+def _after_counter(row: ProposalRow, read_at: datetime) -> bool:
+    """Whether ``row`` holds a slot ESPN's counter read at ``read_at`` does not show: open, or executed since."""
+    if row.status != "verified":
+        return True
+    return row.token_consumed_at is None or as_utc(row.token_consumed_at) > read_at
 
 
 def week_filter(

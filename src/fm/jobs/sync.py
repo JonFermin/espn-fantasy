@@ -438,6 +438,9 @@ def _team_row(league_id: int, team: Team, as_of: datetime) -> TeamRow:
         playoff_seed=team.playoff_seed,
         waiver_rank=team.waiver_rank,
         acquisition_budget_spent=team.transaction_counter.acquisition_budget_spent,
+        matchup_acquisitions={
+            str(matchup): count for matchup, count in team.transaction_counter.matchup_acquisition_totals.items()
+        },
         as_of=as_of,
     )
 

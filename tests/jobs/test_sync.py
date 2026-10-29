@@ -503,6 +503,8 @@ def test_sync_populates_the_store_from_fixtures(job: Runner, store: Store) -> No
     )
     assert (leader.playoff_seed, leader.waiver_rank, leader.acquisition_budget_spent) == (1, 10, 41)
     assert teams[9].name == "Fixture Ten" and teams[0].acquisition_budget_spent == 23
+    assert leader.matchup_acquisitions == {"1": 1, "3": 1}  # ESPN's counter, the adds made in the app included
+    assert teams[3].matchup_acquisitions == {}  # read, and none yet: not None, which means never read
 
     ours = store.rosters.team(row.row_id, WEEK, 1)
     assert len(ours) == 11 and len(store.rosters.team(row.row_id, WEEK, 2)) == 3

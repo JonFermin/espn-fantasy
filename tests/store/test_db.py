@@ -70,14 +70,28 @@ def workers(db: Database) -> list[str]:
     return [row["worker"] for row in db.all("SELECT worker FROM llm_usage ORDER BY id")]
 
 
-def test_fresh_database_migrates_to_v1(db: Database) -> None:
+MIGRATIONS = [(1, "v1_schema"), (2, "matchup_acquisitions")]
+LATEST = len(MIGRATIONS)
+
+
+def test_fresh_database_migrates_to_the_latest_schema(db: Database) -> None:
     assert schema_version(db) == 0
     assert applied_migrations(db) == []
     applied = migrate(db)
-    assert [(m.version, m.name) for m in applied] == [(1, "v1_schema")]
-    assert schema_version(db) == 1
-    assert applied_migrations(db) == [(1, "v1_schema")]
+    assert [(m.version, m.name) for m in applied] == MIGRATIONS
+    assert schema_version(db) == LATEST
+    assert applied_migrations(db) == MIGRATIONS
     assert user_tables(db) == V1_TABLES | {"schema_migrations"}
+
+
+def test_a_v1_database_gains_the_matchup_acquisitions_column(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    v1, *later = available_migrations()
+    monkeypatch.setattr("fm.store.db.available_migrations", lambda: (v1,))
+    migrate(db)
+    monkeypatch.setattr("fm.store.db.available_migrations", lambda: (v1, *later))
+    assert [m.name for m in migrate(db)] == ["matchup_acquisitions"]
+    columns = {row["name"] for row in db.all("PRAGMA table_info(teams)")}
+    assert "matchup_acquisitions" in columns
 
 
 def test_remigrate_is_idempotent(db: Database) -> None:
@@ -97,7 +111,7 @@ def test_reopening_an_existing_database_applies_nothing(tmp_path: Path) -> None:
         first.execute(INSERT_USAGE, (STAMP, "a", "m"))
     with Database.open(path) as second:
         assert migrate(second) == []
-        assert schema_version(second) == 1
+        assert schema_version(second) == LATEST
         assert workers(second) == ["a"]
 
 
@@ -127,7 +141,8 @@ def test_migration_files_are_well_formed() -> None:
 def test_newer_database_is_refused(db: Database) -> None:
     migrate(db)
     db.execute(
-        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)", (2, "from_the_future", STAMP)
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+        (LATEST + 1, "from_the_future", STAMP),
     )
     with pytest.raises(SchemaError, match="newer"):
         migrate(db)
@@ -141,12 +156,14 @@ def test_mismatched_migration_name_is_refused(db: Database) -> None:
 
 
 def test_failed_migration_rolls_back_completely(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
-    (v1,) = available_migrations()
-    broken = Migration(2, "broken", "CREATE TABLE half_done (id INTEGER PRIMARY KEY) STRICT;\nCREATE TABLE nope (;")
-    monkeypatch.setattr("fm.store.db.available_migrations", lambda: (v1, broken))
+    good = available_migrations()
+    broken = Migration(
+        len(good) + 1, "broken", "CREATE TABLE half_done (id INTEGER PRIMARY KEY) STRICT;\nCREATE TABLE nope (;"
+    )
+    monkeypatch.setattr("fm.store.db.available_migrations", lambda: (*good, broken))
     with pytest.raises(sqlite3.OperationalError):
         migrate(db)
-    assert schema_version(db) == 1
+    assert schema_version(db) == LATEST
     assert "half_done" not in user_tables(db)
     assert not db.in_transaction
     # The good migration is in place and usable.
@@ -206,7 +223,7 @@ def test_store_open_uses_state_db_under_config_dir(tmp_path: Path) -> None:
         assert store.db.path is not None
         assert store.db.path == paths.state_db() == tmp_path / "config" / "state.db"
         assert store.db.path.exists()
-        assert schema_version(store.db) == 1
+        assert schema_version(store.db) == LATEST
     with Store.open() as reopened:
         assert migrate(reopened.db) == []
 
@@ -214,5 +231,5 @@ def test_store_open_uses_state_db_under_config_dir(tmp_path: Path) -> None:
 def test_store_open_in_memory() -> None:
     with Store.open(":memory:") as store:
         assert store.db.path is None
-        assert schema_version(store.db) == 1
+        assert schema_version(store.db) == LATEST
         assert user_tables(store.db) == V1_TABLES | {"schema_migrations"}

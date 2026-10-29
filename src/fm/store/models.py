@@ -138,6 +138,9 @@ class TeamRow(Row):
     waiver_rank: int | None = None
     acquisition_budget_spent: int = 0
     as_of: UtcDatetime
+    matchup_acquisitions: JsonDict | None = None
+    """ESPN's acquisitions per matchup period (``transactionCounter.matchupAcquisitionTotals``, keyed by the matchup
+    period id as a string), moves made in the ESPN app included; ``None`` until a sync read it."""
 
 
 class PlayerRow(Row):

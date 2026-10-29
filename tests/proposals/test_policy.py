@@ -44,7 +44,7 @@ from fm.proposals import (
     resume,
     validate_setting,
 )
-from fm.store import LeagueRow, LeagueSettingsRow, PlayerRow, ProposalRow, Store
+from fm.store import LeagueRow, LeagueSettingsRow, PlayerRow, ProposalRow, Store, TeamRow
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
@@ -507,6 +507,40 @@ class TestWeeklyCap:
         assert add_drop(store, config, league, 5, period=7).status == "proposed"
         with pytest.raises(PolicyError, match="4 of 4 transactions already used this week"):
             add_drop(store, config, league, 6, period=6)  # the day-7 move does not touch matchup 1's count
+
+    def test_espns_counter_counts_adds_made_in_the_app(self, store: Store, config: Config) -> None:
+        """ESPN's ``matchupAcquisitionTotals`` (stored by the sync) is the base: three adds made in the ESPN app use
+        the matchup's three, which fm's own proposals alone would call 0 of 3. A move of fm's is added while it is open
+        and once ESPN's counter has it, not twice."""
+        nba = config.league("nba").model_copy(update={"policy": Policy(max_transactions_per_week=4)})
+        config = config.model_copy(update={"leagues": (config.league("nfl"), nba)})
+        league = seed_league(store, nba)
+        real = seed_settings(store, league, "real/fba/mSettings.json")
+        assert league.row_id is not None
+        assert acquisitions_this_week(store, league, real, scoring_period_id=9, now=NOW) == 0  # never synced: fm's own
+        read_at = NOW - timedelta(hours=1)
+        store.teams.upsert(
+            TeamRow(
+                league_id=league.row_id,
+                team_id=league.team_id,
+                name="Ours",
+                as_of=read_at,
+                matchup_acquisitions={"1": 2, "2": 3},
+            )
+        )
+        assert acquisitions_this_week(store, league, real, scoring_period_id=9, now=NOW) == 3  # days 7-13: matchup 2
+        assert acquisitions_this_week(store, league, real, scoring_period_id=3, now=NOW) == 2  # matchup 1
+        assert acquisitions_this_week(store, league, real, scoring_period_id=14, now=NOW) == 0  # nothing yet
+        row = add_drop(store, config, league, 1, period=9)
+        assert acquisitions_this_week(store, league, real, scoring_period_id=9, now=NOW) == 4  # open: on top
+        with pytest.raises(PolicyError, match="4 of 4 transactions already used this week"):
+            add_drop(store, config, league, 2, period=10)
+        store.proposals.update(
+            row.model_copy(update={"status": "verified", "token_consumed_at": read_at - timedelta(minutes=5)})
+        )
+        assert acquisitions_this_week(store, league, real, scoring_period_id=9, now=NOW) == 3  # ESPN has it already
+        store.proposals.update(row.model_copy(update={"status": "verified", "token_consumed_at": NOW}))
+        assert acquisitions_this_week(store, league, real, scoring_period_id=9, now=NOW) == 4  # executed since the read
 
     def test_a_season_without_a_calendar_counts_the_trailing_seven_days(self, store: Store, config: Config) -> None:
         nba = config.league("nba").model_copy(update={"policy": Policy(max_transactions_per_week=4)})
