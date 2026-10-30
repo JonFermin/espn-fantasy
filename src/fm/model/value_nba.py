@@ -334,13 +334,15 @@ def season_per_game(evidence: Evidence) -> dict[str, float] | None:
 
 
 def shrink_per_game(line: Mapping[str, float], evidence: Evidence, params: InSeasonParams) -> dict[str, float] | None:
-    """A blended per-game line mixed toward the season's per-game actuals (:func:`fm.model.in_season.shrink_line`
-    with ``n`` = games played), its percentages recomputed from the mixed makes and attempts as the blend's are.
-    ``None`` when there is nothing to mix (no season line or no game played), so the caller keeps the line as it is."""
-    actual = season_per_game(evidence)
+    """A blended per-game line mixed toward the season's per-game actuals, his recent games weighted up
+    (:meth:`fm.model.in_season.Evidence.form`; :func:`fm.model.in_season.shrink_line` with ``n`` = those games), its
+    percentages recomputed from the mixed makes and attempts as the blend's are. ``None`` when there is nothing to mix
+    (no season line or no game played), so the caller keeps the line as it is."""
+    totals, games = evidence.form(params, rates=RECOMPUTED_RATIOS[Game.FBA])
+    actual = per_game_line(totals) if totals is not None else None
     if actual is None:
         return None
-    mixed = shrink_line(line, actual, evidence.games, params)
+    mixed = shrink_line(line, actual, games, params)
     ratios = tuple(stat for stat in RECOMPUTED_RATIOS[Game.FBA] if stat in mixed)
     if ratios:
         parts = {stat: value for stat, value in mixed.items() if stat not in ratios}

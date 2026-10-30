@@ -485,9 +485,9 @@ def test_blend_day_runs_on_espn_alone_when_darko_is_down(store: Store, tmp_path:
 
 
 def test_blend_day_mixes_each_line_toward_the_seasons_actuals(store: Store, tmp_path: Path) -> None:
-    """Cade has played 8 games at 10 points, 2 rebounds and 3-of-6 shooting a night: with line_k 8 the season weighs
-    half, so the blend sits halfway between ESPN's per-game rate and his actual rate, stat by stat, and the percentage
-    is recomputed from the mixed makes and attempts. Everyone else keeps the raw blend."""
+    """Cade has played 8 games at 10 points, 2 rebounds and 3-of-6 shooting a night: with line_k 4 the season weighs
+    8/12 = 2/3 (no game log is stored, so there is no recent form on top), stat by stat, and the percentage is
+    recomputed from the mixed makes and attempts. Everyone else keeps the raw blend."""
     seed(store)
     actual = {"GP": 8.0, "PTS": 80.0, "REB": 16.0, "MIN": 160.0, "FGM": 24.0, "FGA": 48.0}
     store.projections.upsert(
@@ -507,10 +507,10 @@ def test_blend_day_mixes_each_line_toward_the_seasons_actuals(store: Store, tmp_
     result = blend_day(store, SEASON, 2, weights=weights, sources=registry)
     espn = espn_per_game()[CADE]
     mixed = by_id(result.rows)[CADE].stats
-    assert mixed["PTS"] == pytest.approx((espn["PTS"] + 10.0) / 2)
-    assert mixed["REB"] == pytest.approx((espn["REB"] + 2.0) / 2)
-    assert mixed["FGM"] == pytest.approx((espn["FGM"] + 3.0) / 2) and mixed["FGA"] == pytest.approx(
-        (espn["FGA"] + 6.0) / 2
+    assert mixed["PTS"] == pytest.approx((espn["PTS"] + 2 * 10.0) / 3)
+    assert mixed["REB"] == pytest.approx((espn["REB"] + 2 * 2.0) / 3)
+    assert mixed["FGM"] == pytest.approx((espn["FGM"] + 2 * 3.0) / 3) and mixed["FGA"] == pytest.approx(
+        (espn["FGA"] + 2 * 6.0) / 3
     )
     assert mixed["FG%"] == pytest.approx(mixed["FGM"] / mixed["FGA"]) and mixed["GP"] == 1.0
     assert mixed["AST"] == espn["AST"]  # not in the actual line: the projection stands

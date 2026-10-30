@@ -341,12 +341,19 @@ def _rate(
     return _Rate(mixed, projected.projected, projected.games, projected.health, BASIS_IN_SEASON)
 
 
-def _actual_rate(evidence: Evidence | None, scorer: Scorer, position: str | None) -> tuple[float | None, float]:
-    """(season-to-date points per game, games played) from the player's stored actual season line; ``(None, 0)``
-    without a line or a game."""
+def _actual_rate(
+    evidence: Evidence | None, scorer: Scorer, position: str | None, params: InSeasonParams | None = None
+) -> tuple[float | None, float]:
+    """(actual points per game, games) from the player's stored actual season line, with his recent games weighted
+    up under ``params`` (:meth:`fm.model.in_season.Evidence.form`); ``(None, 0)`` without a line or a game."""
     if evidence is None or evidence.season_line is None or evidence.games <= 0:
         return None, 0.0
-    return scorer.points(evidence.season_line, position=position) / evidence.games, evidence.games
+    if params is None:
+        return scorer.points(evidence.season_line, position=position) / evidence.games, evidence.games
+    totals, games = evidence.form(params)
+    if totals is None or games <= 0:
+        return None, 0.0
+    return scorer.points(totals, position=position) / games, games
 
 
 def _outlook(
@@ -369,7 +376,7 @@ def _outlook(
     this_week = scorer.points(current_line, position=position) if current_line is not None else None
     remaining = games.remaining(team, horizon) if team is not None else 0
     tuning = params if params is not None else IN_SEASON_DEFAULTS[player.sport]
-    actual_per_game, actual_games = _actual_rate(evidence, scorer, position)
+    actual_per_game, actual_games = _actual_rate(evidence, scorer, position, tuning)
     rate = _rate(
         season_line,
         this_week,

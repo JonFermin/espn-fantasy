@@ -83,8 +83,10 @@ def store(tmp_path: Path) -> Iterator[Store]:
 def test_the_committed_file_states_the_defaults() -> None:
     loaded = load_params()
     assert dict(loaded) == dict(DEFAULT_PARAMS)
-    assert loaded["nba"] == InSeasonParams(line_k=8.0, role_k=2.0, role_window=10, min_benched=2)
-    assert loaded["nfl"] == InSeasonParams(line_k=4.0, role_k=1.5, role_window=6, min_benched=2)
+    assert loaded["nba"] == InSeasonParams(
+        line_k=4.0, role_k=2.0, role_window=10, min_benched=2, recent_periods=15, recent_weight=1.0
+    )
+    assert loaded["nfl"] == InSeasonParams(line_k=4.0, role_k=1.5, role_window=6, min_benched=2, recent_periods=3)
 
 
 def test_parse_params_overrides_one_sport_and_keeps_the_rest(tmp_path: Path) -> None:
@@ -216,14 +218,33 @@ def test_the_season_line_and_its_games() -> None:
 # --- the production mix -----------------------------------------------------------------------------------------------
 
 
+def test_recent_form_counts_the_last_periods_games_again() -> None:
+    """Ten games at 10 a game, the last three (inside the 15-day window) at 22: with recent_weight 1 those three count
+    twice, so the actual side is (100 + 66) / 13 a game, above the season's 13.6. Rates are never summed."""
+    log = {period: {"PTS": 10.0, "MIN": 30.0, "FG%": 0.5} for period in range(1, 8)}
+    log.update({period: {"PTS": 22.0, "MIN": 34.0, "FG%": 0.6} for period in (25, 27, 29)})
+    season = {"PTS": 136.0, "MIN": 312.0, "FG%": 0.53, "GP": 10.0}
+    evidence = Evidence(7, season_line=season, games=10.0, lines=log, current_period=30)
+    recent, count = evidence.recent_line(15)
+    assert count == 3 and recent == pytest.approx({"PTS": 66.0, "MIN": 102.0, "FG%": 1.8})
+    totals, games = evidence.form(NBA, rates=("FG%",))
+    assert games == 13.0 and totals is not None
+    assert totals["PTS"] == pytest.approx(136.0 + 66.0) and totals["GP"] == 13.0 and totals["FG%"] == 0.53
+    off = InSeasonParams(line_k=4.0, role_k=2.0, role_window=10, min_benched=2, recent_weight=0.0)
+    assert evidence.form(off) == ({**season, "GP": 10.0}, 10.0)  # weight 0: the season line alone
+    assert Evidence(7).form(NBA) == (None, 0.0)
+    with pytest.raises(InSeasonError, match="recent_weight"):
+        InSeasonParams(line_k=4.0, role_k=2.0, role_window=10, min_benched=2, recent_weight=-1.0)
+
+
 def test_the_mix_weighs_the_actuals_by_games_over_games_plus_line_k() -> None:
-    assert weight(0, NBA) == 0.0 and weight(8, NBA) == pytest.approx(0.5) and weight(24, NBA) == pytest.approx(0.75)
+    assert weight(0, NBA) == 0.0 and weight(4, NBA) == pytest.approx(0.5) and weight(12, NBA) == pytest.approx(0.75)
     assert shrink(10.0, 20.0, 0, NBA) == 10.0
-    assert shrink(10.0, 20.0, 8, NBA) == pytest.approx(15.0)
+    assert shrink(10.0, 20.0, 4, NBA) == pytest.approx(15.0)
     assert shrink(10.0, 20.0, 8_000_000, NBA) == pytest.approx(20.0, abs=1e-4)  # a season of games is the season
     projected_line = {"PTS": 10.0, "REB": 4.0, "FGM": 4.0, "GP": 1.0}
     actual_line = {"PTS": 20.0, "FGM": 8.0, "GP": 8.0}
-    mixed = shrink_line(projected_line, actual_line, 8, NBA)
+    mixed = shrink_line(projected_line, actual_line, 4, NBA)
     assert mixed == {"PTS": 15.0, "REB": 4.0, "FGM": 6.0, "GP": 1.0}  # REB keeps the projection, GP too
     assert shrink_line(projected_line, actual_line, 0, NBA) == projected_line
     assert shrink_line(projected_line, actual_line, 0, NBA) is not projected_line

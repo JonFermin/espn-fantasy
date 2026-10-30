@@ -25,6 +25,12 @@ toward 1 (the projections' own assumption that he plays) with ``role_k`` pseudo-
 with the projection per game, stat by stat: ``(line_k * projected + GP * actual) / (line_k + GP)``. The season's own
 numbers overtake the projection once he has played ``line_k`` games.
 
+**Recent form** (:meth:`Evidence.form`, added 2026-10-29): the games he played in the last ``recent_periods`` periods
+before the current one (NBA: 15 days) count ``recent_weight`` times more on top of the season line they are already
+part of. The "actual" side of the mix is then ``(season totals + recent_weight * recent totals)`` over
+``GP + recent_weight * R`` games, so a hot or cold stretch moves the line further and sooner. ``recent_weight`` 0 is
+the season line alone. Rate stats (percentages) are not summed; they keep the season's.
+
 The constants are per sport in ``data/in_season.toml`` (:class:`InSeasonParams`), starting points for a backtest to
 tune.
 """
@@ -34,7 +40,7 @@ from __future__ import annotations
 import math
 import tomllib
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
@@ -67,13 +73,18 @@ class InSeasonParams:
     role_k: float
     role_window: int
     min_benched: int
+    recent_periods: int = 15
+    recent_weight: float = 0.0
 
     def __post_init__(self) -> None:
+        weight = self.recent_weight
+        if isinstance(weight, bool) or not isinstance(weight, int | float) or not math.isfinite(weight) or weight < 0:
+            raise InSeasonError(f"recent_weight should be a finite number >= 0, got {weight!r}")
         for name in ("line_k", "role_k"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise InSeasonError(f"{name} should be a finite number > 0, got {value!r}")
-        for name in ("role_window", "min_benched"):
+        for name in ("role_window", "min_benched", "recent_periods"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise InSeasonError(f"{name} should be an integer >= 1, got {value!r}")
@@ -81,8 +92,10 @@ class InSeasonParams:
 
 DEFAULT_PARAMS: Final[Mapping[Sport, InSeasonParams]] = MappingProxyType(
     {
-        "nba": InSeasonParams(line_k=8.0, role_k=2.0, role_window=10, min_benched=2),
-        "nfl": InSeasonParams(line_k=4.0, role_k=1.5, role_window=6, min_benched=2),
+        "nba": InSeasonParams(
+            line_k=4.0, role_k=2.0, role_window=10, min_benched=2, recent_periods=15, recent_weight=1.0
+        ),
+        "nfl": InSeasonParams(line_k=4.0, role_k=1.5, role_window=6, min_benched=2, recent_periods=3),
     }
 )
 """What a sport missing from the file gets; the committed file states the same numbers."""
@@ -137,6 +150,44 @@ class Evidence:
     log: tuple[tuple[int, bool, bool], ...] = ()
     season_line: Mapping[str, float] | None = None
     games: float = 0.0
+    lines: Mapping[int, Mapping[str, float]] = field(default_factory=lambda: MappingProxyType({}), compare=False)
+    """The game log's actual lines by period (before the current one), for :meth:`form`."""
+    current_period: int | None = field(default=None, compare=False)
+
+    def recent_line(self, periods: int) -> tuple[dict[str, float], int]:
+        """(summed stats, games played) over his games in the ``periods`` periods before the current one."""
+        if self.current_period is None:
+            return {}, 0
+        since = self.current_period - periods
+        total: dict[str, float] = {}
+        games = 0
+        for period, line in self.lines.items():
+            if period < since or not played_in(line):
+                continue
+            games += 1
+            for stat, value in line.items():
+                if stat != GAMES_STAT:
+                    total[stat] = total.get(stat, 0.0) + float(value)
+        return total, games
+
+    def form(self, params: InSeasonParams, *, rates: Iterable[str] = ()) -> tuple[dict[str, float] | None, float]:
+        """The "actual" side of the production mix (module docs, recent form): ``(totals, games)`` with the last
+        ``recent_periods`` periods' games counted ``recent_weight`` extra times, ``GP`` set to ``games``; ``(None, 0)``
+        without a season line or a game. ``rates`` are stats kept at the season's value, never summed."""
+        if self.season_line is None or self.games <= 0:
+            return None, 0.0
+        totals = {stat: float(value) for stat, value in self.season_line.items()}
+        games = self.games
+        if params.recent_weight > 0:
+            recent, count = self.recent_line(params.recent_periods)
+            if count > 0:
+                kept = frozenset(rates)
+                for stat, value in recent.items():
+                    if stat not in kept and stat in totals:
+                        totals[stat] += params.recent_weight * value
+                games += params.recent_weight * count
+        totals[GAMES_STAT] = games
+        return totals, games
 
     @property
     def team_games(self) -> int:
@@ -236,7 +287,14 @@ def evidence_from(
     games = float(season_line.get(GAMES_STAT, 0.0)) if season_line else 0.0
     if season_line is not None and games <= 0:
         games = float(sum(1 for _, played, _ in log if played))
-    return Evidence(espn_id, tuple(log), MappingProxyType(dict(season_line)) if season_line else None, games)
+    return Evidence(
+        espn_id,
+        tuple(log),
+        MappingProxyType(dict(season_line)) if season_line else None,
+        games,
+        lines=MappingProxyType({period: MappingProxyType(dict(line)) for period, line in log_lines.items()}),
+        current_period=current_period,
+    )
 
 
 def load_evidence(

@@ -5,17 +5,24 @@
 # role_k       pseudo-games of "he plays" in the role factor (played + role_k) / (healthy + role_k), over his last
 #              role_window healthy team games. A game missed injured never counts; no evidence is a factor of 1.
 # min_benched  healthy games in a row without playing after which streaming and waivers refuse to add a player.
+# recent_periods, recent_weight
+#              recent form: the games played in the last recent_periods periods (NBA days, NFL weeks) count
+#              recent_weight extra times in the actual side of the mix; 0 is the season line alone.
 #
 # Starting points, not fitted: a backtest (fm.eval.tune) should replace them.
 
 [nba]
-line_k = 8.0
+line_k = 4.0          # 8.0 until 2026-10-29: the user asked for more weight on the 2027 averages
 role_k = 2.0
 role_window = 10
 min_benched = 2
+recent_periods = 15   # the last 15 days
+recent_weight = 1.0   # a game in them counts twice
 
 [nfl]
 line_k = 4.0
 role_k = 1.5
 role_window = 6
 min_benched = 2
+recent_periods = 3
+recent_weight = 0.0
