@@ -441,6 +441,18 @@ class StreamingProposals:
         return self.decision.warnings
 
 
+def _stuck(store: Store, league: LeagueRow, settings: LeagueSettings | None) -> str | None:
+    """Why no add can be proposed while a player of ours sits on IR without an IR-eligible status (ESPN blocks the
+    team's adds until he is moved: :mod:`fm.decide.ir_activation`), or ``None``."""
+    from fm.decide.ir_activation import stuck_on_ir, stuck_warning  # fm.decide.trades imports this module
+
+    synced = settings if settings is not None else stored_settings(store, league)
+    if synced is None:
+        return None
+    stuck = stuck_on_ir(store, league, synced)
+    return stuck_warning(league, stuck) if stuck else None
+
+
 def acquisition_budget(
     store: Store,
     league: LeagueRow,
@@ -975,7 +987,10 @@ def propose_streaming(
     )
     stored: list[ProposalRow] = []
     blocked: list[str] = []
-    for draft in decision.drafts:
+    stuck = _stuck(store, league, settings)
+    if stuck is not None and decision.drafts:
+        blocked.append(stuck)
+    for draft in () if stuck is not None else decision.drafts:
         try:
             stored.append(
                 propose(

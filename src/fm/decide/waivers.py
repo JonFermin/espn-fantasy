@@ -1156,7 +1156,12 @@ def decide_waivers(
 
     proposals: list[ProposalRow] = []
     blocked: list[tuple[WaiverMove, str]] = []
-    if store_proposals:
+    from fm.decide.ir_activation import stuck_on_ir, stuck_warning  # fm.decide.trades imports this module
+
+    stuck = stuck_on_ir(store, row, settings) if store_proposals else ()
+    if stuck:  # ESPN blocks our adds and claims until the player is moved off IR
+        blocked.extend((move, stuck_warning(row, stuck)) for move in moves)
+    if store_proposals and not stuck:
         for move in moves:
             try:
                 stored = propose(

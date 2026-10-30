@@ -87,6 +87,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+import fm.decide.ir_activation  # noqa: F401  (registers moving a player off IR once he may not sit there, both sports)
 import fm.decide.lineup  # noqa: F401  (registers the NFL lineup decision)
 import fm.decide.lineup_daily  # noqa: F401  (registers the NBA daily lineup decision)
 import fm.decide.offers  # noqa: F401  (registers the incoming trade offer decision, both sports)

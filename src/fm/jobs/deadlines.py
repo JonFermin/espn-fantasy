@@ -86,9 +86,10 @@ class WindowKind(StrEnum):
     WEEKLY = "weekly"
 
 
-LINEUP_DECISIONS: Final = frozenset({"lineup", "lineup_daily"})
-"""Decision kinds a lineup-lock window runs (:mod:`fm.decide.registry` kinds)."""
-ACQUISITION_DECISIONS: Final = frozenset({"waivers", "streaming", "offers"})
+LINEUP_DECISIONS: Final = frozenset({"lineup", "lineup_daily", "ir_activation"})
+"""Decision kinds a lineup-lock window runs (:mod:`fm.decide.registry` kinds). ``ir_activation`` runs here too, and in
+the roster-lock window: a status that changes during the day can strand a player on IR, which blocks the team's adds."""
+ACQUISITION_DECISIONS: Final = frozenset({"waivers", "streaming", "offers", "ir_activation"})
 """Decision kinds a roster-lock window runs (incoming trade offers expire in 48 h, so they are answered here too)."""
 WAIVER_DECISIONS: Final = frozenset({"waivers"})
 WINDOW_DECISIONS: Mapping[WindowKind, frozenset[str] | None] = MappingProxyType(

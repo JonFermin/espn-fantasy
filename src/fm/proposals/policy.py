@@ -330,7 +330,7 @@ def evaluate(
         if spec.may_lose_players and payload.outgoing_players:
             for espn_id, name in find_untouchables(store, league.sport, policy, payload.outgoing_players).items():
                 reasons.append(f"{name} ({espn_id}) is untouchable")
-        if spec.acquisition:
+        if spec.acquisition and getattr(payload, "add_espn_id", None) is not None:
             used = acquisitions_this_week(store, league, settings, scoring_period_id=scoring_period_id, now=at)
             cap = policy.max_transactions_per_week
             if used >= cap:
@@ -450,7 +450,7 @@ def acquisitions_this_week(
         league_id=league.row_id, statuses=COUNTED_STATUSES, kinds=[kind.value for kind in ACQUISITION_KINDS]
     )
     in_week = week_filter(settings, scoring_period_id, now)
-    held = [row for row in rows if in_week(row)]
+    held = [row for row in rows if in_week(row) and _adds_a_player(row)]
     espn = espn_matchup_acquisitions(store, league, settings, scoring_period_id)
     if espn is None:
         return len(held)
@@ -472,6 +472,12 @@ def espn_matchup_acquisitions(
     if matchup is None:
         return None
     return int(team.matchup_acquisitions.get(str(matchup), 0)), as_utc(team.as_of)
+
+
+def _adds_a_player(row: ProposalRow) -> bool:
+    """Whether the row brings a player in: a bare drop (``add_drop`` with no add) uses no acquisition, on ESPN
+    either."""
+    return row.payload.get("add_espn_id") is not None
 
 
 def _after_counter(row: ProposalRow, read_at: datetime) -> bool:

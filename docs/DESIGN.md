@@ -464,6 +464,23 @@ per period, run by the tick (§13.4). It covers the matchup outlook, the playoff
 stash candidates), and trade targets, which become approve-only proposals. `fm report` writes the same report on
 demand.
 
+### 9.6 IR activation (added 2026-10-29)
+
+ESPN lets a player sit in an IR slot only while he is OUT, on injury reserve or suspended. Once he is listed
+day-to-day or active, ESPN blocks the team's adds and trades until he leaves the slot. The lineup planners keep IR
+players where they are, so `fm.decide.ir_activation` (both sports; the period opening and every lineup- and
+roster-lock window) proposes the fix, one ESPN write per proposal:
+
+- **Room on the roster:** a `lineup` proposal moving him from IR to the bench (`set_lineup` serves it).
+- **A full roster:** a drop-only `add_drop` of the player we miss least: the smallest rest-of-season value lost with
+  him back (`RosterValuer.gain`), ties broken by the lower own value. Untouchables, IR players, players in open
+  proposals, locked players, players with no projection, and players whose drop closed at the roster lock are never
+  chosen. The move off IR is proposed on a later run, once the drop has gone through.
+- Both are **approval-only** (`max_setting = "approve"`), whatever the league's lineup setting is.
+- A status missing from the store (`UNKNOWN`) never counts as stuck: a data gap is no reason to drop anyone.
+- While a player is stuck, NFL waivers and NBA streaming store no add (ESPN would refuse it) and report why. A bare
+  drop uses no acquisition, so it is not counted toward the weekly cap.
+
 ## 10. Advisor (Claude)
 
 Claude runs as narrow workers. Each is one Messages API call, or a short tool loop, with structured output and
