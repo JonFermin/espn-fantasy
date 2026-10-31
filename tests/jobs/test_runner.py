@@ -564,13 +564,21 @@ def test_an_unknown_button_is_ignored(world: World) -> None:
 
 
 def test_poll_errors_back_off_doubling_and_are_alerted_once(world: World) -> None:
-    world.channel.errors = [NotifyError("502"), NotifyError("502"), NotifyError("502"), RuntimeError("socket")]
+    """Ten failures in a row span 2+4+8+16+32+60+60+60+60 = 302 s: past POLL_ALERT_AFTER (5 min), so one alert."""
+    world.channel.errors = [*(NotifyError("502") for _ in range(9)), RuntimeError("socket")]
     stats = world.run(max_ticks=2)
-    assert stats.poll_failures == 4 and stats.ticks == 2
+    assert stats.poll_failures == 10 and stats.ticks == 2
     assert world.channel.titles() == ["fm run: phone channel failing"]
     times = [at for at, _ in world.channel.polls]
     backoffs = [(later - earlier).total_seconds() for earlier, later in zip(times, times[1:], strict=False)]
     assert backoffs[:4] == [2.0, 4.0, 8.0, 16.0]
+
+
+def test_a_telegram_outage_under_five_minutes_is_only_logged(world: World) -> None:
+    """2026-10-30: two HTTP 502s and a read timeout, then Telegram was back. Three failures in 46 s, no alert."""
+    world.channel.errors = [NotifyError("HTTP 502"), NotifyError("HTTP 502"), NotifyError("ReadTimeout")]
+    stats = world.run(max_ticks=2)
+    assert stats.poll_failures == 3 and world.channel.titles() == []
 
 
 def test_a_poll_error_that_recovers_on_the_retry_is_only_logged(world: World) -> None:

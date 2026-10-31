@@ -28,9 +28,9 @@
   so ``stop`` and Ctrl+C are answered quickly.
 - **Errors never end the loop.** A tick, a poll, a press or a config load that raises is logged with its traceback
   and alerted at most once per :attr:`RunOptions.alert_every` per kind (``tick``, ``timeout``, ``config``, ``poll``,
-  ``approval``, ``stuck``; ``poll`` only after :data:`POLL_ALERT_AFTER` failures in a row). An alert counts as sent
-  only once the channel took it: one that could not be pushed (no channel, a channel error) is logged and the next
-  occurrence tries again. Channel errors back off like
+  ``approval``, ``stuck``; ``poll`` only once polls have kept failing for :data:`POLL_ALERT_AFTER`). An alert counts
+  as sent only once the channel took it: one that could not be pushed (no channel, a channel error) is logged and the
+  next occurrence tries again. Channel errors back off like
   :func:`fm.notify.listen` (2 s doubling to 60 s). Only ``KeyboardInterrupt``, ``SystemExit`` and ``MemoryError`` get
   out, and the first is a clean stop (a tick child that is running then is stopped with its tree).
 - **The run lock.** It is held for the whole run and released on the way out, whatever happened. At start the loop
@@ -98,9 +98,10 @@ TICK_CRASHED_EXIT = 70
 """The tick child's exit code when ``fm tick`` raised (``EX_SOFTWARE``), told apart from exit 1, a tick that ran and
 reported a failure it has already alerted."""
 STUCK_TICK_GRACE = timedelta(minutes=2)
-POLL_ALERT_AFTER = 3
-"""Poll failures in a row before the phone is told the channel is failing. A single dropped connection (Telegram
-resets idle long-polls now and then: ``WinError 10054``) recovers on the 2 s retry and is only logged."""
+POLL_ALERT_AFTER = timedelta(minutes=5)
+"""How long polls must keep failing, with no poll working in between, before the phone is told the channel is failing.
+Telegram drops idle long-polls now and then (``WinError 10054``) and has outages of a minute or less (``HTTP 502``,
+read timeouts, 2026-10-30): presses wait on its server meanwhile, so those are only logged."""
 """A ``fm tick`` holding the run lock longer than the tick timeout plus this is stuck, and ``fm run`` stops it."""
 _CRITICAL = (KeyboardInterrupt, SystemExit, MemoryError)
 
@@ -407,8 +408,8 @@ class _Loop:
         self.channel_key: tuple[object, object] | None = None
         self.channel_problem: str | None = None
         self.alerted: dict[str, datetime] = {}
-        self.poll_streak = 0
-        """Poll failures since the last poll that worked."""
+        self.poll_failing_since: datetime | None = None
+        """When the first poll failure since the last poll that worked happened."""
         self.expedited_ids: set[int] = set()
         """Proposals that already brought a tick forward: each does so once, whether it came from a press here or
         from the store (the dashboard, ``fm proposals approve``)."""
@@ -457,7 +458,7 @@ class _Loop:
                     backoff = min(backoff * 2, MAX_BACKOFF_S)
                     continue
                 backoff = FIRST_BACKOFF_S
-                self.poll_streak = 0
+                self.poll_failing_since = None
                 for reply in replies:
                     self._handle(reply)
                 gap = self.options.poll_gap_s if wait else self.options.idle_poll_s
@@ -676,12 +677,17 @@ class _Loop:
 
     def _poll_failed(self, detail: str, backoff: float) -> None:
         self.stats.poll_failures += 1
-        self.poll_streak += 1
+        now = self.clock()
+        if self.poll_failing_since is None:
+            self.poll_failing_since = now
         self.log.warning("fm run: poll failed: %s; retrying in %.0fs", detail, backoff)
-        if self.poll_streak < POLL_ALERT_AFTER:
+        if now - self.poll_failing_since < POLL_ALERT_AFTER:
             return
         self._alert(
-            "poll", "fm run: phone channel failing", f"{detail}\nRetrying with backoff; presses wait on the server."
+            "poll",
+            "fm run: phone channel failing",
+            f"{detail}\nFailing for {_span(now - self.poll_failing_since)}. Retrying with backoff; presses wait on the "
+            "server.",
         )
 
     def _alert(self, kind: str, title: str, body: str) -> None:
